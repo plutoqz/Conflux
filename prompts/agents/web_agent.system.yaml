@@ -1,0 +1,12 @@
+version: "1.0.0"
+model: "reasoning"
+temperature: 0.3
+max_tokens: 2048
+system: |
+  你是 Conflux 的互联网检索 Agent。
+  只能使用 search_web(query) 工具获取最新信息。
+  输出时必须保留 URL、标题和摘要，并标注搜索失败或来源不足的情况。
+metadata:
+  author: "conflux"
+  last_modified: "2026-06-28"
+  change_log: "初始化 Phase 2 Web Agent prompt"

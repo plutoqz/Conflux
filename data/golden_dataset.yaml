@@ -1,0 +1,241 @@
+# Conflux Golden Dataset — Phase 1 (30 curated Q&A pairs)
+# 格式：每条包含 query、expected_sources（期望引用的源）、min_confidence（最低置信度）
+
+- id: gd_001
+  query: "量子计算对RSA加密有什么威胁？"
+  expected_sources: [RAG, Model]
+  min_confidence: high
+  key_facts:
+    - "Shor算法可在多项式时间内分解大整数"
+    - "RSA-2048需要约4000个逻辑量子比特破解"
+
+- id: gd_002
+  query: "什么是后量子密码学？"
+  expected_sources: [RAG, Web, Model]
+  min_confidence: high
+  key_facts:
+    - "NIST 2024年发布了PQC标准"
+    - "ML-KEM是基于格的密钥封装机制"
+
+- id: gd_003
+  query: "AES-256在量子计算面前安全吗？"
+  expected_sources: [RAG, Model]
+  min_confidence: high
+  key_facts:
+    - "Grover算法将安全强度从256位降到128位"
+    - "通过加倍密钥长度可有效抵御"
+
+- id: gd_004
+  query: "欧盟AI法案的核心内容是什么？"
+  expected_sources: [RAG]
+  min_confidence: medium
+  key_facts:
+    - "风险分级：不可接受/高/有限/最小四类"
+    - "违规罚款可达全球营业额7%"
+
+- id: gd_005
+  query: "中国和欧盟的AI监管有什么不同？"
+  expected_sources: [RAG, Web]
+  min_confidence: medium
+  key_facts:
+    - "中国采用分领域分阶段立法"
+    - "欧盟AI Act是综合性法案"
+
+- id: gd_006
+  query: "量子密钥分发(QKD)的原理是什么？"
+  expected_sources: [RAG, Model]
+  min_confidence: high
+  key_facts:
+    - "基于量子力学不可克隆定理"
+    - "中国已建成北京-上海量子通信干线"
+
+- id: gd_007
+  query: "美国目前有联邦层面的AI综合法案吗？"
+  expected_sources: [Web]
+  min_confidence: low
+  key_facts:
+    - "以行政令为主，未通过联邦综合AI法案"
+
+- id: gd_008
+  query: "NIST的PQC标准包含哪些算法？"
+  expected_sources: [RAG, Web, Model]
+  min_confidence: high
+  key_facts:
+    - "ML-KEM (FIPS 203)"
+    - "ML-DSA (FIPS 204)"
+    - "SLH-DSA (FIPS 205)"
+
+- id: gd_009
+  query: "什么是Harvest-Now-Decrypt-Later攻击？"
+  expected_sources: [Model, Web]
+  min_confidence: medium
+  key_facts:
+    - "攻击者现在收集加密数据等待量子计算机破解"
+
+- id: gd_010
+  query: "生成式AI在中国需要遵守什么法规？"
+  expected_sources: [RAG, Web]
+  min_confidence: medium
+  key_facts:
+    - "《生成式人工智能服务管理暂行办法》2024年生效"
+    - "要求尊重知识产权、防止歧视"
+
+- id: gd_011
+  query: "欧盟AI法案如何定义高风险AI系统？"
+  expected_sources: [RAG, Web]
+  min_confidence: medium
+  key_facts:
+    - "高风险系统包括就业、教育、执法、关键基础设施等场景"
+    - "高风险系统需要符合风险管理、数据治理、透明度等义务"
+
+- id: gd_012
+  query: "后量子密码迁移为什么需要提前规划？"
+  expected_sources: [RAG, Web, Model]
+  min_confidence: high
+  key_facts:
+    - "Harvest-Now-Decrypt-Later 会影响长期保密数据"
+    - "密码系统迁移周期长，涉及协议、硬件和合规"
+
+- id: gd_013
+  query: "ECC为什么会受到量子计算威胁？"
+  expected_sources: [RAG, Model]
+  min_confidence: high
+  key_facts:
+    - "Shor算法可求解离散对数问题"
+    - "椭圆曲线密码依赖离散对数难题"
+
+- id: gd_014
+  query: "格密码为什么被用于后量子密码？"
+  expected_sources: [RAG, Model]
+  min_confidence: high
+  key_facts:
+    - "格问题被认为可抵抗已知量子攻击"
+    - "ML-KEM和ML-DSA均基于格相关构造"
+
+- id: gd_015
+  query: "NIST FIPS 203是什么？"
+  expected_sources: [Web, Model]
+  min_confidence: high
+  key_facts:
+    - "FIPS 203 标准化 ML-KEM"
+    - "ML-KEM用于密钥封装"
+
+- id: gd_016
+  query: "NIST FIPS 204是什么？"
+  expected_sources: [Web, Model]
+  min_confidence: high
+  key_facts:
+    - "FIPS 204 标准化 ML-DSA"
+    - "ML-DSA用于数字签名"
+
+- id: gd_017
+  query: "NIST FIPS 205是什么？"
+  expected_sources: [Web, Model]
+  min_confidence: high
+  key_facts:
+    - "FIPS 205 标准化 SLH-DSA"
+    - "SLH-DSA是无状态哈希签名方案"
+
+- id: gd_018
+  query: "对称加密在量子计算下需要如何调整安全参数？"
+  expected_sources: [RAG, Model]
+  min_confidence: high
+  key_facts:
+    - "Grover算法提供平方级加速"
+    - "可通过增加密钥长度保持安全边际"
+
+- id: gd_019
+  query: "AI监管中的风险分级方法有什么优点？"
+  expected_sources: [RAG, Model]
+  min_confidence: medium
+  key_facts:
+    - "将监管强度与风险程度匹配"
+    - "避免对低风险应用施加过重合规负担"
+
+- id: gd_020
+  query: "欧盟AI法案对通用目的AI模型有哪些要求？"
+  expected_sources: [Web]
+  min_confidence: medium
+  key_facts:
+    - "要求透明度和技术文档"
+    - "系统性风险模型承担更高义务"
+
+- id: gd_021
+  query: "中国生成式AI监管为什么强调内容安全？"
+  expected_sources: [RAG, Web]
+  min_confidence: medium
+  key_facts:
+    - "生成式AI直接面向公众生成内容"
+    - "监管关注虚假信息、歧视和违法内容"
+
+- id: gd_022
+  query: "什么是模型世界知识，它在调研系统里有什么风险？"
+  expected_sources: [Model]
+  min_confidence: medium
+  key_facts:
+    - "模型世界知识来自模型训练数据和推理"
+    - "风险包括知识过时、幻觉和缺乏可追溯来源"
+
+- id: gd_023
+  query: "RAG结果和Web结果冲突时应该如何处理？"
+  expected_sources: [RAG, Web, Model]
+  min_confidence: medium
+  key_facts:
+    - "应比较来源权威性和时效性"
+    - "无法裁决时应标注 contested 或人工升级"
+
+- id: gd_024
+  query: "为什么调研报告需要不确定性说明？"
+  expected_sources: [Model]
+  min_confidence: medium
+  key_facts:
+    - "信息来源可能不完整或互相冲突"
+    - "不确定性说明有助于避免过度确定的结论"
+
+- id: gd_025
+  query: "FactCheck Agent在多智能体调研中的职责是什么？"
+  expected_sources: [Model]
+  min_confidence: medium
+  key_facts:
+    - "独立检查最终报告的关键声明"
+    - "标注无法由原始来源支持的内容"
+
+- id: gd_026
+  query: "什么是证据网络 Evidence Graph？"
+  expected_sources: [Model]
+  min_confidence: medium
+  key_facts:
+    - "证据网络把声明、来源和支持/反驳关系组织成图"
+    - "用于追踪结论来源和冲突"
+
+- id: gd_027
+  query: "多智能体并行检索相对单Agent有什么优势？"
+  expected_sources: [Model]
+  min_confidence: medium
+  key_facts:
+    - "可以隔离不同信息源的上下文"
+    - "可并行缩短检索和初步分析时间"
+
+- id: gd_028
+  query: "什么时候应该优先使用Web搜索而不是本地RAG？"
+  expected_sources: [Web, Model]
+  min_confidence: medium
+  key_facts:
+    - "涉及最新政策、新闻、价格或标准时应优先Web"
+    - "Web结果仍需权威性过滤和交叉验证"
+
+- id: gd_029
+  query: "什么时候应该优先使用本地RAG？"
+  expected_sources: [RAG, Model]
+  min_confidence: medium
+  key_facts:
+    - "领域内部文档、私有资料和已审计知识应优先RAG"
+    - "RAG可提供更可控和可追溯的来源"
+
+- id: gd_030
+  query: "三源知识系统中模型知识应该如何标注？"
+  expected_sources: [Model]
+  min_confidence: medium
+  key_facts:
+    - "必须明确标注为基于模型知识"
+    - "不能把模型推断当作检索证据"

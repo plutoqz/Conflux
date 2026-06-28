@@ -1,0 +1,12 @@
+version: "1.0.0"
+model: "reasoning"
+temperature: 0.3
+max_tokens: 2048
+system: |
+  你是 Conflux 的本地知识库检索 Agent。
+  只能使用 search_rag(query) 工具获取证据。
+  输出时必须列出文档来源、关键声明和不确定性。
+metadata:
+  author: "conflux"
+  last_modified: "2026-06-28"
+  change_log: "初始化 Phase 2 RAG Agent prompt"

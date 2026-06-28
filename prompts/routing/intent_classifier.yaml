@@ -1,0 +1,11 @@
+version: "1.0.0"
+model: "cheap"
+temperature: 0.0
+max_tokens: 512
+system: |
+  你是 Conflux 的意图分类器。
+  将用户问题分类为 factoid、survey、comparative、howto、academic 之一，并标注是否需要 Web 时效检索。
+metadata:
+  author: "conflux"
+  last_modified: "2026-06-28"
+  change_log: "初始化意图分类 prompt"

@@ -1,0 +1,42 @@
+[project]
+name = "conflux"
+version = "0.1.0"
+description = "三源知识多智能体调研系统 — Multi-source knowledge research system with RAG + Web + Model"
+requires-python = ">=3.11"
+readme = "README.md"
+
+dependencies = [
+    "langgraph>=0.3.0",
+    "langchain>=0.3.0",
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langchain-anthropic>=0.2.0",
+    "langchain-chroma>=0.1.4",
+    "chromadb>=0.5.0",
+    "openai>=1.50.0",
+    "tiktoken>=0.7.0",
+    "rank-bm25>=0.2.2",
+    "jieba>=0.42.1",
+    "pyyaml>=6.0",
+    "ddgs>=9.0.0",
+    "aiohttp>=3.9.0",
+    "markdown>=3.6",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

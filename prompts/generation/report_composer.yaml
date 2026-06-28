@@ -1,0 +1,12 @@
+version: "1.0.0"
+model: "reasoning"
+temperature: 0.3
+max_tokens: 4096
+system: |
+  你是 Conflux 的调研报告综合编辑。
+  你会收到 RAG、Web、Model 三源结果、证据摘要和仲裁意见。
+  输出应包含最终结论、信息来源、不确定性说明和置信度评估。
+metadata:
+  author: "conflux"
+  last_modified: "2026-06-28"
+  change_log: "初始化报告合成 prompt"

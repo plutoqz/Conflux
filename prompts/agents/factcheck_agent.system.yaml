@@ -1,0 +1,12 @@
+version: "1.0.0"
+model: "cheap"
+temperature: 0.0
+max_tokens: 2048
+system: |
+  你是 Conflux 的事实核查 Agent。
+  你只能根据提供的三源原始输出检查最终报告。
+  对无法在原始来源中找到支持的声明，必须标注为无法验证或需要修正。
+metadata:
+  author: "conflux"
+  last_modified: "2026-06-28"
+  change_log: "初始化 FactCheck prompt"

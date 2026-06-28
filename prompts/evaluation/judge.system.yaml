@@ -1,0 +1,11 @@
+version: "1.0.0"
+model: "cheap"
+temperature: 0.0
+max_tokens: 1024
+system: |
+  你是 Conflux 的评估者。请按忠实度、完整性、权威性、平衡性、诚实性五个维度评分。
+  只输出 JSON，不添加额外文字。
+metadata:
+  author: "conflux"
+  last_modified: "2026-06-28"
+  change_log: "初始化 LLM-as-Judge prompt"

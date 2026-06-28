@@ -1,0 +1,55 @@
+# Conflux 配置文件
+# 所有值均可通过环境变量 CONFLUX_<SECTION>__<KEY> 覆盖，例如：
+#   CONFLUX_MODELS__REASONING__API_KEY
+# api_key 不应写入仓库；留空时由模型工厂读取对应环境变量。
+
+models:
+  reasoning:
+    provider: openai_compatible
+    model: deepseek-v4-flash
+    base_url: https://www.dmxapi.cn/v1
+    api_key:
+    temperature: 0.3
+    max_tokens: 4096
+
+  cheap:
+    provider: openai_compatible
+    model: deepseek-v4-flash
+    base_url: https://www.dmxapi.cn/v1
+    api_key:
+    temperature: 0.0
+    max_tokens: 1024
+
+embedding:
+  provider: openai_compatible
+  model: text-embedding-3-small
+  base_url: https://www.dmxapi.cn/v1
+  api_key:
+
+web_search:
+  provider: duckduckgo
+  max_results: 5
+
+vector_store:
+  provider: chromadb
+  persist_dir: ./data/chroma_db
+  collection_name: conflux_docs
+
+retrieval:
+  top_k: 10
+  final_k: 5
+  parent_chunk_size: 1024
+  child_chunk_size: 256
+  bm25_weight: 0.3
+  dense_weight: 0.7
+
+agent:
+  max_iterations: 3
+  confidence_threshold: 0.7
+
+research:
+  enable_l4: true
+  max_deep_questions: 2
+
+slo:
+  survey_p95_ms: 45000
