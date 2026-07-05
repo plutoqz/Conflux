@@ -56,7 +56,8 @@ RAG 与 Model 支持核心结论。
 ## FactCheck 验证
 ### 确定性追溯检查
 - success 来源：RAG, Model
-- failed/fallback 来源：Web
+- low_relevance 来源：无
+- no_evidence/failed/fallback 来源：Web
 
 ## 证据摘要
 - 证据节点总数：2
@@ -130,4 +131,58 @@ def test_acceptance_rejects_failed_source_evidence_node(tmp_path):
     result = validate_report_pair(md, html)
 
     assert not result.passed
-    assert any("failed/fallback 来源出现在证据节点" in issue for issue in result.issues)
+    assert any("no_evidence/failed/fallback 来源出现在证据节点" in issue for issue in result.issues)
+
+
+def test_acceptance_allows_low_relevance_status_and_nodes(tmp_path):
+    from conflux.acceptance import validate_report_pair
+
+    evidence = {
+        "summary": {"total_nodes": 1, "source_counts": {"RAG": 1}},
+        "source_statuses": {
+            "RAG": {"status": "low_relevance"},
+            "Web": {"status": "no_evidence"},
+            "Model": {"status": "success"},
+        },
+        "nodes": [
+            {"id": "r1", "source": "RAG", "claim": "GIS 弱相关上下文。", "evidence_refs": ["[RAG:gis#chunk-001]"]},
+        ],
+    }
+    markdown = f"""# Conflux 调研报告
+
+## 最终报告
+### 最终结论
+信息来源、不确定性和证据都有说明。
+
+## 信息来源状态
+| 来源 | 状态 | 详情 | 错误/说明 |
+|---|---|---|---|
+| RAG | low_relevance | local | weak |
+| Web | no_evidence | web | unrelated |
+| Model | success | model | ok |
+
+## FactCheck 验证
+### 确定性追溯检查
+- success 来源：Model
+- low_relevance 来源：RAG
+- no_evidence/failed/fallback 来源：Web
+
+## 证据摘要
+- 证据节点总数：1
+
+## 附录 A：证据图 JSON
+```json
+{json.dumps(evidence, ensure_ascii=False)}
+```
+
+## 运行摘要
+- 模式：phase2
+
+## 质量评分
+- 是否达标：是
+"""
+    md, html = _write_pair(tmp_path, markdown)
+
+    result = validate_report_pair(md, html)
+
+    assert result.passed

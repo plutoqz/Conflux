@@ -21,7 +21,9 @@ REQUIRED_SECTIONS = [
 ]
 
 REQUIRED_FINAL_TERMS = ["最终结论", "信息来源", "不确定", "证据"]
-VALID_STATUSES = {"success", "failed", "fallback"}
+VALID_STATUSES = {"success", "low_relevance", "no_evidence", "failed", "fallback"}
+EVIDENCE_STATUSES = {"success", "low_relevance"}
+NON_EVIDENCE_STATUSES = {"no_evidence", "failed", "fallback"}
 
 
 @dataclass
@@ -83,7 +85,7 @@ def validate_report_pair(markdown_path: str | Path, html_path: str | Path) -> Ac
         payload.get("status") in VALID_STATUSES for payload in source_statuses.values()
     )
     if not checks["source_status_values_valid"]:
-        issues.append("来源状态必须是 success / failed / fallback。")
+        issues.append("来源状态必须是 success / low_relevance / no_evidence / failed / fallback。")
 
     evidence_payload = _extract_evidence_payload(markdown, issues)
     nodes = evidence_payload.get("nodes") or []
@@ -106,22 +108,39 @@ def validate_report_pair(markdown_path: str | Path, html_path: str | Path) -> Ac
     if not checks["evidence_has_nodes"]:
         issues.append("证据图没有有效声明节点。")
 
-    failed_or_fallback = {
+    non_evidence_sources = {
         source
         for source, payload in graph_statuses.items()
-        if payload.get("status") in {"failed", "fallback"}
+        if payload.get("status") in NON_EVIDENCE_STATUSES
     }
     invalid_nodes = [
-        node for node in nodes if node.get("source") in failed_or_fallback
+        node for node in nodes if node.get("source") in non_evidence_sources
     ]
-    checks["failed_sources_excluded_from_nodes"] = not invalid_nodes
+    checks["non_evidence_sources_excluded_from_nodes"] = not invalid_nodes
     if invalid_nodes:
-        issues.append("failed/fallback 来源出现在证据节点中，说明它参与了证据投票。")
+        issues.append("no_evidence/failed/fallback 来源出现在证据节点中，说明它参与了证据投票。")
+
+    rag_success = graph_statuses.get("RAG", {}).get("status") in EVIDENCE_STATUSES
+    rag_nodes = [node for node in nodes if node.get("source") == "RAG"]
+    rag_citation_pattern = r"\[RAG:[^\]\s]+#chunk-[^\]\s]+\]"
+    checks["rag_chunk_citations"] = (
+        not rag_success
+        or not rag_nodes
+        or bool(re.search(rag_citation_pattern, markdown))
+        or any("evidence_refs" not in node for node in rag_nodes)
+        or all(node.get("evidence_refs") for node in rag_nodes)
+    )
+    if not checks["rag_chunk_citations"]:
+        issues.append("RAG success source is missing chunk-level citations such as [RAG:file#chunk-001].")
 
     factcheck = _extract_section(markdown, "## FactCheck 验证")
-    checks["factcheck_traceability"] = "确定性追溯检查" in factcheck and "success 来源" in factcheck
+    checks["factcheck_traceability"] = (
+        "确定性追溯检查" in factcheck
+        and "success 来源" in factcheck
+        and ("low_relevance 来源" in factcheck or "证据节点数" in factcheck)
+    )
     if not checks["factcheck_traceability"]:
-        issues.append("FactCheck 缺少确定性追溯检查或 success 来源摘要。")
+        issues.append("FactCheck 缺少确定性追溯检查或 success/low_relevance 来源摘要。")
 
     checks["quality_passed_flag"] = "是否达标：是" in markdown
     if not checks["quality_passed_flag"]:

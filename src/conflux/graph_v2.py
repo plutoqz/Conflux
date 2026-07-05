@@ -22,10 +22,13 @@ from .source_status import (
     SourceResult,
     fallback_result,
     parse_source_results,
+    status_is_evidence,
+    status_is_non_evidence,
     source_status_markdown,
     strip_source_markers,
 )
 from .quality import evaluate_run_quality
+from .trace import new_run_id
 
 
 # ── State ──────────────────────────────────────────────────
@@ -51,6 +54,11 @@ class MultiAgentState(TypedDict):
     _run_summary: dict
     _quality_report: dict
     _pipeline_stage: str
+    _run_id: str
+    _thread_id: str
+    _checkpoint_backend: str
+    _resumed: bool
+    _review_status: str
     # 合成阶段
     final_answer: str
 
@@ -73,7 +81,8 @@ def _run_agent(query: str, agent: ResearchAgent, reflexion: bool = True) -> str:
         tool_payloads.append(direct_tool_result)
         messages.append(HumanMessage(content=(
             "已执行该子 Agent 的专属工具。请只基于以下工具结果生成简洁结论；"
-            "如果工具状态是 failed/fallback，必须明确说明不可作为真实来源。\n\n"
+            "如果工具状态是 no_evidence/failed/fallback，必须明确说明不可作为真实来源；"
+            "如果工具状态是 low_relevance，必须标注为弱相关证据。\n\n"
             f"{direct_tool_result}"
         )))
         final_msg = agent.call_model(messages, use_tools=False)
@@ -156,7 +165,7 @@ def _source_result_from_agent_text(source: str, text: str) -> SourceResult:
     if parsed:
         result = parsed[-1]
         cleaned = strip_source_markers(text)
-        if cleaned and result.status == "success":
+        if cleaned and result.is_valid_evidence:
             result.content = cleaned
         return result
     return fallback_result(
@@ -204,10 +213,22 @@ def _reflect_and_refine(query: str, answer: str, agent: ResearchAgent, history: 
 def dispatch_node(state: MultiAgentState) -> dict:
     """dispatch 节点：返回 query，由 Send 分发"""
     started_at = time.time()
+    run_id = state.get("_run_id") or new_run_id()
+    thread_id = state.get("_thread_id") or run_id
+    checkpoint_backend = state.get("_checkpoint_backend") or "none"
+    resumed = bool(state.get("_resumed"))
     return {
         "_pipeline_stage": "dispatch",
+        "_run_id": run_id,
+        "_thread_id": thread_id,
+        "_checkpoint_backend": checkpoint_backend,
+        "_resumed": resumed,
         "_run_summary": {
             "mode": "phase2",
+            "run_id": run_id,
+            "thread_id": thread_id,
+            "checkpoint_backend": checkpoint_backend,
+            "resumed": resumed,
             "started_at": started_at,
             "elapsed_ms": 0,
             "stages": ["dispatch"],
@@ -326,11 +347,12 @@ def _run_arbitration(
     status_hint = source_status_markdown(source_statuses or {})
 
     prompt = f"""你是信息仲裁器，遵循五级冲突升级协议。权威分权重：RAG=0.7, Web=0.5, Model=0.4。
-只有状态为 success 的来源可以参与共识投票。failed / fallback 来源必须排除在投票外，只能作为失败说明或模型推断风险提示。
+状态为 success 的来源可以正常参与共识投票；low_relevance 可作为弱相关证据参与低权重投票；no_evidence / failed / fallback 必须排除在投票外，只能作为检索缺口、失败说明或模型推断风险提示。
 你必须明确区分：
 - 多源真实共识：至少两个 success 来源支持；
-- 单源声明：只有一个 success 来源支持；
-- 工具失败后的推断：来源状态是 failed/fallback 或没有结构化工具成功结果；
+- 弱相关支持：low_relevance 来源只提供上下文，不得提升为高置信共识；
+- 单源声明：只有一个 success 或 low_relevance 来源支持；
+- 工具失败/无证据后的推断：来源状态是 no_evidence/failed/fallback 或没有结构化工具成功结果；
 - 互相冲突的声明：证据图或来源文本出现相反结论。
 
 用户问题：{query}
@@ -344,15 +366,15 @@ def _run_arbitration(
 请按以下结构输出（中文，精简）：
 
 ## Level 0 — 共识声明（高置信度 > 0.9）
-列出多源 success 真实共识。不要把 failed/fallback 来源计入共识。
+列出多源 success 真实共识。不要把 low_relevance、no_evidence、failed、fallback 来源计入高置信共识。
 
 ## Level 1 — 多数声明（中置信度 0.7-0.9）
-列出两个 success 来源支持、一源未覆盖或失败的声明。标注缺失/失败来源。
+列出两个 success 来源支持、一源未覆盖、弱相关、无证据或失败的声明。标注缺失/弱相关/无证据来源。
 
 ## Level 2 — 权威加权投票
 对于存在分歧的声明，按权威分加权计算：
 - 声明 A (RAG 0.7 + Web 0.5) vs 声明 B (Model 0.4) → 采纳声明 A
-只对 success 来源加权，failed/fallback 不能投票。
+success 正常加权；low_relevance 降权；no_evidence/failed/fallback 不能投票。
 
 ## Level 3 — 溯源深挖建议
 对于加权后仍存争议的声明，标注「建议回溯原始 Agent 输出交叉验证」。
@@ -361,10 +383,10 @@ def _run_arbitration(
 对于无法自动裁决的关键分歧，标注 [HUMAN_ESCALATION_NEEDED] 并说明原因。
 
 ## 单源声明
-列出只有一个 success 来源支持的关键声明，并降低置信度。
+列出只有一个 success 或 low_relevance 来源支持的关键声明，并降低置信度。
 
-## 工具失败/推断
-列出 failed/fallback 来源及其影响。明确说明这些内容不得当作真实来源。
+## 工具失败/无证据/推断
+列出 no_evidence/failed/fallback 来源及其影响。明确说明这些内容不得当作真实来源。
 
 ## 整体仲裁概要
 共识度评估（高/中/低）+ 对最终报告的建议。"""
@@ -392,10 +414,12 @@ def synthesize_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
     messages = [
         SystemMessage(content="""你是 Conflux 的调研报告综合编辑。你必须输出简洁 Markdown 主报告。
 硬性要求：
-- 不得把 failed/fallback 来源当作真实来源；
+- 不得把 no_evidence/failed/fallback 来源当作真实来源；
+- low_relevance 只能作为弱相关上下文，必须标注低置信；
 - 模型世界知识只能作为 Model 来源，不能替代 Web/RAG 证据；
 - 每个关键事实声明后标注来源类型，例如 [RAG]、[Web]、[Model]；
-- 对单源声明和工具失败后的推断明确降低置信度；
+- 分层输出：多源 success 为高置信；单源 success 为中低置信；low_relevance 为低置信；仅 Model 可用时允许回答但必须标注“模型推断，缺少外部证据支持”；三源均无内容时才拒答；
+- 对单源声明、弱相关证据和工具无证据/失败后的推断明确降低置信度；
 - 主报告保持简洁，证据图、原始三源输出由系统附录提供，不要大段复制。"""),
         HumanMessage(content=f"""用户问题：{state['query']}
 
@@ -425,11 +449,83 @@ def synthesize_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
     ]
 
     response = agent.raw_model.invoke(messages)
+    final_answer = _ensure_model_fallback_report(
+        state["query"],
+        str(response.content),
+        source_statuses,
+        merged,
+    )
     return {
-        "final_answer": str(response.content),
+        "final_answer": final_answer,
         "_run_summary": _append_stage(state, "synthesize"),
         "_pipeline_stage": "synthesized",
     }
+
+
+def _ensure_model_fallback_report(
+    query: str,
+    candidate: str,
+    source_statuses: dict,
+    merged: str,
+) -> str:
+    """Replace short refusals with a low-confidence Model-only report when available."""
+
+    report = candidate.strip()
+    model_payload = source_statuses.get("Model") or {}
+    model_status = str(model_payload.get("status") or "")
+    model_content = strip_source_markers(str(model_payload.get("content") or ""))
+    external_evidence = [
+        source
+        for source in ("RAG", "Web")
+        if status_is_evidence(str((source_statuses.get(source) or {}).get("status") or ""))
+    ]
+    model_available = model_status == "success" and len(model_content.strip()) >= 80
+    if external_evidence or not model_available or not _looks_like_short_refusal(report):
+        return report
+
+    return f"""## 最终结论
+- 当前 RAG/Web 没有提供可用外部证据；以下内容仅基于 Model 来源的模型推断，置信度较低。[Model]
+- 针对“{query}”，可先给出概念性脉络或工程判断，但不应把它表述为已被本地知识库或 Web 验证的结论。[Model]
+
+## 信息来源
+- RAG/Web：未形成可引用外部证据，状态见来源表。
+- Model：有可用推断内容，但属于模型世界知识，不是检索证据。
+
+## 不确定性
+- 该回答缺少 RAG/Web 证据支撑，事实细节、时间线、引用来源和具体案例都需要后续检索验证。
+- 若问题涉及标准、产品版本、论文结论或政策日期，应优先补充权威 Web 或本地文档证据。
+
+## 证据摘要
+- 多源共识：暂无。
+- 单源内容：仅 Model 给出低置信推断。
+- 检索缺口：RAG/Web 未返回足够相关证据，不能参与事实投票。
+
+## 工程落地建议
+- 将本轮输出作为“待验证草案”，下一轮优先使用 query planner 的英文/中文子查询补充 RAG/Web 证据。
+- 对关键事实建立最小引用清单；没有引用的内容继续保持 Model-only 低置信标注。
+
+### Model 推断草案
+{model_content.strip()[:2200]}
+"""
+
+
+def _looks_like_short_refusal(text: str) -> bool:
+    stripped = text.strip()
+    if len(stripped) >= 260:
+        return False
+    refusal_markers = [
+        "无法给到",
+        "无法提供",
+        "没有相关内容",
+        "未能获取",
+        "无法回答",
+        "不能回答",
+        "no relevant",
+        "cannot provide",
+        "i cannot",
+    ]
+    lowered = stripped.lower()
+    return any(marker in lowered or marker in stripped for marker in refusal_markers)
 
 
 def factcheck_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
@@ -455,7 +551,8 @@ def factcheck_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
     prompt = f"""你是事实核查员（Fact-Checker）。请检查以下调研报告中的关键声明。
 
 对于报告中每个重要的事实断言，检查它是否能在原始信息源中找到支持证据。
-只有状态为 success 的来源可作为有效证据；failed/fallback 不可作为事实支持。
+success 来源可作为有效证据；low_relevance 只能作为弱相关证据；no_evidence/failed/fallback 不可作为事实支持。
+当 RAG/Web 无证据但 Model success 时，允许报告给出明确标注的低置信“模型推断”，但不得写成外部证据已验证。
 
 来源状态：
 {source_status_markdown(source_statuses)}
@@ -474,10 +571,12 @@ def factcheck_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
 
 请输出（精简）：
 1. 已验证的声明（可追溯到 success 来源）— 列出 3-5 个
-2. 无法验证的声明（找不到 success 来源支持）— 如有则列出
-3. 失败/降级来源是否被误用 — 如有则列出
-4. 需要修正的声明 — 如有事实错误则指出正确版本
-5. 整体验证结论：通过 / 需修正 / 部分通过
+2. 弱证据声明（仅 low_relevance 支持）— 如有则列出
+3. 模型推断声明（仅 Model 支持且已标注低置信）— 如有则列出
+4. 无法验证的声明（找不到 success/low_relevance 来源支持，且未标注模型推断）— 如有则列出
+5. 无证据/失败/降级来源是否被误用 — 如有则列出
+6. 需要修正的声明 — 如有事实错误则指出正确版本
+7. 整体验证结论：通过 / 需修正 / 部分通过
 
 如果报告质量良好，写「验证通过：所有关键声明均有信息源支持」即可。"""
 
@@ -493,10 +592,14 @@ def factcheck_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
         final_answer = report
     else:
         status = "needs_review"
+        revised_report = _revise_report_after_factcheck(report, deterministic_findings)
         final_answer = (
-            f"{report.rstrip()}\n\n"
+            f"{revised_report.rstrip()}\n\n"
             "## FactCheck 验证结果\n"
             f"{_factcheck_findings_markdown(deterministic_findings)}\n\n"
+            "### Verification Revision\n"
+            "- A deterministic revision pass removed invalid no_evidence/failed/fallback source citations where possible.\n"
+            "- Review status: awaiting_user_review. A human can accept uncertainty, request another revision, or add a manual source note.\n\n"
             f"{fc_text.strip()}\n"
         )
     factcheck_report = f"{_factcheck_findings_markdown(deterministic_findings)}\n\n{fc_text.strip()}"
@@ -506,9 +609,26 @@ def factcheck_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
         "_factcheck_status": status,
         "_factcheck_report": factcheck_report,
         "final_answer": final_answer,
+        "_review_status": "awaiting_user_review" if status == "needs_review" else "accepted",
         "_run_summary": _append_stage(state, "factcheck"),
         "_pipeline_stage": "factchecked",
     }
+
+
+def _revise_report_after_factcheck(report: str, findings: dict) -> str:
+    """Deterministically remove excluded source citations from report text."""
+
+    revised = report
+    for source in findings.get("non_evidence_sources") or []:
+        revised = revised.replace(f"[{source}]", f"[{source}:excluded]")
+        revised = revised.replace(f"来源：{source}", f"来源：{source}:excluded")
+        revised = revised.replace(f"source:{source}", f"source:{source}:excluded")
+    if revised != report:
+        revised += (
+            "\n\n## Verification Revision Log\n"
+            "No-evidence/failed/fallback source citations were excluded from factual support before final delivery.\n"
+        )
+    return revised
 
 
 def _deterministic_factcheck(report: str, source_statuses: dict, evidence_json: str) -> dict:
@@ -519,10 +639,16 @@ def _deterministic_factcheck(report: str, source_statuses: dict, evidence_json: 
         for source, payload in (source_statuses or {}).items()
         if payload.get("status") == "success"
     }
-    failed_sources = {
+    low_relevance_sources = {
         source
         for source, payload in (source_statuses or {}).items()
-        if payload.get("status") in {"failed", "fallback"}
+        if payload.get("status") == "low_relevance"
+    }
+    evidence_sources = success_sources | low_relevance_sources
+    non_evidence_sources = {
+        source
+        for source, payload in (source_statuses or {}).items()
+        if status_is_non_evidence(str(payload.get("status") or ""))
     }
     cited_sources = {
         source
@@ -530,10 +656,10 @@ def _deterministic_factcheck(report: str, source_statuses: dict, evidence_json: 
         if f"[{source}]" in report or f"来源：{source}" in report or f"来源:{source}" in report
     }
     issues = []
-    invalid_mentions = sorted((cited_sources & failed_sources) - success_sources)
+    invalid_mentions = sorted((cited_sources & non_evidence_sources) - evidence_sources)
     if invalid_mentions:
         issues.append(
-            f"报告把 failed/fallback 来源 {', '.join(invalid_mentions)} 用作事实证据引用。"
+            f"报告把 no_evidence/failed/fallback 来源 {', '.join(invalid_mentions)} 用作事实证据引用。"
         )
 
     try:
@@ -541,15 +667,22 @@ def _deterministic_factcheck(report: str, source_statuses: dict, evidence_json: 
     except json.JSONDecodeError:
         evidence_payload = {}
     nodes = evidence_payload.get("nodes") or []
-    if not nodes:
-        issues.append("证据图没有任何来自 success 来源的声明节点，关键事实无法追溯。")
+    model_only_allowed = (
+        not nodes
+        and "Model" in success_sources
+        and not (success_sources - {"Model"})
+        and ("模型推断" in report or "Model" in report)
+    )
+    if not nodes and not model_only_allowed:
+        issues.append("证据图没有任何来自 success/low_relevance 来源的声明节点，关键事实无法追溯。")
 
-    if "不确定" not in report and (failed_sources or len(success_sources) < 2):
+    if "不确定" not in report and (non_evidence_sources or len(evidence_sources) < 2):
         issues.append("存在失败/单源条件，但报告没有明确不确定性说明。")
 
     return {
         "success_sources": sorted(success_sources),
-        "failed_or_fallback_sources": sorted(failed_sources),
+        "low_relevance_sources": sorted(low_relevance_sources),
+        "non_evidence_sources": sorted(non_evidence_sources),
         "evidence_node_count": len(nodes),
         "issues": issues,
     }
@@ -559,7 +692,8 @@ def _factcheck_findings_markdown(findings: dict) -> str:
     lines = [
         "### 确定性追溯检查",
         f"- success 来源：{', '.join(findings.get('success_sources') or []) or '无'}",
-        f"- failed/fallback 来源：{', '.join(findings.get('failed_or_fallback_sources') or []) or '无'}",
+        f"- low_relevance 来源：{', '.join(findings.get('low_relevance_sources') or []) or '无'}",
+        f"- no_evidence/failed/fallback 来源：{', '.join(findings.get('non_evidence_sources') or []) or '无'}",
         f"- 证据节点数：{findings.get('evidence_node_count', 0)}",
     ]
     issues = findings.get("issues") or []
@@ -702,8 +836,8 @@ def deeper_research_node(state: MultiAgentState, *, model: BaseChatModel) -> dic
 
 要求：
 - 只基于提供材料和明确的模型推理补充；
-- 只有 success 来源可作为事实证据；
-- 对 failed/fallback 来源只能说明失败影响，不能用于支持结论；
+- success 来源可作为事实证据；low_relevance 只能作为弱相关上下文；
+- 对 no_evidence/failed/fallback 来源只能说明检索缺口或失败影响，不能用于支持结论；
 - 每条深化结论标注“证据支持”或“模型推断”；
 - 标注哪些内容仍需进一步检索；
 - 输出 Markdown 小节。"""
@@ -742,6 +876,10 @@ def _append_stage(state: MultiAgentState, stage: str) -> dict:
     p95_ms = int(get("slo", "survey_p95_ms", default=45000))
     summary.update({
         "mode": summary.get("mode", "phase2"),
+        "run_id": state.get("_run_id") or summary.get("run_id"),
+        "thread_id": state.get("_thread_id") or summary.get("thread_id"),
+        "checkpoint_backend": state.get("_checkpoint_backend") or summary.get("checkpoint_backend", "none"),
+        "resumed": bool(state.get("_resumed") or summary.get("resumed")),
         "started_at": started_at,
         "elapsed_ms": elapsed_ms,
         "stages": stages,
@@ -759,6 +897,7 @@ def create_multi_agent_graph(
     model_agent: ResearchAgent,
     synthesizer_model,  # raw BaseChatModel，用于 synthesize
     arbitrator_model=None,  # raw BaseChatModel，用于仲裁（默认=cheap）
+    checkpointer=None,
 ) -> StateGraph:
     """构建三 Agent 并行派发状态图"""
     graph = StateGraph(MultiAgentState)
@@ -797,4 +936,4 @@ def create_multi_agent_graph(
     })
     graph.add_edge("deeper_research", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)

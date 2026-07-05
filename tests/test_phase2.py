@@ -211,7 +211,7 @@ def test_bm25_sparse_results_are_ranked_by_score(monkeypatch):
     assert docs[0].metadata["chunk_id"] == "target"
 
 
-def test_rag_tool_marks_unrelated_hits_as_failed():
+def test_rag_tool_marks_unrelated_hits_as_no_evidence():
     from langchain_core.documents import Document
 
     from conflux.source_status import parse_source_results
@@ -232,7 +232,7 @@ def test_rag_tool_marks_unrelated_hits_as_failed():
     parsed = parse_source_results(str(result))
 
     assert parsed
-    assert parsed[-1].status == "failed"
+    assert parsed[-1].status == "no_evidence"
 
 
 def test_rag_tool_keeps_relevant_hits_success():
@@ -304,6 +304,48 @@ def test_failed_sources_do_not_participate_in_evidence_graph():
 
     assert payload["source_statuses"]["Web"]["status"] == "failed"
     assert payload["summary"]["source_counts"].get("Web") is None
+    assert all(node["source"] != "Web" for node in payload["nodes"])
+
+
+def test_low_relevance_sources_enter_graph_with_reduced_weight():
+    from conflux.evidence import build_evidence_graph_from_results
+    from conflux.source_status import AgentClaim, SourceResult
+
+    graph = build_evidence_graph_from_results({
+        "RAG": SourceResult(
+            source="RAG",
+            status="low_relevance",
+            detail="local",
+            content="GIS systems can use geospatial analysis context.",
+            claims=[
+                AgentClaim(
+                    claim="GIS systems can use geospatial analysis context.",
+                    source="RAG",
+                    evidence_refs=["[RAG:gis#chunk-001]"],
+                    confidence=0.8,
+                )
+            ],
+        ),
+        "Web": SourceResult(
+            source="Web",
+            status="no_evidence",
+            detail="web",
+            content="Search returned unrelated pages.",
+        ),
+        "Model": SourceResult(
+            source="Model",
+            status="success",
+            detail="model",
+            content="Model context.",
+        ),
+    })
+    payload = graph.to_dict()
+
+    rag_nodes = [node for node in payload["nodes"] if node["source"] == "RAG"]
+    assert rag_nodes
+    assert rag_nodes[0]["authority_score"] < 0.7
+    assert rag_nodes[0]["confidence"] < 0.8
+    assert "low relevance" in " ".join(rag_nodes[0]["limitations"])
     assert all(node["source"] != "Web" for node in payload["nodes"])
 
 

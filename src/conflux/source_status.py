@@ -9,9 +9,35 @@ from typing import Any, Literal
 
 
 SourceName = Literal["RAG", "Web", "Model", "FactCheck", "Synthesize"]
-SourceStatus = Literal["success", "failed", "fallback"]
+SourceStatus = Literal["success", "low_relevance", "no_evidence", "failed", "fallback"]
+EVIDENCE_STATUSES = {"success", "low_relevance"}
+NON_EVIDENCE_STATUSES = {"no_evidence", "failed", "fallback"}
 
 MARKER = "CONFLUX_SOURCE_RESULT_JSON"
+
+
+@dataclass
+class AgentClaim:
+    """A claim-level collaboration payload emitted by a source agent."""
+
+    claim: str
+    source: SourceName
+    evidence_refs: list[str] = field(default_factory=list)
+    confidence: float = 0.5
+    limitations: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "AgentClaim":
+        return cls(
+            claim=str(payload.get("claim") or ""),
+            source=payload.get("source", "Model"),
+            evidence_refs=[str(item) for item in payload.get("evidence_refs") or []],
+            confidence=float(payload.get("confidence", 0.5)),
+            limitations=[str(item) for item in payload.get("limitations") or []],
+        )
 
 
 @dataclass
@@ -23,25 +49,37 @@ class SourceResult:
     content: str
     detail: str = ""
     error: str = ""
+    claims: list[AgentClaim] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_valid_evidence(self) -> bool:
-        """Only successful source results may participate in evidence voting."""
+        """Return whether this result may participate in evidence voting."""
 
-        return self.status == "success" and bool(self.content.strip())
+        return self.status in EVIDENCE_STATUSES and bool(self.content.strip())
+
+    @property
+    def is_low_relevance(self) -> bool:
+        """Return whether this result is weak contextual evidence."""
+
+        return self.status == "low_relevance"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "SourceResult":
+        claims = []
+        for item in payload.get("claims") or []:
+            if isinstance(item, dict):
+                claims.append(AgentClaim.from_dict(item))
         return cls(
             source=payload.get("source", "Model"),
             status=payload.get("status", "fallback"),
             content=str(payload.get("content") or ""),
             detail=str(payload.get("detail") or ""),
             error=str(payload.get("error") or ""),
+            claims=claims,
             metadata=dict(payload.get("metadata") or {}),
         )
 
@@ -99,6 +137,18 @@ def source_status_markdown(statuses: dict[str, dict[str, Any]]) -> str:
         note = error or content[:80].replace("\n", " ")
         lines.append(f"| {source} | {status} | {detail} | {note} |")
     return "\n".join(lines)
+
+
+def status_is_evidence(status: str) -> bool:
+    """Return whether a status can support evidence, possibly at reduced weight."""
+
+    return status in EVIDENCE_STATUSES
+
+
+def status_is_non_evidence(status: str) -> bool:
+    """Return whether a status must be excluded from factual evidence."""
+
+    return status in NON_EVIDENCE_STATUSES
 
 
 def fallback_result(source: SourceName, reason: str, content: str = "") -> SourceResult:

@@ -22,16 +22,22 @@ def evaluate_run_quality(state: dict[str, Any]) -> dict[str, Any]:
         for source, payload in source_statuses.items()
         if payload.get("status") == "success"
     ]
-    failed_or_fallback = [
+    low_relevance_sources = [
         source
         for source, payload in source_statuses.items()
-        if payload.get("status") in {"failed", "fallback"}
+        if payload.get("status") == "low_relevance"
     ]
+    non_evidence_sources = [
+        source
+        for source, payload in source_statuses.items()
+        if payload.get("status") in {"no_evidence", "failed", "fallback"}
+    ]
+    evidence_sources = success_sources + low_relevance_sources
 
     scores = {
         "运行过程": _score_run_process(run_summary),
         "报告质量": _score_report_quality(final_answer),
-        "来源可靠性": _score_source_reliability(success_sources, failed_or_fallback),
+        "来源可靠性": _score_source_reliability(success_sources, low_relevance_sources, non_evidence_sources),
         "FactCheck有效性": _score_factcheck(factcheck_status, state.get("_verified_answer")),
         "证据图结构": _score_evidence_graph(evidence_summary, evidence_payload),
         "L4深化质量": _score_l4(deep_research),
@@ -43,8 +49,9 @@ def evaluate_run_quality(state: dict[str, Any]) -> dict[str, Any]:
         "overall": overall,
         "passed": passed,
         "success_sources": success_sources,
-        "failed_or_fallback_sources": failed_or_fallback,
-        "notes": _quality_notes(scores, success_sources, failed_or_fallback),
+        "low_relevance_sources": low_relevance_sources,
+        "non_evidence_sources": non_evidence_sources,
+        "notes": _quality_notes(scores, evidence_sources, low_relevance_sources, non_evidence_sources),
     }
 
 
@@ -82,10 +89,16 @@ def _score_report_quality(report: str) -> int:
     return 2 if report.strip() else 1
 
 
-def _score_source_reliability(success_sources: list[str], failed_or_fallback: list[str]) -> int:
+def _score_source_reliability(
+    success_sources: list[str],
+    low_relevance_sources: list[str],
+    non_evidence_sources: list[str],
+) -> int:
     if len(success_sources) >= 2:
-        return 5 if not failed_or_fallback else 4
+        return 5 if not non_evidence_sources else 4
     if len(success_sources) == 1:
+        return 4 if low_relevance_sources else 3
+    if low_relevance_sources:
         return 3
     return 1
 
@@ -121,13 +134,20 @@ def _score_l4(deep_research: str) -> int:
     return 2
 
 
-def _quality_notes(scores: dict[str, int], success_sources: list[str], failed_or_fallback: list[str]) -> list[str]:
+def _quality_notes(
+    scores: dict[str, int],
+    evidence_sources: list[str],
+    low_relevance_sources: list[str],
+    non_evidence_sources: list[str],
+) -> list[str]:
     notes = []
     for key, score in scores.items():
         if score < 4:
             notes.append(f"{key}低于达标线：{score}/5")
-    if len(success_sources) < 2:
-        notes.append("有效 success 来源少于两个，无法证明多源真实共识。")
-    if failed_or_fallback:
-        notes.append(f"存在失败/降级来源：{', '.join(failed_or_fallback)}。")
+    if len(evidence_sources) < 2:
+        notes.append("有效证据来源少于两个，无法证明多源真实共识。")
+    if low_relevance_sources:
+        notes.append(f"存在弱相关证据来源：{', '.join(low_relevance_sources)}。")
+    if non_evidence_sources:
+        notes.append(f"存在无证据/失败/降级来源：{', '.join(non_evidence_sources)}。")
     return notes
