@@ -1,0 +1,41 @@
+id: gis-agent-research
+name: GIS Agent Research
+fields:
+  - geographic information systems
+  - large language model agents
+  - geospatial data fusion
+research_questions:
+  - How can knowledge-grounded agents improve geospatial data fusion workflows?
+  - How should agent systems verify, repair, and audit geospatial processing steps?
+  - What evidence is needed to make GIS agent experiments reproducible?
+keywords:
+  - GIS agent
+  - geospatial data fusion
+  - knowledge graph
+  - workflow verification
+  - agent planning
+  - reproducible research
+negative_keywords:
+  - clinical trial
+  - stock prediction
+  - cryptocurrency
+target_venues:
+  - SIGSPATIAL
+  - GIScience
+  - ISPRS
+  - NeurIPS
+  - ICLR
+tracked_scholars:
+  - Krzysztof Janowicz
+  - Song Gao
+  - Gengchen Mai
+project_paths:
+  - ..
+document_paths:
+  - ../data/documents
+paper_sources:
+  - arxiv
+report_cadence: weekly
+metadata:
+  owner_type: graduate_student
+  demo_domain: cs_ai_gis

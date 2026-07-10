@@ -1,0 +1,38 @@
+{
+  "papers": [
+    {
+      "id": "https://arxiv.org/abs/2607.00001",
+      "title": "Knowledge-Grounded Agents for Geospatial Data Fusion",
+      "summary": "We study language model agents that use knowledge graphs to plan and verify geospatial data fusion workflows.",
+      "authors": [
+        {"name": "A. Researcher"},
+        {"name": "B. Cartographer"}
+      ],
+      "published": "2026-07-01T10:00:00Z",
+      "source": "arxiv",
+      "categories": ["cs.AI", "cs.DB"],
+      "links": [
+        {"href": "https://arxiv.org/abs/2607.00001", "rel": "alternate"},
+        {"href": "https://arxiv.org/pdf/2607.00001", "title": "pdf", "type": "application/pdf"}
+      ],
+      "matched_queries": ["all:\"GIS agent\""]
+    },
+    {
+      "id": "2607.00001",
+      "title": "Knowledge-Grounded Agents for Geospatial Data Fusion",
+      "abstract": "Duplicate record with a shorter metadata shape.",
+      "authors": ["A. Researcher"],
+      "source": "arxiv",
+      "categories": ["cs.AI"]
+    },
+    {
+      "id": "2607.00002",
+      "title": "Clinical Trial Prediction with Language Models",
+      "abstract": "This paper studies clinical trial outcome prediction and drug discovery.",
+      "authors": ["C. Medic"],
+      "published_at": "2026-07-02T09:00:00+00:00",
+      "source": "arxiv",
+      "categories": ["cs.LG"]
+    }
+  ]
+}

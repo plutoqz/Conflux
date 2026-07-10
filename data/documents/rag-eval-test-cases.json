@@ -57,6 +57,76 @@
           ],
           "min_recall": 0.5,
           "expected_source": "RAG"
+        },
+        {
+          "id": "paper_001",
+          "query": "How do knowledge-grounded agents verify geospatial data fusion workflows?",
+          "relevant_docs": [
+            "paper:2607.00001#summary"
+          ],
+          "min_recall": 0.5,
+          "expected_source": "RAG",
+          "required_metadata": [
+            "LocalPaper",
+            "paper_id",
+            "chunk_id"
+          ]
+        },
+        {
+          "id": "paper_002",
+          "query": "Which local paper discusses GIS agents and knowledge graphs?",
+          "relevant_docs": [
+            "paper:2607.00001#summary"
+          ],
+          "min_recall": 0.5,
+          "expected_source": "RAG",
+          "required_metadata": [
+            "LocalPaper",
+            "paper_id",
+            "chunk_id"
+          ]
+        },
+        {
+          "id": "paper_003",
+          "query": "What limitations were recorded for the geospatial data fusion agent paper?",
+          "relevant_docs": [
+            "paper:2607.00001#summary"
+          ],
+          "min_recall": 0.5,
+          "expected_source": "RAG",
+          "required_metadata": [
+            "LocalPaper",
+            "paper_id",
+            "chunk_id"
+          ]
+        },
+        {
+          "id": "paper_004",
+          "query": "Which promoted paper is useful for reusable methods in geospatial data fusion?",
+          "relevant_docs": [
+            "paper:2607.00001#summary"
+          ],
+          "min_recall": 0.5,
+          "expected_source": "RAG",
+          "required_metadata": [
+            "LocalPaper",
+            "paper_id",
+            "chunk_id"
+          ]
+        },
+        {
+          "id": "paper_005",
+          "query": "What citation metadata should a local paper evidence chunk expose?",
+          "relevant_docs": [
+            "paper:2607.00001#summary"
+          ],
+          "min_recall": 0.5,
+          "expected_source": "RAG",
+          "required_metadata": [
+            "LocalPaper",
+            "paper_id",
+            "chunk_id"
+          ]
         }
       ]
     },

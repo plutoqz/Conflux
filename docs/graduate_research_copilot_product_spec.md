@@ -3,7 +3,8 @@
 > Working name: Graduate Research Copilot  
 > Repository base: Conflux  
 > Related local reference project: `F:\vscode\AcademyHunter`  
-> Target version: MVP for computer science, AI, GIS, and engineering graduate students
+> Target version: MVP for computer science, AI, GIS, and engineering graduate students  
+> Execution plan: `docs/graduate_research_copilot_execution_plan.md`
 
 ## 1. Product Positioning
 
@@ -538,4 +539,3 @@ The MVP is complete when all of the following are true:
 - Generated reports include citations, source status, and uncertainty.
 - Offline tests and eval commands run without real API keys.
 - Real API runs are opt-in and documented.
-
