@@ -1,39 +1,42 @@
-"""模型知识工具 — 封装纯 LLM 世界知识为 Tool，供 Agent 主动调用"""
+"""Model-knowledge tool wrapped as a LangChain tool for source agents."""
 
-from langchain_core.tools import tool
+from __future__ import annotations
+
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
 
-from ..source_status import SourceResult
+from ..source_status import AgentClaim, SourceResult
 
 
-# 模块级缓存，由工厂函数注入
 _model: BaseChatModel | None = None
 
 
 def set_model(model: BaseChatModel) -> None:
-    """注入用于 ask_model 的 LLM 实例"""
+    """Inject the model used by the ask_model tool."""
+
     global _model
     _model = model
 
 
 @tool
 def ask_model(query: str) -> str:
-    """直接使用模型自身的世界知识回答问题，不进行任何检索。
-    适用于：需要常识推理、概念解释、历史知识、理论分析等模型训练数据中已包含的信息。
-    注意：模型知识有截止日期，对实时信息（新闻、最新研究）不应使用此工具。
-    """
+    """Answer from model knowledge only, clearly marked as inference."""
+
     if _model is None:
         return SourceResult(
             source="Model",
             status="failed",
             detail="LLM world knowledge",
-            error="模型知识工具未初始化。请先调用 set_model() 注入 LLM 实例。",
-            content="模型知识工具未初始化。",
+            error="The model-knowledge tool was not initialized. Call set_model() first.",
+            content="The model-knowledge tool was not initialized.",
         ).to_tool_text()
 
     messages = [
-        SystemMessage(content="你是一个知识渊博的助手。请简洁、准确地回答用户的问题。如果问题涉及你知识范围之外或需要实时数据的内容，请明确说明。"),
+        SystemMessage(content=(
+            "You answer from model knowledge only. Be concise, name uncertainty, "
+            "and never present this answer as retrieved RAG or Web evidence."
+        )),
         HumanMessage(content=query),
     ]
     try:
@@ -45,14 +48,32 @@ def ask_model(query: str) -> str:
             status="failed",
             detail="LLM world knowledge",
             error=f"{type(exc).__name__}: {exc}",
-            content="模型知识调用失败。",
+            content="Model-knowledge call failed.",
         ).to_tool_text()
+
     if isinstance(content, list):
         content = str(content[0]) if content else ""
-    body = f"[基于模型世界知识]\n{content}"
+    content = str(content)
+    body = f"[model knowledge / inference]\n{content}"
+    claim_text = _claim_from_model_content(content)
     return SourceResult(
         source="Model",
         status="success",
         detail="LLM world knowledge",
         content=body,
+        claims=[
+            AgentClaim(
+                claim=claim_text,
+                source="Model",
+                evidence_refs=["[Model:world-knowledge]"],
+                confidence=0.55,
+                limitations=["model knowledge / inference; not external retrieved evidence"],
+            )
+        ] if claim_text else [],
+        metadata={"evidence_type": "model knowledge / inference"},
     ).to_tool_text()
+
+
+def _claim_from_model_content(content: str, max_length: int = 220) -> str:
+    text = " ".join(content.strip().split())
+    return text[:max_length]

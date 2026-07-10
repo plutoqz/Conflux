@@ -1,0 +1,455 @@
+{
+  "total_files": 69,
+  "total_size_kb": 3949.4,
+  "formats": {
+    ".md": 65,
+    ".txt": 2,
+    ".json": 2
+  },
+  "categories": {
+    "esri": {
+      "description": "Esri Official Documentation",
+      "count": 15
+    },
+    "nist": {
+      "description": "NIST Publications",
+      "count": 7
+    },
+    "wiki": {
+      "description": "Wikipedia Articles",
+      "count": 25
+    },
+    "zh": {
+      "description": "Chinese Documents",
+      "count": 3
+    },
+    "synth": {
+      "description": "Synthetic Technical Documents",
+      "count": 11
+    },
+    "qa": {
+      "description": "QA Datasets",
+      "count": 5
+    },
+    "original": {
+      "description": "Original Project Documents",
+      "count": 3
+    }
+  },
+  "files": [
+    {
+      "name": "ai-governance-comparison.md",
+      "size_kb": 4.1,
+      "category": "synth",
+      "format": ".md"
+    },
+    {
+      "name": "ai-regulation.txt",
+      "size_kb": 1.4,
+      "category": "original",
+      "format": ".txt"
+    },
+    {
+      "name": "chinese-qa-sample.md",
+      "size_kb": 2.8,
+      "category": "qa",
+      "format": ".md"
+    },
+    {
+      "name": "esri--arcgis-geostatistics.md",
+      "size_kb": 3.4,
+      "category": "esri",
+      "format": ".md"
+    },
+    {
+      "name": "esri--arcgis-network-analyst.md",
+      "size_kb": 3.9,
+      "category": "esri",
+      "format": ".md"
+    },
+    {
+      "name": "esri--arcgis-online-apps.md",
+      "size_kb": 4.6,
+      "category": "esri",
+      "format": ".md"
+    },
+    {
+      "name": "esri--arcgis-online-overview.md",
+      "size_kb": 11.8,
+      "category": "esri",
+      "format": ".md"
+    },
+    {
+      "name": "esri--arcgis-online-scenes.md",
+      "size_kb": 3.2,
+      "category": "esri",
+      "format": ".md"
+    },
+    {
+      "name": "esri--arcgis-pro-analysis.md",
+      "size_kb": 4.2,
+      "category": "esri",
+      "format": ".md"
+    },
+    {
+      "name": "esri--arcgis-pro-geodatabase.md",
+      "size_kb": 6.8,
+      "category": "esri",
+      "format": ".md"
+    },
+    {
+      "name": "esri--arcgis-pro-get-started.md",
+      "size_kb": 15.7,
+      "category": "esri",
+      "format": ".md"
+    },
+    {
+      "name": "esri--arcgis-pro-layers.md",
+      "size_kb": 23.4,
+      "category": "esri",
+      "format": ".md"
+    },
+    {
+      "name": "esri--arcgis-pro-modelbuilder.md",
+      "size_kb": 4.3,
+      "category": "esri",
+      "format": ".md"
+    },
+    {
+      "name": "esri--arcgis-pro-spatial-reference.md",
+      "size_kb": 15.8,
+      "category": "esri",
+      "format": ".md"
+    },
+    {
+      "name": "esri--arcgis-pro-welcome.md",
+      "size_kb": 16.0,
+      "category": "esri",
+      "format": ".md"
+    },
+    {
+      "name": "esri--arcgis-python-api-gis.md",
+      "size_kb": 4.5,
+      "category": "esri",
+      "format": ".md"
+    },
+    {
+      "name": "esri--arcgis-python-api-overview.md",
+      "size_kb": 20.7,
+      "category": "esri",
+      "format": ".md"
+    },
+    {
+      "name": "esri--arcgis-spatial-analysis.md",
+      "size_kb": 15.6,
+      "category": "esri",
+      "format": ".md"
+    },
+    {
+      "name": "evidence-graph-format.md",
+      "size_kb": 2.1,
+      "category": "synth",
+      "format": ".md"
+    },
+    {
+      "name": "factcheck-agent-design.md",
+      "size_kb": 2.7,
+      "category": "synth",
+      "format": ".md"
+    },
+    {
+      "name": "gis-fundamentals.md",
+      "size_kb": 3.7,
+      "category": "synth",
+      "format": ".md"
+    },
+    {
+      "name": "model-knowledge-reliability.md",
+      "size_kb": 2.5,
+      "category": "synth",
+      "format": ".md"
+    },
+    {
+      "name": "multi-agent-architectures.md",
+      "size_kb": 3.0,
+      "category": "synth",
+      "format": ".md"
+    },
+    {
+      "name": "multi-agent-rag-arbitration.md",
+      "size_kb": 2.8,
+      "category": "original",
+      "format": ".md"
+    },
+    {
+      "name": "natural-questions-fallback.md",
+      "size_kb": 1.2,
+      "category": "qa",
+      "format": ".md"
+    },
+    {
+      "name": "nist--niso-sp800-53.md",
+      "size_kb": 17.4,
+      "category": "nist",
+      "format": ".md"
+    },
+    {
+      "name": "nist--nist-csf.md",
+      "size_kb": 5.8,
+      "category": "nist",
+      "format": ".md"
+    },
+    {
+      "name": "nist--nist-fips203-ml-kem.md",
+      "size_kb": 7.2,
+      "category": "nist",
+      "format": ".md"
+    },
+    {
+      "name": "nist--nist-fips204-ml-dsa.md",
+      "size_kb": 6.4,
+      "category": "nist",
+      "format": ".md"
+    },
+    {
+      "name": "nist--nist-fips205-slh-dsa.md",
+      "size_kb": 5.7,
+      "category": "nist",
+      "format": ".md"
+    },
+    {
+      "name": "nist--nist-pqc-overview.md",
+      "size_kb": 16.8,
+      "category": "nist",
+      "format": ".md"
+    },
+    {
+      "name": "nist--nist-pqc-selected-algorithms.md",
+      "size_kb": 11.4,
+      "category": "nist",
+      "format": ".md"
+    },
+    {
+      "name": "post-quantum-migration-guide.md",
+      "size_kb": 5.1,
+      "category": "synth",
+      "format": ".md"
+    },
+    {
+      "name": "quantum-crypto.txt",
+      "size_kb": 1.7,
+      "category": "original",
+      "format": ".txt"
+    },
+    {
+      "name": "rag-eval-test-cases.json",
+      "size_kb": 3.1,
+      "category": "qa",
+      "format": ".json"
+    },
+    {
+      "name": "rag-evaluation-metrics.md",
+      "size_kb": 4.8,
+      "category": "synth",
+      "format": ".md"
+    },
+    {
+      "name": "rag-technical-deep-dive.md",
+      "size_kb": 3.7,
+      "category": "synth",
+      "format": ".md"
+    },
+    {
+      "name": "spatial-data-science.md",
+      "size_kb": 3.6,
+      "category": "synth",
+      "format": ".md"
+    },
+    {
+      "name": "squad-v2-fallback.md",
+      "size_kb": 1.8,
+      "category": "qa",
+      "format": ".md"
+    },
+    {
+      "name": "squad-v2-train.json",
+      "size_kb": 588.4,
+      "category": "qa",
+      "format": ".json"
+    },
+    {
+      "name": "web-search-agent-design.md",
+      "size_kb": 4.6,
+      "category": "synth",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--arcgis.md",
+      "size_kb": 81.9,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--artificial-intelligence-ethics.md",
+      "size_kb": 246.1,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--cartography.md",
+      "size_kb": 123.0,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--coordinate-reference-system.md",
+      "size_kb": 34.1,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--deep-learning.md",
+      "size_kb": 267.3,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--digital-elevation-model.md",
+      "size_kb": 49.1,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--esri.md",
+      "size_kb": 37.9,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--eu-ai-act.md",
+      "size_kb": 86.8,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--geocoding.md",
+      "size_kb": 54.4,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--geodesy.md",
+      "size_kb": 84.1,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--geographic-information-system.md",
+      "size_kb": 199.4,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--geospatial-analysis.md",
+      "size_kb": 145.5,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--large-language-model.md",
+      "size_kb": 224.1,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--lattice-based-cryptography.md",
+      "size_kb": 46.7,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--machine-learning.md",
+      "size_kb": 253.9,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--multi-agent-system.md",
+      "size_kb": 57.8,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--post-quantum-cryptography.md",
+      "size_kb": 138.5,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--prompt-engineering.md",
+      "size_kb": 90.6,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--quantum-cryptography.md",
+      "size_kb": 148.9,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--regulation-of-ai.md",
+      "size_kb": 249.7,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--remote-sensing.md",
+      "size_kb": 112.5,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--retrieval-augmented-generation.md",
+      "size_kb": 46.8,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--shor-algorithm.md",
+      "size_kb": 79.1,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--spatial-analysis.md",
+      "size_kb": 145.4,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "wiki--web-mapping.md",
+      "size_kb": 66.0,
+      "category": "wiki",
+      "format": ".md"
+    },
+    {
+      "name": "zh-ai-regulation-comparison.md",
+      "size_kb": 3.8,
+      "category": "zh",
+      "format": ".md"
+    },
+    {
+      "name": "zh-gis-basics.md",
+      "size_kb": 4.7,
+      "category": "zh",
+      "format": ".md"
+    },
+    {
+      "name": "zh-quantum-crypto.md",
+      "size_kb": 3.6,
+      "category": "zh",
+      "format": ".md"
+    }
+  ]
+}

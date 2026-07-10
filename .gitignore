@@ -25,6 +25,7 @@ secrets/
 reports/
 reports_real/
 data/chroma_db/
+data/documents/papers/
 scripts/output.txt
 
 # Local tooling

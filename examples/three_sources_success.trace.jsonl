@@ -1,0 +1,4 @@
+{"stage":"rag_agent","status":"completed","elapsed_ms":120,"source":"RAG","summary":"3 local chunks retrieved with chunk citations.","run_id":"example-three-source","thread_id":"example-three-source","metadata":{"result_count":3}}
+{"stage":"web_agent","status":"completed","elapsed_ms":240,"source":"Web","summary":"3 web snippets returned with URL refs.","run_id":"example-three-source","thread_id":"example-three-source","metadata":{"result_count":3}}
+{"stage":"model_agent","status":"completed","elapsed_ms":310,"source":"Model","summary":"Model knowledge marked as inference.","run_id":"example-three-source","thread_id":"example-three-source","metadata":{"evidence_type":"model knowledge / inference"}}
+{"stage":"factcheck","status":"completed","elapsed_ms":420,"source":"FactCheck","summary":"No failed-source leakage detected.","run_id":"example-three-source","thread_id":"example-three-source","metadata":{"review_status":"accepted"}}

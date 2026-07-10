@@ -1,10 +1,26 @@
-"""配置加载 — 从 YAML + 环境变量读取，提供统一访问接口"""
+"""配置加载 — 从 YAML + 本地 .env + 环境变量读取，提供统一访问接口"""
 
 import os
 from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_local_env() -> None:
+    """Load local dotenv files into the current process only.
+
+    Values are not written to the OS environment, and real environment
+    variables still take precedence when already set.
+    """
+
+    for env_path in (PROJECT_ROOT / ".env", Path.cwd() / ".env"):
+        if env_path.exists():
+            load_dotenv(env_path, override=False)
 
 
 def _find_config() -> Path:
@@ -16,8 +32,7 @@ def _find_config() -> Path:
     if cwd.exists():
         return cwd
     # 最后回退到项目根（src/conflux 的上级）
-    project_root = Path(__file__).parent.parent.parent
-    return project_root / "config.yaml"
+    return PROJECT_ROOT / "config.yaml"
 
 
 def _load_raw() -> dict:
@@ -58,6 +73,7 @@ _config: dict | None = None
 def load() -> dict:
     global _config
     if _config is None:
+        _load_local_env()
         _config = _env_override(_load_raw())
     return _config
 

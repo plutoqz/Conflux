@@ -1,0 +1,4 @@
+{"stage":"rag_agent","status":"completed","elapsed_ms":110,"source":"RAG","summary":"Older local standard version retrieved.","run_id":"example-conflict","thread_id":"example-conflict","metadata":{"result_count":1}}
+{"stage":"web_agent","status":"completed","elapsed_ms":280,"source":"Web","summary":"Newer web standard version retrieved.","run_id":"example-conflict","thread_id":"example-conflict","metadata":{"result_count":1}}
+{"stage":"arbitration","status":"completed","elapsed_ms":360,"source":null,"summary":"Conflict marked contested; timestamp comparison required.","run_id":"example-conflict","thread_id":"example-conflict","metadata":{"contested":true}}
+{"stage":"factcheck","status":"completed","elapsed_ms":500,"source":"FactCheck","summary":"Human review hook recorded for unresolved freshness conflict.","run_id":"example-conflict","thread_id":"example-conflict","metadata":{"review_status":"awaiting_user_review"}}

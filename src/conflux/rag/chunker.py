@@ -43,7 +43,13 @@ def chunk_document(
         parent_id = f"{metadata.get('source', 'unknown')}#p{parent_idx}"
         parent_chunks.append(Document(
             page_content=parent_text,
-            metadata={**metadata, "chunk_type": "parent", "chunk_id": parent_id},
+            metadata={
+                **metadata,
+                "chunk_type": "parent",
+                "chunk_id": parent_id,
+                "char_start": start,
+                "char_end": start + len(parent_text),
+            },
         ))
 
         # 按 child_size 切分子块
@@ -60,6 +66,8 @@ def chunk_document(
                     "chunk_type": "child",
                     "chunk_id": child_id,
                     "parent_id": parent_id,
+                    "char_start": start + cs,
+                    "char_end": start + cs + len(child_text),
                 },
             ))
             child_idx += 1

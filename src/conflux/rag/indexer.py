@@ -49,7 +49,10 @@ def index_documents(
         return 0
 
     ids = [d.metadata.get("chunk_id", str(hash(d.page_content))) for d in new_docs]
-    vector_store.add_documents(new_docs, ids=ids)
+    batch_size = 5000
+    for start in range(0, len(new_docs), batch_size):
+        end = start + batch_size
+        vector_store.add_documents(new_docs[start:end], ids=ids[start:end])
     return len(new_docs)
 
 
@@ -59,6 +62,8 @@ def clear_index(vector_store: Chroma) -> None:
         existing = vector_store.get()
         ids = existing.get("ids", [])
         if ids:
-            vector_store.delete(ids=ids)
+            batch_size = 5000
+            for start in range(0, len(ids), batch_size):
+                vector_store.delete(ids=ids[start : start + batch_size])
     except Exception:
         pass

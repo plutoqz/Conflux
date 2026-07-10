@@ -1,0 +1,4 @@
+{"stage":"rag_agent","status":"completed","elapsed_ms":100,"source":"RAG","summary":"Local Loop Engineering evidence retrieved.","run_id":"example-web-failed","thread_id":"example-web-failed","metadata":{"result_count":2}}
+{"stage":"web_agent","status":"failed","elapsed_ms":260,"source":"Web","summary":"Web search timed out and was excluded from evidence.","run_id":"example-web-failed","thread_id":"example-web-failed","metadata":{"error":"timeout"}}
+{"stage":"model_agent","status":"completed","elapsed_ms":330,"source":"Model","summary":"Model inference labeled and used with lower authority.","run_id":"example-web-failed","thread_id":"example-web-failed","metadata":{"evidence_type":"model knowledge / inference"}}
+{"stage":"factcheck","status":"completed","elapsed_ms":480,"source":"FactCheck","summary":"Failed Web source did not enter Evidence Graph.","run_id":"example-web-failed","thread_id":"example-web-failed","metadata":{"review_status":"accepted"}}

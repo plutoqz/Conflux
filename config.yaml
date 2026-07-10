@@ -50,6 +50,8 @@ agent:
 research:
   enable_l4: true
   max_deep_questions: 2
+  max_verify_iterations: 1
+  max_rewrite_attempts: 1
 
 slo:
   survey_p95_ms: 45000

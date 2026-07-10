@@ -1,190 +1,202 @@
 # Conflux
 
-Conflux is an API-first multi-agent research system that combines local RAG, web search, and model knowledge into auditable Markdown and HTML research reports.
+Conflux is an API-first multi-agent research system that combines local RAG, web search, and model knowledge into auditable Markdown and HTML reports.
 
-It is designed around the architecture in [docs/architecture.md](docs/architecture.md): three-source arbitration, Evidence Graph tracing, FactCheck, L4 deepening, SLO-aware run summaries, and repeatable acceptance checks.
+The project is designed for personal use and resume demonstration: it shows source-aware agent orchestration, Evidence Graph tracing, FactCheck verification, chunk-level RAG citations, offline eval harnesses, and structured run traces.
 
-## Highlights
+## Technical Highlights
 
-- **API-first by default**: LLM and embedding calls use remote APIs. No local model is required.
-- **Three-source research**: RAG, Web, and Model agents run as independent sources.
-- **Explicit source status**: every source is marked `success`, `failed`, or `fallback`.
-- **No fake evidence**: failed or fallback sources are excluded from consensus voting.
-- **Evidence Graph**: key claims are represented as traceable evidence nodes with source metadata.
-- **FactCheck gate**: checks whether important claims can be traced to valid sources.
-- **Markdown + HTML delivery**: every completed research run can produce editable and browsable reports.
-- **Acceptance verifier**: generated reports can be machine-checked before being treated as valid.
+- LangGraph fan-out/fan-in workflow for RAG, Web, and Model agents.
+- Source status protocol: every source is `success`, `failed`, or `fallback`.
+- Failed/fallback sources are excluded from Evidence Graph nodes and consensus voting.
+- Agent outputs include claim-level `evidence_refs`, `confidence`, and `limitations`.
+- RAG results carry chunk citations such as `[RAG:quantum-crypto.txt#chunk-p0-c0]`.
+- FactCheck performs deterministic leakage checks and a revision pass before human review.
+- Structured trace JSONL and run summary JSON make each run inspectable.
+- Offline eval scripts validate retrieval quality, report acceptance, leakage, and prompt-injection handling.
 
-## Architecture
+## Why LangGraph
 
-```text
-User Query
-   |
-   v
-Phase 2 Multi-Agent Graph
-   |
-   +-- RAG Agent   -> local Chroma retrieval
-   +-- Web Agent   -> web search
-   +-- Model Agent -> remote LLM world knowledge
-   |
-   v
-Evidence Merge -> Arbitration -> Report Synthesis -> FactCheck -> L4 Deep Research
-   |
-   v
-Markdown Report + HTML Report + Acceptance Check
+Conflux uses LangGraph because the workflow needs explicit state boundaries, parallel branches, durable execution hooks, and resumable thread IDs. The current graph is checkpoint-ready through an in-memory checkpointer and records `run_id`, `thread_id`, checkpoint backend, source statuses, and stage progression in the report and run summary.
+
+```mermaid
+flowchart TD
+    Q["User query"] --> D["dispatch"]
+    D --> R["RAG agent"]
+    D --> W["Web agent"]
+    D --> M["Model agent"]
+    R --> E["evidence merge"]
+    W --> E
+    M --> E
+    E --> A["claim arbitration"]
+    A --> S["synthesize report"]
+    S --> F["FactCheck + revision"]
+    F --> H{"needs review?"}
+    H -->|yes| U["human review hook"]
+    H -->|no| L["L4 deep research"]
+    U --> L
+    L --> O["Markdown + HTML + trace"]
 ```
 
-The key rule is simple: only `success` sources can support factual claims. A failed web search or a model-written fallback is still shown to the user, but it cannot become evidence.
+## Resume-Demonstrable Capabilities
+
+- Built a reproducible API-first multi-agent research system with documented setup, sample reports, acceptance verification, and source-aware report generation.
+- Implemented LangGraph-based durable orchestration with fan-out/fan-in execution, checkpoint-ready state, structured streaming traces, and human review hooks.
+- Built a RAG pipeline with chunk-level citations and an offline retrieval evaluation baseline.
+- Designed a claim-level collaboration protocol with confidence scoring, conflict arbitration, and failed-source exclusion.
+- Developed an evaluation harness covering source failure, disagreement, hallucination leakage, prompt injection, retrieval quality, and acceptance gates.
 
 ## Repository Layout
 
 ```text
 .
-├── config.yaml                  # API-first model, embedding, retrieval config
-├── docs/architecture.md         # System design and phase roadmap
-├── data/documents/              # Sample documents for RAG indexing
-├── prompts/                     # Versioned agent, routing, evaluation prompts
+├── config.yaml
+├── .env.example
+├── examples/
+├── docs/
+├── data/documents/
+├── prompts/
+├── scripts/
+│   ├── eval_retrieval.py
+│   ├── eval_reports.py
+│   └── eval_end_to_end.py
 ├── src/conflux/
-│   ├── __main__.py              # CLI entrypoint
-│   ├── graph_v2.py              # Phase 2 multi-agent graph
-│   ├── source_status.py         # success / failed / fallback payloads
-│   ├── evidence.py              # Evidence Graph
-│   ├── report.py                # Markdown and HTML report export
-│   ├── acceptance.py            # Report acceptance verifier
-│   ├── tools/                   # RAG, Web, Model tools
-│   └── rag/                     # Chunking, indexing, hybrid retrieval
-└── tests/                       # Unit and structural acceptance tests
+│   ├── __main__.py
+│   ├── graph_v2.py
+│   ├── checkpointing.py
+│   ├── trace.py
+│   ├── source_status.py
+│   ├── evidence.py
+│   ├── report.py
+│   ├── acceptance.py
+│   ├── tools/
+│   └── rag/
+└── tests/
 ```
 
-## Requirements
-
-- Python 3.11+
-- Remote chat model API compatible with the configured provider
-- Remote embedding API for RAG indexing
-
-Install the project dependencies:
-
-```powershell
-python -m pip install -e .
-```
-
-For development:
+## Setup
 
 ```powershell
 python -m pip install -e ".[dev]"
 ```
 
-## Configuration
+Copy `.env.example` to `.env` for local use only. Do not commit real keys.
 
-The default [config.yaml](config.yaml) uses an OpenAI-compatible API provider:
+The default config uses an OpenAI-compatible provider:
 
 ```yaml
 models:
   reasoning:
-    provider: openai_compatible
     model: deepseek-v4-flash
     base_url: https://www.dmxapi.cn/v1
 
 embedding:
-  provider: openai_compatible
   model: text-embedding-3-small
   base_url: https://www.dmxapi.cn/v1
 ```
 
-Credentials must be provided through environment variables. Do not write keys into this repository.
-
-Example:
+Required for real runs:
 
 ```powershell
 $env:OPENAI_API_KEY="your-api-key"
 ```
 
-You can also override individual config values with `CONFLUX_` environment variables, for example:
+Optional overrides:
 
 ```powershell
 $env:CONFLUX_MODELS__REASONING__API_KEY="your-api-key"
+$env:CONFLUX_MODELS__CHEAP__API_KEY="your-api-key"
 $env:CONFLUX_EMBEDDING__API_KEY="your-api-key"
+$env:SERPAPI_API_KEY="your-serpapi-key"
 ```
+
+When keys are missing, the CLI exits with a clear credential message before attempting real API calls.
 
 ## Quick Start
 
-Build the RAG index:
+Build the local RAG index:
 
 ```powershell
-$env:OPENAI_API_KEY="your-api-key"
 python -m conflux --index data/documents
 ```
 
 Run a Phase 2 research query:
 
 ```powershell
-$env:OPENAI_API_KEY="your-api-key"
-python -m conflux "研究 Multi-Agent RAG 中的三源仲裁，并说明 Evidence Graph、FactCheck、L4 深化研究在真实工程落地中的作用、风险和测试建议" --mode phase2 --output-dir reports
+python -m conflux "Explain how Conflux should arbitrate RAG, Web, and Model evidence." --mode phase2 --output-dir reports --stream-events
 ```
 
-The CLI prints generated report paths:
+Run with checkpoint-ready state:
 
-```text
-Markdown 报告：...\reports\YYYYMMDD-HHMMSS-....md
-HTML 报告：...\reports\YYYYMMDD-HHMMSS-....html
+```powershell
+python -m conflux "Evaluate Loop Engineering in agent workflows." --thread-id demo-loop-001 --checkpoint-backend memory --output-dir reports
 ```
 
-## Validate A Generated Report
+Resume the same thread ID:
 
-Use the built-in acceptance verifier:
+```powershell
+python -m conflux "Evaluate Loop Engineering in agent workflows." --resume demo-loop-001 --checkpoint-backend memory --output-dir reports
+```
+
+Validate a generated report:
 
 ```powershell
 python -m conflux.acceptance path\to\report.md path\to\report.html
 ```
 
-The verifier checks:
-
-- Markdown and HTML both exist
-- report contains final conclusions, source status, uncertainty, FactCheck, evidence summary, run summary, and quality score
-- RAG/Web/Model all have explicit source status
-- failed/fallback sources do not appear as evidence nodes
-- Evidence Graph JSON is parseable
-- FactCheck contains deterministic traceability checks
-- quality score says the report is accepted
-
 ## Quality Gates
 
-Before publishing changes:
+Run unit tests:
 
 ```powershell
 python -m pytest -q
-python -m pip check
-rg -n --hidden --glob '!data/chroma_db/**' --glob '!src/conflux.egg-info/**' --glob '!**/__pycache__/**' --glob '!reports*/**' -e 'sk-[A-Za-z0-9_-]{20,}' -e 'sk-proj-[A-Za-z0-9_-]{20,}' -e 'AKIA[0-9A-Z]{16}' -e 'AIza[0-9A-Za-z_-]{35}' .
 ```
 
-## Current Phase Coverage
+Run offline retrieval eval:
 
-### Phase 1
+```powershell
+python scripts/eval_retrieval.py --offline
+```
 
-- API-first model and embedding setup
-- RAG indexing with remote embeddings
-- Hybrid retrieval over Chroma
-- Markdown and HTML report export
-- Basic testing and dependency checks
+Run offline report eval:
 
-### Phase 2
+```powershell
+python scripts/eval_reports.py --offline
+```
 
-- RAG / Web / Model multi-agent execution
-- Structured source status
-- Evidence Graph
-- Three-source arbitration prompt and deterministic safeguards
-- FactCheck traceability checks
-- L4 deep research supplement
-- Run quality scoring
-- Acceptance verifier for real report artifacts
+Run an opt-in real API smoke test:
+
+```powershell
+python scripts/eval_end_to_end.py --real
+```
+
+## Current Offline Baselines
+
+The deterministic offline retrieval eval writes:
+
+- `reports/eval/retrieval_eval.md`
+- `reports/eval/retrieval_eval.json`
+
+The report eval writes:
+
+- `reports/eval/report_eval.md`
+- `reports/eval/report_eval.json`
+
+These outputs include recall@k, hit rate, source coverage, irrelevant hit rate, acceptance pass rate, failed-source leakage, prompt-injection leakage, latency, and estimated cost.
+
+## Examples
+
+- [Three sources succeeded](examples/three_sources_success.md)
+- [Web failed, RAG + Model succeeded](examples/web_failed_rag_model_success.md)
+- [RAG and Web conflict](examples/rag_web_conflict.md)
 
 ## Security
 
 - API keys belong in environment variables only.
 - `.env`, generated reports, Chroma databases, caches, and runtime artifacts are ignored by Git.
-- Failed tool calls are surfaced as `failed` and excluded from evidence consensus.
-- Model-only补写 is marked as fallback/model knowledge instead of being treated as a retrieved source.
+- Prompt-injection text retrieved from RAG is treated as evidence text only, never as system instructions.
+- Failed and fallback sources remain visible to the user but cannot become Evidence Graph nodes.
 
 ## License
 
-No license has been selected yet. Add one before distributing this project publicly.
+MIT. See [LICENSE](LICENSE).

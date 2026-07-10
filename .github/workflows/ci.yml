@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  offline-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Pytest
+        run: python -m pytest -q
+      - name: Import check
+        run: python -c "import conflux; import conflux.graph_v2; import conflux.acceptance"
+      - name: Secret scan
+        run: |
+          ! grep -RInE 'sk-[A-Za-z0-9_-]{40,}|sk-proj-[A-Za-z0-9_-]{40,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}' \
+            --exclude-dir=.git --exclude-dir=.pytest_cache --exclude-dir=reports --exclude-dir=data/chroma_db .
+      - name: Offline retrieval eval
+        run: python scripts/eval_retrieval.py --offline --out-dir reports/eval
+      - name: Offline report eval
+        run: python scripts/eval_reports.py --offline --out-dir reports/eval
