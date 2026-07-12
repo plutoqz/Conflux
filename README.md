@@ -126,6 +126,12 @@ Run a Phase 2 research query:
 python -m conflux "Explain how Conflux should arbitrate RAG, Web, and Model evidence." --mode phase2 --output-dir reports --stream-events
 ```
 
+Run the local research workbench:
+
+```powershell
+python -m conflux.workbench --host 127.0.0.1 --port 8765
+```
+
 Run with checkpoint-ready state:
 
 ```powershell

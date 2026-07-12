@@ -63,6 +63,7 @@ Deferred from MVP:
 | R2 | P0 | Paper Ingestion Core | Papers can be loaded/crawled into stable records. |
 | R3 | P0 | Paper Radar and Inbox | Papers are scored, filtered, analyzed, and reported. |
 | R4 | P0 | RAG Promotion | High-value papers enter the knowledge base with citations. |
+| R4.5 | P1 | Local Research Workbench | Local UI for paper inbox, promotion review, reports, and API/model testing. |
 | R5 | P1 | Evidence Q&A Integration | Q&A distinguishes local papers, web, and model inference. |
 | R6 | P0 | Progress Audit MVP | Local projects can be audited using evidence from files and Git. |
 | R7 | P1 | Weekly Research Report | Literature and progress are summarized together. |
@@ -591,6 +592,12 @@ Reasoning:
 - Progress Audit is the main differentiator and should land before UI work.
 - Weekly Report becomes compelling only after papers and progress both work.
 
+R4.5 exception:
+
+- A thin local workbench is allowed before R5/R6 because it reviews existing R1-R4 outputs instead of replacing core logic.
+- The workbench must call existing Python pipelines and read generated JSON/Markdown/HTML artifacts.
+- It must not become a full SaaS UI, and CLI workflows must remain first-class.
+
 ## 16. First Sprint Proposal
 
 Sprint duration: 1 week  
@@ -623,6 +630,7 @@ Status after R4:
 - R2 Paper Ingestion Core is implemented with offline fixtures, arXiv query planning/search, record normalization, deduplication, and negative filtering.
 - R3 Paper Radar and Inbox is implemented with deterministic relevance scoring, offline analysis, reading-level assignment, Markdown inbox, and JSON inbox.
 - R4 RAG Promotion is implemented with explicit ingestion policy, `LocalPaper` metadata, citation refs, reviewable promoted paper documents, optional Chroma indexing, and optional AcademyHunter-style PDF download/full-text chunk support.
+- R4.5 Local Research Workbench is implemented with a no-extra-dependency local web UI for paper inbox, promotion review, report browsing, model probing, and real query execution with temporary custom API URL/key/model overrides.
 
 Hands-on test points:
 
@@ -631,6 +639,7 @@ python -m conflux.profile validate profiles/example_gis_agent.yaml
 python -m conflux.papers crawl --profile profiles/example_gis_agent.yaml --source arxiv --dry-run
 python -m conflux.papers inbox --profile profiles/example_gis_agent.yaml --fixture tests/fixtures/papers/arxiv_sample.json --out-dir reports/papers_demo
 python -m conflux.papers promote reports/papers_demo/paper_inbox.json --out-dir data/documents/papers
+python -m conflux.workbench --host 127.0.0.1 --port 8765
 ```
 
 Optional real-run gates:
