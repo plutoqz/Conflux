@@ -89,6 +89,28 @@ def test_parse_arxiv_feed():
     assert papers[0].matched_queries == ["all:agent"]
 
 
+def test_profile_arxiv_queries_combine_topic_direction_and_category_constraints():
+    from conflux.paper_ingestion.arxiv_source import profile_arxiv_queries
+    from conflux.research_profile import ResearchProfile
+
+    profile = ResearchProfile(
+        id="disaster-kg",
+        name="Disaster KG",
+        fields=["cs.AI", "physics.geo-ph", "knowledge representation"],
+        research_questions=[],
+        keywords=["knowledge graph", "knowledge representation", "natural disaster", "emergency response"],
+    )
+
+    queries = profile_arxiv_queries(profile, max_queries=3)
+
+    assert len(queries) == 3
+    assert 'all:"knowledge graph" AND all:"natural disaster"' in queries[0]
+    assert 'all:"knowledge graph" AND all:"emergency response"' in queries[1]
+    assert 'all:"knowledge graph" AND all:"knowledge representation"' in queries[2]
+    assert "(cat:cs.AI OR cat:physics.geo-ph)" in queries[0]
+    assert "knowledge representation" not in queries[0]
+
+
 def test_papers_cli_load_fixture_and_crawl_dry_run():
     root = Path(__file__).resolve().parents[1]
 

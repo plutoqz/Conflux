@@ -5,6 +5,7 @@ from __future__ import annotations
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+import re
 from typing import Any
 
 from conflux.research_profile import ResearchProfile
@@ -17,22 +18,49 @@ ATOM = "{http://www.w3.org/2005/Atom}"
 ARXIV = "{http://arxiv.org/schemas/atom}"
 
 
-def build_arxiv_query(keywords: list[str], categories: list[str] | None = None) -> str:
-    """Build a compact arXiv search query from keywords and optional categories."""
+def build_arxiv_query(
+    keywords: list[str],
+    categories: list[str] | None = None,
+    *,
+    match_all: bool = False,
+) -> str:
+    """Build an arXiv query with categories acting as a result constraint."""
 
-    keyword_terms = [f'all:"{keyword}"' for keyword in keywords if keyword.strip()]
+    keyword_terms = [f'all:"{_escape_query_term(keyword)}"' for keyword in keywords if keyword.strip()]
     category_terms = [f"cat:{category}" for category in (categories or []) if category.strip()]
-    terms = keyword_terms + category_terms
-    return " OR ".join(terms) if terms else "all:research"
+    keyword_joiner = " AND " if match_all else " OR "
+    keyword_expression = keyword_joiner.join(keyword_terms)
+    category_expression = " OR ".join(category_terms)
+    if keyword_expression and category_expression:
+        return f"({keyword_expression}) AND ({category_expression})"
+    return keyword_expression or category_expression or "all:research"
+
+
+def profile_keyword_groups(profile: ResearchProfile, *, max_queries: int = 5) -> list[list[str]]:
+    """Create focused query groups anchored on the profile's primary topic."""
+
+    keywords = _dedupe_terms(profile.keywords)
+    if not keywords:
+        return []
+    if len(keywords) == 1:
+        return [[keywords[0]]]
+
+    anchor = keywords[0]
+    anchor_tokens = _term_tokens(anchor)
+    independent = [keyword for keyword in keywords[1:] if anchor_tokens.isdisjoint(_term_tokens(keyword))]
+    related = [keyword for keyword in keywords[1:] if keyword not in independent]
+    groups = [[anchor, keyword] for keyword in (independent + related)[:max_queries]]
+    return groups[:max_queries]
 
 
 def profile_arxiv_queries(profile: ResearchProfile, *, max_queries: int = 5) -> list[str]:
-    """Derive arXiv query strings from a research profile."""
+    """Derive focused, category-constrained arXiv queries from a profile."""
 
-    queries = []
-    for keyword in profile.keywords[:max_queries]:
-        queries.append(build_arxiv_query([keyword]))
-    return queries or [build_arxiv_query(profile.fields[:1])]
+    categories = _arxiv_categories(profile.fields)
+    groups = profile_keyword_groups(profile, max_queries=max_queries)
+    if groups:
+        return [build_arxiv_query(group, categories, match_all=len(group) > 1) for group in groups]
+    return [build_arxiv_query([], categories)]
 
 
 def normalize_arxiv_entry(entry: dict[str, Any]) -> PaperRecord:
@@ -71,12 +99,12 @@ def normalize_arxiv_entry(entry: dict[str, Any]) -> PaperRecord:
     )
 
 
-def search_arxiv(query: str, *, max_results: int = 10) -> list[PaperRecord]:
+def search_arxiv(query: str, *, max_results: int = 10, start: int = 0) -> list[PaperRecord]:
     """Run a real arXiv API search. This is intentionally not used by offline tests."""
 
     params = urllib.parse.urlencode({
         "search_query": query,
-        "start": 0,
+        "start": max(0, start),
         "max_results": max_results,
         "sortBy": "submittedDate",
         "sortOrder": "descending",
@@ -150,6 +178,41 @@ def _string_list(value: Any) -> list[str]:
 
 def _clean_text(text: str) -> str:
     return " ".join(text.split())
+
+
+def _escape_query_term(value: str) -> str:
+    return " ".join(value.replace('"', " ").split())
+
+
+def _dedupe_terms(values: list[str]) -> list[str]:
+    clean = []
+    seen = set()
+    for value in values:
+        term = " ".join(str(value).split())
+        key = term.casefold()
+        if term and key not in seen:
+            seen.add(key)
+            clean.append(term)
+    return clean
+
+
+def _term_tokens(value: str) -> set[str]:
+    return set(re.findall(r"[a-z][a-z0-9-]{2,}", value.casefold()))
+
+
+def _arxiv_categories(fields: list[str]) -> list[str]:
+    prefixes = {
+        "astro-ph", "cond-mat", "cs", "econ", "eess", "gr-qc", "hep-ex", "hep-lat",
+        "hep-ph", "hep-th", "math", "math-ph", "nlin", "nucl-ex", "nucl-th", "physics",
+        "q-bio", "q-fin", "quant-ph", "stat",
+    }
+    categories = []
+    for field in fields:
+        value = field.strip()
+        prefix = value.split(".", 1)[0]
+        if prefix in prefixes and re.fullmatch(r"[A-Za-z-]+(?:\.[A-Za-z-]+)?", value):
+            categories.append(value)
+    return _dedupe_terms(categories)
 
 
 def _text(node) -> str:

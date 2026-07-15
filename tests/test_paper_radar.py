@@ -34,6 +34,50 @@ def test_reading_level_thresholds():
     assert reading_level_for_score(0.10) == "skip"
 
 
+def test_chinese_research_question_bridges_through_matched_english_keywords():
+    from conflux.paper_ingestion.models import PaperRecord
+    from conflux.paper_ingestion.scorer import score_paper
+    from conflux.research_profile import ResearchProfile
+
+    profile = ResearchProfile(
+        id="disaster-kg",
+        name="Disaster KG",
+        fields=["cs.AI"],
+        research_questions=["研究知识图谱如何支持自然灾害应急响应中的多源证据整合？"],
+        keywords=[
+            "knowledge graph",
+            "natural disaster",
+            "emergency response",
+            "disaster ontology",
+            "spatiotemporal reasoning",
+            "data fusion",
+        ],
+    )
+    relevant = PaperRecord(
+        id="relevant",
+        title="Knowledge Graphs for Natural Disaster Emergency Response",
+        abstract="A disaster ontology supports emergency response and multi-source data fusion.",
+        source="arxiv",
+        categories=["cs.AI"],
+        pdf_url="https://example.test/paper.pdf",
+        authors=["Researcher"],
+    )
+    broad = PaperRecord(
+        id="broad",
+        title="A Knowledge Graph for Protein Interaction",
+        abstract="A general knowledge representation and knowledge graph construction method.",
+        source="arxiv",
+    )
+
+    relevant_score = score_paper(relevant, profile)
+    broad_score = score_paper(broad, profile)
+
+    assert relevant_score.score >= 0.62
+    assert relevant_score.matched_questions == profile.research_questions
+    assert any("bridged" in reason for reason in relevant_score.reasons)
+    assert broad_score.score < 0.62
+
+
 def test_analyze_papers_sets_reading_level_and_reasons():
     from conflux.paper_ingestion import load_paper_fixture
     from conflux.paper_ingestion.analyzer import analyze_papers

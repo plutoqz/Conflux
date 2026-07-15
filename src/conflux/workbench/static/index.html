@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#17201e">
+  <title>Conflux · AI 研究工作台</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <a class="skip-link" href="#workspaceMain">跳到主要内容</a>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="主导航">
+      <div class="brand-row">
+        <div class="brand-mark" aria-hidden="true"><i data-lucide="sparkles"></i></div>
+        <div class="brand-copy">
+          <strong>Conflux</strong>
+          <span>Research Copilot</span>
+        </div>
+        <button class="icon-button sidebar-close" id="sidebarClose" type="button" aria-label="关闭导航" title="关闭导航">
+          <i data-lucide="x" aria-hidden="true"></i>
+        </button>
+      </div>
+
+      <nav class="nav-groups" aria-label="工作台功能">
+        <div class="nav-group">
+          <div class="nav-group-label">工作区</div>
+          <button class="nav-item active" type="button" data-target="dashboard" data-title="研究总览" data-subtitle="掌握研究状态，并从下一步行动继续">
+            <i data-lucide="layout-dashboard" aria-hidden="true"></i><span>研究总览</span>
+          </button>
+          <button class="nav-item" type="button" data-target="papers" data-title="论文发现" data-subtitle="基于研究画像搜索、评分并筛选新论文">
+            <i data-lucide="inbox" aria-hidden="true"></i><span>论文发现</span>
+          </button>
+          <button class="nav-item" type="button" data-target="promotion" data-title="知识库" data-subtitle="审核论文并沉淀为可追溯的本地知识">
+            <i data-lucide="library" aria-hidden="true"></i><span>知识库</span>
+          </button>
+          <button class="nav-item" type="button" data-target="query" data-title="研究查询" data-subtitle="协调本地知识、网络证据与模型推理">
+            <i data-lucide="search" aria-hidden="true"></i><span>研究查询</span>
+          </button>
+        </div>
+        <div class="nav-group">
+          <div class="nav-group-label">成果</div>
+          <button class="nav-item" type="button" data-target="reports" data-title="研究成果" data-subtitle="搜索、比较并预览生成的研究报告">
+            <i data-lucide="files" aria-hidden="true"></i><span>研究成果</span>
+            <span class="nav-count" id="reportNavCount">0</span>
+          </button>
+        </div>
+        <div class="nav-group nav-group-system">
+          <div class="nav-group-label">系统</div>
+          <button class="nav-item" type="button" data-target="model" data-title="模型与环境" data-subtitle="管理推理模型、Embedding 与运行凭证">
+            <i data-lucide="settings-2" aria-hidden="true"></i><span>模型与环境</span>
+          </button>
+        </div>
+      </nav>
+
+      <div class="sidebar-health">
+        <button class="health-summary" type="button" data-nav-target="model">
+          <span class="health-indicator" id="sideHealthDot" aria-hidden="true"></span>
+          <span><strong id="sideHealthTitle">正在检查环境</strong><small id="sideHealthText">连接本地服务...</small></span>
+          <i data-lucide="chevron-right" aria-hidden="true"></i>
+        </button>
+        <div class="local-note"><i data-lucide="hard-drive" aria-hidden="true"></i><span>数据仅保存在本机</span></div>
+      </div>
+    </aside>
+    <button class="sidebar-backdrop" id="sidebarBackdrop" type="button" aria-label="关闭导航"></button>
+
+    <main class="workspace" id="workspaceMain">
+      <header class="topbar">
+        <div class="topbar-heading">
+          <button class="icon-button menu-button" id="menuButton" type="button" aria-label="打开导航" title="打开导航">
+            <i data-lucide="menu" aria-hidden="true"></i>
+          </button>
+          <div>
+            <div class="page-heading-row">
+              <h1 id="pageTitle">研究总览</h1>
+              <span class="workspace-badge">Local</span>
+            </div>
+            <p id="pageSubtitle">掌握研究状态，并从下一步行动继续</p>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <div class="run-state" id="runState" role="status" aria-live="polite">
+            <span id="busyDot" class="busy-dot" aria-hidden="true"></span>
+            <span id="busyText">系统就绪</span>
+          </div>
+          <button id="refreshBtn" class="icon-button" type="button" aria-label="刷新工作台" title="刷新工作台">
+            <i data-lucide="refresh-cw" aria-hidden="true"></i>
+          </button>
+          <button class="button primary compact" type="button" data-nav-target="query" aria-label="新建研究" title="新建研究">
+            <i data-lucide="plus" aria-hidden="true"></i><span>新建研究</span>
+          </button>
+        </div>
+      </header>
+      <div class="project-path" id="rootPath" aria-label="当前项目目录"></div>
+
+      <section id="dashboard" class="view active" aria-labelledby="pageTitle">
+        <section class="assistant-panel" aria-labelledby="assistantTitle">
+          <div class="assistant-intro">
+            <div class="assistant-symbol" aria-hidden="true"><i data-lucide="bot"></i></div>
+            <div>
+              <p class="assistant-label">AI 研究助手</p>
+              <h2 id="assistantTitle">从一个值得追踪的问题开始</h2>
+              <p>Conflux 会协调本地论文、网络信息和模型推理，并保留每条结论的证据边界。</p>
+            </div>
+          </div>
+          <div class="quick-query">
+            <label class="sr-only" for="quickQueryText">研究问题</label>
+            <textarea id="quickQueryText" rows="2" placeholder="例如：对比近期多智能体事实核查方法，并指出可复现实验设计"></textarea>
+            <button id="quickQueryBtn" class="button primary" type="button">
+              <span>开始研究</span><i data-lucide="arrow-up-right" aria-hidden="true"></i>
+            </button>
+          </div>
+          <div class="prompt-suggestions" aria-label="研究问题示例">
+            <button type="button" data-prompt="梳理近期最值得精读的论文，并说明选择依据">梳理近期论文</button>
+            <button type="button" data-prompt="对比当前知识库中的主要方法、证据与争议">对比方法与证据</button>
+            <button type="button" data-prompt="找出当前研究方向的证据缺口和下一步实验机会">发现研究缺口</button>
+          </div>
+        </section>
+
+        <div id="dashLoading" class="loading-surface" aria-live="polite">
+          <span class="skeleton-line wide"></span><span class="skeleton-line"></span><span class="skeleton-line short"></span>
+        </div>
+
+        <div class="dashboard-grid" id="dashboardContent" hidden>
+          <div class="dashboard-main">
+            <section class="surface workflow-surface" aria-labelledby="workflowTitle">
+              <div class="section-heading">
+                <div><h2 id="workflowTitle">研究工作流</h2><p>按研究节奏继续，每一步都保留可审计产物。</p></div>
+                <span class="status-pill neutral" id="workflowStatus">准备就绪</span>
+              </div>
+              <div class="workflow-list">
+                <button type="button" class="workflow-step" data-nav-target="papers">
+                  <span class="step-icon"><i data-lucide="radar" aria-hidden="true"></i></span>
+                  <span><strong>发现论文</strong><small>按画像搜索并评分</small></span>
+                  <span class="step-meta" id="workflowPaperMeta">等待开始</span>
+                  <i data-lucide="chevron-right" aria-hidden="true"></i>
+                </button>
+                <button type="button" class="workflow-step" data-nav-target="promotion">
+                  <span class="step-icon"><i data-lucide="database" aria-hidden="true"></i></span>
+                  <span><strong>沉淀知识</strong><small>审核并写入本地知识库</small></span>
+                  <span class="step-meta" id="workflowKnowledgeMeta">等待开始</span>
+                  <i data-lucide="chevron-right" aria-hidden="true"></i>
+                </button>
+                <button type="button" class="workflow-step" data-nav-target="query">
+                  <span class="step-icon"><i data-lucide="flask-conical" aria-hidden="true"></i></span>
+                  <span><strong>执行研究</strong><small>协调三类来源并核查事实</small></span>
+                  <span class="step-meta" id="workflowQueryMeta">可发起</span>
+                  <i data-lucide="chevron-right" aria-hidden="true"></i>
+                </button>
+                <button type="button" class="workflow-step" data-nav-target="reports">
+                  <span class="step-icon"><i data-lucide="file-check-2" aria-hidden="true"></i></span>
+                  <span><strong>审阅成果</strong><small>比较报告并追踪证据</small></span>
+                  <span class="step-meta" id="workflowReportMeta">暂无报告</span>
+                  <i data-lucide="chevron-right" aria-hidden="true"></i>
+                </button>
+              </div>
+            </section>
+
+            <section class="surface" aria-labelledby="recentTitle">
+              <div class="section-heading">
+                <div><h2 id="recentTitle">最近成果</h2><p>继续审阅最近生成或更新的研究产物。</p></div>
+                <button class="text-button" type="button" data-nav-target="reports">查看全部<i data-lucide="arrow-right" aria-hidden="true"></i></button>
+              </div>
+              <div class="table-wrap compact-table">
+                <table>
+                  <thead><tr><th>文件</th><th>大小</th><th>更新时间</th></tr></thead>
+                  <tbody id="dashRecentReports"></tbody>
+                </table>
+                <div class="inline-empty" id="dashReportsEmpty">还没有研究成果，发起一次研究后会显示在这里。</div>
+              </div>
+            </section>
+          </div>
+
+          <div class="dashboard-side">
+            <section class="surface readiness-surface" aria-labelledby="readinessTitle">
+              <div class="section-heading">
+                <div><h2 id="readinessTitle">能力状态</h2><p id="readinessSummary">正在检查研究能力...</p></div>
+                <button class="icon-button subtle" type="button" data-nav-target="model" aria-label="打开模型与环境设置" title="打开设置"><i data-lucide="settings-2" aria-hidden="true"></i></button>
+              </div>
+              <div id="keyStatus" class="capability-list"></div>
+            </section>
+
+            <section class="surface knowledge-surface" aria-labelledby="knowledgeTitle">
+              <div class="section-heading"><div><h2 id="knowledgeTitle">知识资产</h2><p>本地语料与研究产物概况</p></div></div>
+              <div class="metric-list" id="dashGrid">
+                <div><span>知识文档</span><strong id="dashDocCount">-</strong></div>
+                <div><span>向量块</span><strong id="dashChunkCount">-</strong></div>
+                <div><span>论文资产</span><strong id="dashPaperCount">-</strong></div>
+                <div><span>研究报告</span><strong id="dashReportCount">-</strong></div>
+                <div class="metric-wide"><span>占用空间</span><strong id="dashTotalSize">-</strong></div>
+              </div>
+              <details class="asset-details" id="dashCharts">
+                <summary>查看语料分布<i data-lucide="chevron-down" aria-hidden="true"></i></summary>
+                <div class="asset-distribution">
+                  <div><h3>知识分类</h3><div id="dashCategories" class="category-list"></div></div>
+                  <div><h3>文件格式</h3><div id="dashFormats" class="format-list"></div></div>
+                </div>
+              </details>
+              <div id="dashVStore" class="vector-summary"><div id="dashVStoreDetail" class="stat-rows"></div></div>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <section id="papers" class="view" aria-labelledby="pageTitle">
+        <div class="content-grid form-result-layout">
+          <section class="surface form-surface" aria-labelledby="paperFormTitle">
+            <div class="section-heading"><div><h2 id="paperFormTitle">创建论文收件箱</h2><p>先选择研究画像，再决定从哪里获取论文。</p></div></div>
+            <fieldset class="form-section">
+              <legend>研究画像</legend>
+              <div class="segmented-control" aria-label="画像来源">
+                <label><input type="radio" name="profileMode" value="file" checked><span>使用已有画像</span></label>
+                <label><input type="radio" name="profileMode" value="inline"><span>临时创建画像</span></label>
+              </div>
+              <div id="profileFileFields" class="field-grid single">
+                <label>研究画像<select id="profilePath"></select></label>
+              </div>
+              <div id="profileInlineFields" class="field-grid two" hidden>
+                <label>画像名称<input id="profileName" placeholder="例如：多智能体事实核查"></label>
+                <label>研究领域<input id="profileFields" placeholder="cs.AI, cs.CL"></label>
+              </div>
+              <div id="profileInlineExtra" hidden>
+                <label>关键词<textarea id="profileKeywords" rows="3" placeholder="每行一个关键词，或使用逗号分隔"></textarea></label>
+                <label>研究问题<textarea id="profileDescription" rows="3" placeholder="说明研究对象、核心方法、应用场景和希望获得的证据"></textarea></label>
+                <label>排除关键词<textarea id="profileNegativeKeywords" rows="2" placeholder="例如：protein interaction, clinical medicine；每行一个或用逗号分隔"></textarea></label>
+                <div id="profileOptimization" class="profile-optimization" aria-live="polite" hidden>
+                  <div class="profile-optimization-heading">
+                    <span class="profile-optimization-icon"><i data-lucide="wand-sparkles" aria-hidden="true"></i></span>
+                    <div><strong id="profileOptimizationTitle">AI 优化建议</strong><p id="profileOptimizationMeta">建议稿不会自动保存，请审查后再采用。</p></div>
+                    <span id="profileOptimizationStatus" class="status-pill info">待审查</span>
+                  </div>
+                  <dl class="profile-preview" aria-label="AI 优化后的研究画像">
+                    <div><dt>研究领域</dt><dd id="optimizedProfileFields"></dd></div>
+                    <div><dt>关键词</dt><dd id="optimizedProfileKeywords"></dd></div>
+                    <div><dt>研究问题</dt><dd id="optimizedProfileDescription"></dd></div>
+                    <div><dt>排除关键词</dt><dd id="optimizedProfileNegativeKeywords"></dd></div>
+                    <div id="optimizedProfileNotesRow"><dt>优化说明</dt><dd><ul id="optimizedProfileNotes"></ul></dd></div>
+                  </dl>
+                  <div class="profile-review-actions">
+                    <button id="applyProfileOptimization" class="button primary compact" type="button"><i data-lucide="check" aria-hidden="true"></i><span>采用优化稿</span></button>
+                    <button id="dismissProfileOptimization" class="button secondary compact" type="button"><i data-lucide="x" aria-hidden="true"></i><span>放弃建议</span></button>
+                    <button id="undoProfileOptimization" class="button secondary compact" type="button" hidden><i data-lucide="undo-2" aria-hidden="true"></i><span>撤销优化</span></button>
+                  </div>
+                </div>
+                <div class="profile-actions">
+                  <button id="optimizeProfile" class="button secondary" type="button"><i data-lucide="wand-sparkles" aria-hidden="true"></i><span>AI 优化画像</span></button>
+                  <button id="saveProfile" class="button secondary" type="button"><i data-lucide="save" aria-hidden="true"></i><span>保存画像</span></button>
+                </div>
+              </div>
+            </fieldset>
+            <fieldset class="form-section">
+              <legend>论文来源</legend>
+              <div class="field-grid two">
+                <label>数据源<select id="paperSource"><option value="arxiv">arXiv 在线</option><option value="semantic_scholar">Semantic Scholar</option><option value="fixture">本地测试数据（固定样本）</option></select></label>
+                <label>最大结果数<input id="maxResults" type="number" min="1" max="100" value="10"></label>
+                <label id="fixtureField" hidden>测试数据路径<input id="fixturePath"></label>
+                <label>结果保存位置<input id="inboxOut"></label>
+              </div>
+              <label class="check-row"><input id="useLlm" type="checkbox"><span><strong>使用 AI 二次评分</strong><small>阅读标题与摘要后重新判断相关性，结果更准确但耗时更长。</small></span></label>
+            </fieldset>
+            <div class="form-actions">
+              <button id="runInbox" class="button primary" type="button"><i data-lucide="play" aria-hidden="true"></i><span>开始发现论文</span></button>
+            </div>
+          </section>
+          <section class="surface result-surface" id="inboxResultBand" aria-labelledby="inboxResultTitle">
+            <div class="section-heading"><div><h2 id="inboxResultTitle">筛选结果</h2><p>按相关性和阅读优先级排序。</p></div><span id="inboxStats" class="status-pill neutral"></span></div>
+            <div id="inboxEmpty" class="empty-state"><i data-lucide="inbox" aria-hidden="true"></i><strong>还没有论文结果</strong><p>完成左侧设置并开始发现，结果会在这里出现。</p></div>
+            <div class="table-wrap"><table id="papersTable"></table></div>
+            <pre id="inboxOutput" class="error-output" hidden></pre>
+          </section>
+        </div>
+      </section>
+
+      <section id="promotion" class="view" aria-labelledby="pageTitle">
+        <div class="content-grid form-result-layout">
+          <section class="surface form-surface" aria-labelledby="promotionTitle">
+            <div class="section-heading"><div><h2 id="promotionTitle">沉淀到知识库</h2><p>审核收件箱产物，控制全文下载和向量索引范围。</p></div></div>
+            <div class="field-grid two">
+              <label>收件箱文件<input id="promoteInbox"></label>
+              <label>知识文档目录<input id="promoteOut"></label>
+              <label>PDF 缓存目录<input id="pdfDir" placeholder="可选，本地全文缓存位置"></label>
+              <label>强制收录的论文 ID<textarea id="pinIds" rows="2" placeholder="每行一个论文 ID"></textarea></label>
+            </div>
+            <div class="option-list">
+              <label class="check-row"><input id="fullText" type="checkbox"><span><strong>提取全文</strong><small>从 PDF 中提取可检索文本。</small></span></label>
+              <label class="check-row"><input id="downloadPdfs" type="checkbox"><span><strong>下载 PDF</strong><small>在本地保存论文原文。</small></span></label>
+              <label class="check-row"><input id="indexDocs" type="checkbox"><span><strong>写入向量索引</strong><small>需要可用的 Embedding 能力。</small></span></label>
+            </div>
+            <div class="form-actions"><button id="runPromote" class="button primary" type="button"><i data-lucide="database-zap" aria-hidden="true"></i><span>开始入库</span></button></div>
+          </section>
+          <section class="surface result-surface" id="promotionResultBand" aria-labelledby="promotionResultTitle">
+            <div class="section-heading"><div><h2 id="promotionResultTitle">入库记录</h2><p>操作结果和可审计日志会保留在这里。</p></div></div>
+            <div id="promotionEmpty" class="empty-state"><i data-lucide="database" aria-hidden="true"></i><strong>等待入库任务</strong><p>先完成论文发现，再选择需要沉淀的论文。</p></div>
+            <pre id="promotionOutput" hidden></pre>
+          </section>
+        </div>
+      </section>
+
+      <section id="query" class="view" aria-labelledby="pageTitle">
+        <div class="query-layout">
+          <section class="surface query-composer" aria-labelledby="queryTitle">
+            <div class="query-heading">
+              <div class="assistant-symbol small" aria-hidden="true"><i data-lucide="sparkles"></i></div>
+              <div><h2 id="queryTitle">描述你的研究问题</h2><p>问题越具体，来源选择和证据仲裁越准确。</p></div>
+            </div>
+            <label class="sr-only" for="queryText">研究问题</label>
+            <textarea id="queryText" rows="6" placeholder="输入需要调研、比较或核查的问题。可以包含目标范围、时间窗口和期望输出形式。"></textarea>
+            <div class="query-readiness" id="queryReadiness" role="status">
+              <i data-lucide="circle-check" aria-hidden="true"></i><span>正在检查运行能力...</span>
+            </div>
+            <details class="advanced-settings">
+              <summary><span><i data-lucide="sliders-horizontal" aria-hidden="true"></i>高级设置</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary>
+              <div class="field-grid two">
+                <label>报告输出目录<input id="queryOut" value="reports/workbench/query"></label>
+                <label>思考深度<select id="queryDepth"><option value="">跟随系统默认</option><option value="quick">快速</option><option value="standard">标准</option><option value="deep">深度</option></select></label>
+                <label>Embedding 模型<input id="embeddingModel" placeholder="例如 text-embedding-3-small"></label>
+                <label>Embedding Base URL<input id="embeddingBaseUrl" placeholder="留空则复用推理模型地址"></label>
+                <label>Embedding API Key<input id="embeddingApiKey" type="password" autocomplete="off" placeholder="留空则使用已保存凭证"></label>
+              </div>
+            </details>
+            <div class="form-actions query-actions">
+              <button id="runQuery" class="button primary large" type="button"><i data-lucide="play" aria-hidden="true"></i><span>执行研究</span></button>
+              <button id="cancelQuery" class="button secondary large" type="button" hidden><i data-lucide="square" aria-hidden="true"></i><span>取消任务</span></button>
+              <span class="keyboard-hint"><kbd>Ctrl</kbd><span>+</span><kbd>Enter</kbd></span>
+            </div>
+          </section>
+          <section class="surface query-output" id="queryResultBand" aria-labelledby="queryOutputTitle">
+            <div class="section-heading"><div><h2 id="queryOutputTitle">研究进展</h2><p>结果、证据状态和运行日志</p></div><span id="queryStage" class="status-pill neutral">等待开始</span></div>
+            <div id="queryEmpty" class="empty-state"><i data-lucide="flask-conical" aria-hidden="true"></i><strong>准备好开始研究</strong><p>执行后，这里会持续显示当前状态和最终答案。</p></div>
+            <pre id="queryOutput" hidden></pre>
+          </section>
+        </div>
+      </section>
+
+      <section id="reports" class="view" aria-labelledby="pageTitle">
+        <div class="report-workspace">
+          <section class="surface report-browser" aria-labelledby="reportsTitle">
+            <div class="section-heading"><div><h2 id="reportsTitle">成果文件</h2><p id="reportSummary">按名称、类型和时间查找研究产物。</p></div></div>
+            <div class="report-toolbar">
+              <label class="search-field"><i data-lucide="search" aria-hidden="true"></i><span class="sr-only">搜索报告</span><input id="reportSearch" type="search" placeholder="搜索文件名或路径"></label>
+              <label class="sr-only" for="reportFilter">文件类型</label>
+              <select id="reportFilter"><option value="all">全部类型</option><option value=".md">Markdown</option><option value=".html">HTML</option><option value=".json">JSON</option><option value=".jsonl">Trace</option></select>
+              <label class="sr-only" for="reportSort">排序方式</label>
+              <select id="reportSort"><option value="time-desc">最近更新</option><option value="time-asc">最早更新</option><option value="name-asc">按名称</option><option value="size-desc">按大小</option></select>
+              <button id="reloadReports" class="icon-button" type="button" aria-label="重新加载报告" title="重新加载报告"><i data-lucide="refresh-cw" aria-hidden="true"></i></button>
+            </div>
+            <div id="reportsEmpty" class="empty-state"><i data-lucide="file-search" aria-hidden="true"></i><strong>没有匹配的成果</strong><p>调整搜索条件，或先执行一次研究查询。</p></div>
+            <div class="report-list" id="reportsCards" role="listbox" aria-label="研究成果文件"></div>
+          </section>
+          <section class="surface preview-surface" id="previewBand" aria-labelledby="previewTitle">
+            <div class="section-heading preview-heading"><div><h2 id="previewTitle">成果预览</h2><p id="previewPath">选择左侧文件后在这里阅读</p></div></div>
+            <div id="previewEmpty" class="empty-state"><i data-lucide="panel-right-open" aria-hidden="true"></i><strong>选择一份成果</strong><p>内容会在当前工作台内打开，不会离开研究上下文。</p></div>
+            <iframe id="preview" title="HTML 报告预览" sandbox="allow-same-origin" hidden></iframe>
+            <pre id="fileText" hidden></pre>
+          </section>
+        </div>
+      </section>
+
+      <section id="model" class="view" aria-labelledby="pageTitle">
+        <div class="settings-layout">
+          <section class="surface settings-main" aria-labelledby="modelTitle">
+            <div class="section-heading"><div><h2 id="modelTitle">推理模型</h2><p>配置 OpenAI 兼容接口。凭证仅写入本地工作台环境文件。</p></div></div>
+            <div class="field-grid two">
+              <label>Base URL<input id="baseUrl" autocomplete="off" placeholder="https://api.openai.com/v1"></label>
+              <label>模型名称<input id="modelName" autocomplete="off" placeholder="gpt-4o"></label>
+              <label>API Key<input id="apiKey" type="password" autocomplete="off" placeholder="使用已保存凭证，或输入新值"></label>
+              <label>默认思考深度<select id="depthSelect"><option value="quick">快速 · 轻量检索</option><option value="standard" selected>标准 · 平衡质量与速度</option><option value="deep">深度 · 多轮研究</option></select></label>
+              <label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.1" value="0.2"></label>
+            </div>
+            <label>连接测试提示词<textarea id="probePrompt" rows="3">请用中文简短回复：Conflux 研究系统已就绪。</textarea></label>
+            <div class="form-actions"><button id="testModel" class="button secondary" type="button"><i data-lucide="plug-zap" aria-hidden="true"></i><span>测试连接</span></button><button id="saveModel" class="button primary" type="button"><i data-lucide="save" aria-hidden="true"></i><span>保存配置</span></button></div>
+          </section>
+          <aside class="surface settings-side" aria-labelledby="environmentTitle">
+            <div class="section-heading"><div><h2 id="environmentTitle">环境检查</h2><p>研究流程所需的本地能力</p></div></div>
+            <div id="settingsCapabilities" class="capability-list"></div>
+            <div class="privacy-note"><i data-lucide="shield-check" aria-hidden="true"></i><div><strong>本地优先</strong><p>API Key 不会出现在状态接口或报告文件中。</p></div></div>
+          </aside>
+          <section class="surface result-surface settings-result" id="modelResultBand" aria-labelledby="modelResultTitle">
+            <div class="section-heading"><div><h2 id="modelResultTitle">连接结果</h2><p>确认模型、耗时与 Token 使用情况。</p></div></div>
+            <div id="modelEmpty" class="empty-state"><i data-lucide="activity" aria-hidden="true"></i><strong>尚未测试连接</strong><p>保存前先运行一次测试，确认接口响应正常。</p></div>
+            <div id="modelResultCard" class="result-card" hidden></div>
+            <pre id="modelOutput" hidden></pre>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="authDialog" class="auth-dialog" aria-labelledby="authTitle" aria-describedby="authDescription">
+    <form id="authForm" class="auth-panel">
+      <div class="auth-icon" aria-hidden="true"><i data-lucide="shield-check"></i></div>
+      <div>
+        <h2 id="authTitle">访问 Conflux 工作台</h2>
+        <p id="authDescription">请输入服务端配置的访问令牌。</p>
+      </div>
+      <label>访问令牌<input id="accessToken" type="password" autocomplete="current-password" required></label>
+      <p id="authError" class="auth-error" role="alert" hidden></p>
+      <button id="loginButton" class="button primary large" type="submit"><i data-lucide="log-in" aria-hidden="true"></i><span>登录</span></button>
+    </form>
+  </dialog>
+
+  <div id="toastBox" class="toast-box" aria-live="polite" aria-atomic="true"></div>
+  <script src="/lucide.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

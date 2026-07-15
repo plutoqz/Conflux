@@ -10,14 +10,15 @@ from .models import PaperRecord
 def apply_negative_filters(papers: list[PaperRecord], profile: ResearchProfile) -> list[PaperRecord]:
     """Remove papers that match profile-level negative keywords."""
 
-    negative = [item.lower() for item in profile.negative_keywords if item.strip()]
-    if not negative:
-        return papers
+    return [paper for paper in papers if not paper_matches_negative_filter(paper, profile)]
 
-    kept = []
-    for paper in papers:
-        text = f"{paper.title}\n{paper.abstract}".lower()
-        if any(term in text for term in negative):
-            continue
-        kept.append(paper)
-    return kept
+
+def paper_matches_negative_filter(paper: PaperRecord, profile: ResearchProfile) -> bool:
+    """Return whether a paper should be excluded by profile-level negative terms."""
+
+    text = f"{paper.title}\n{paper.abstract}".casefold()
+    return any(
+        term.casefold() in text
+        for term in profile.negative_keywords
+        if term.strip()
+    )

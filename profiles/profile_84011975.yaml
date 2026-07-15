@@ -1,0 +1,29 @@
+# Conflux Research Profile: 自然灾害知识图谱
+id: profile_84011975
+name: 自然灾害知识图谱
+keywords:
+  - knowledge graph
+  - disaster management
+  - natural disaster
+  - emergency response
+  - knowledge representation
+  - earthquake prediction
+  - flood mapping
+  - disaster ontology
+  - spatiotemporal reasoning
+  - crisis informatics
+  - geographic information system
+  - multi-source data fusion
+research_questions:
+  - 研究自然灾害领域的知识图谱。重点关注多源异构数据（遥感影像、传感器网络、社交媒体、历史灾情记录）的语义融合与知识表示，灾害演化链建模方法，以及面向应急响应的实时知识图谱查询与推理技术。
+fields:
+  - cs.AI
+  - cs.IR
+  - physics.geo-ph
+negative_keywords: []
+target_venues: []
+tracked_scholars: []
+project_paths: []
+document_paths: []
+paper_sources: ["arxiv"]
+report_cadence: weekly

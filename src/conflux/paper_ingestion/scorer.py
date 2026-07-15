@@ -41,11 +41,15 @@ def score_paper(paper: PaperRecord, profile: ResearchProfile) -> PaperScore:
     matched_keywords = _matched_terms(profile.keywords, text)
     matched_fields = _matched_terms(profile.fields, text)
     matched_venues = _matched_terms(profile.target_venues, f"{paper.venue} {' '.join(paper.categories)}")
-    matched_questions = _matched_questions(profile.research_questions, text)
+    matched_questions, question_score, bridge_terms = _question_relevance(
+        profile.research_questions,
+        text,
+        profile.keywords,
+        matched_keywords,
+    )
 
     keyword_score = _coverage(matched_keywords, profile.keywords)
     field_score = _coverage(matched_fields, profile.fields)
-    question_score = min(1.0, len(matched_questions) / max(1, len(profile.research_questions)))
     venue_score = min(1.0, len(matched_venues) / 2)
     metadata_score = 0.0
     if paper.pdf_url:
@@ -73,6 +77,8 @@ def score_paper(paper: PaperRecord, profile: ResearchProfile) -> PaperScore:
         reasons.append(f"matched keywords: {', '.join(matched_keywords[:5])}")
     if matched_questions:
         reasons.append(f"matched research questions: {len(matched_questions)}")
+    if bridge_terms:
+        reasons.append(f"research question bridged by: {', '.join(bridge_terms[:4])}")
     if matched_fields:
         reasons.append(f"matched fields: {', '.join(matched_fields[:3])}")
     if matched_venues:
@@ -135,16 +141,31 @@ def _matched_terms(terms: list[str], text: str) -> list[str]:
     return _dedupe(matches)
 
 
-def _matched_questions(questions: list[str], text: str) -> list[str]:
+def _question_relevance(
+    questions: list[str],
+    text: str,
+    profile_keywords: list[str],
+    matched_keywords: list[str],
+) -> tuple[list[str], float, list[str]]:
+    """Match research questions directly or through bilingual profile keywords."""
+
     matches = []
     for question in questions:
-        tokens = [token for token in _tokens(question.lower()) if len(token) >= 5]
+        tokens = [token for token in _tokens(question.lower()) if len(token) >= 4]
+        tokens.extend(_cjk_ngrams(question))
         if not tokens:
             continue
-        overlap = sum(1 for token in tokens if token in text)
-        if overlap / len(tokens) >= 0.25:
+        overlap = sum(1 for token in set(tokens) if token in text)
+        if overlap / len(set(tokens)) >= 0.25:
             matches.append(question)
-    return matches
+
+    direct_score = min(1.0, len(matches) / max(1, len(questions))) if questions else 0.0
+    has_cjk_question = any(re.search(r"[\u3400-\u9fff]", question) for question in questions)
+    bridge_terms = _bridge_terms(profile_keywords, matched_keywords) if has_cjk_question else []
+    bridge_score = min(1.0, len(bridge_terms) / 3) if bridge_terms else 0.0
+    if bridge_score >= 0.5 and bridge_score > direct_score and not matches:
+        matches.append(next(question for question in questions if re.search(r"[\u3400-\u9fff]", question)))
+    return matches, max(direct_score, bridge_score), bridge_terms
 
 
 def _coverage(matches: list[str], terms: list[str]) -> float:
@@ -155,6 +176,30 @@ def _coverage(matches: list[str], terms: list[str]) -> float:
 
 def _tokens(text: str) -> list[str]:
     return re.findall(r"[a-z][a-z0-9_.-]{2,}", text.lower())
+
+
+def _cjk_ngrams(text: str, size: int = 2) -> list[str]:
+    grams = []
+    for sequence in re.findall(r"[\u3400-\u9fff]+", text):
+        grams.extend(sequence[index:index + size] for index in range(max(0, len(sequence) - size + 1)))
+    return grams
+
+
+def _bridge_terms(profile_keywords: list[str], matched_keywords: list[str]) -> list[str]:
+    if not profile_keywords or not matched_keywords:
+        return []
+    anchor = profile_keywords[0]
+    matched_keys = {keyword.casefold() for keyword in matched_keywords}
+    if anchor.casefold() not in matched_keys:
+        return []
+    anchor_tokens = set(_tokens(anchor))
+    directional = [
+        keyword
+        for keyword in matched_keywords
+        if keyword.casefold() != anchor.casefold()
+        and anchor_tokens.isdisjoint(_tokens(keyword))
+    ]
+    return [anchor, *directional] if directional else []
 
 
 def _dedupe(values: list[str]) -> list[str]:

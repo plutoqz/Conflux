@@ -149,6 +149,7 @@ def query_command(
     checkpoint_backend: str = "none",
     stream_events: bool = False,
     trace_dir: str | None = None,
+    run_id: str | None = None,
 ) -> dict:
     """Run one research query."""
 
@@ -170,7 +171,7 @@ def query_command(
     retriever = HybridRetriever(vector_store)
     rag_tool = create_rag_tool(retriever)
 
-    run_id = new_run_id()
+    run_id = run_id or new_run_id()
     effective_thread_id = resume or thread_id or run_id
     checkpoint = create_checkpointer(checkpoint_backend)
     print(f"-> Mode: {mode}")
@@ -217,6 +218,7 @@ def query_command(
         )
 
     answer = final_state.get("final_answer", "")
+    artifacts = None
     if answer:
         print(f"\n{answer}\n")
         artifacts = write_report_artifacts(query, final_state, output_dir=output_dir)
@@ -233,9 +235,13 @@ def query_command(
     summary.update({
         "run_id": run_id,
         "thread_id": effective_thread_id,
+        "query": query,
+        "final_answer": answer[:2000] if answer else "",
         "checkpoint_backend": checkpoint.backend,
         "resumed": bool(resume),
         "trace_path": str(trace_path),
+        "report_md_path": str(artifacts.markdown_path.resolve()) if artifacts else "",
+        "report_html_path": str(artifacts.html_path.resolve()) if artifacts else "",
         "source_statuses": {
             source: payload.get("status")
             for source, payload in (final_state.get("_source_statuses") or {}).items()
