@@ -87,7 +87,7 @@ def validate_report_pair(markdown_path: str | Path, html_path: str | Path) -> Ac
     if not checks["source_status_values_valid"]:
         issues.append("来源状态必须是 success / low_relevance / no_evidence / failed / fallback。")
 
-    evidence_payload = _extract_evidence_payload(markdown, issues)
+    evidence_payload = _extract_evidence_payload(markdown, issues, md_path)
     nodes = evidence_payload.get("nodes") or []
     graph_statuses = evidence_payload.get("source_statuses") or {}
     graph_summary = evidence_payload.get("summary") or {}
@@ -100,7 +100,9 @@ def validate_report_pair(markdown_path: str | Path, html_path: str | Path) -> Ac
     }
     checks["evidence_payload_parseable"] = bool(evidence_payload)
     checks["evidence_has_source_statuses"] = set(graph_statuses) >= {"RAG", "Web", "Model"}
-    checks["evidence_has_nodes"] = bool(nodes)
+    checks["evidence_has_nodes"] = bool(nodes) and all(
+        str(node.get("claim") or "").strip() for node in nodes
+    )
     if not checks["evidence_payload_parseable"]:
         issues.append("证据图 JSON 缺失或无法解析。")
     if not checks["evidence_has_source_statuses"]:
@@ -196,8 +198,25 @@ def _parse_source_status_table(markdown: str) -> dict[str, dict[str, str]]:
     return statuses
 
 
-def _extract_evidence_payload(markdown: str, issues: list[str]) -> dict[str, Any]:
+def _extract_evidence_payload(
+    markdown: str,
+    issues: list[str],
+    markdown_path: Path | None = None,
+) -> dict[str, Any]:
     appendix = _extract_section(markdown, "## 附录 A：证据图 JSON")
+    if not appendix:
+        if markdown_path is None:
+            return {}
+        sidecar = markdown_path.with_suffix(".evidence.json")
+        if not sidecar.exists():
+            issues.append(f"证据图附件不存在：{sidecar}")
+            return {}
+        try:
+            payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            issues.append(f"证据图附件无法解析：{exc}")
+            return {}
+        return payload if isinstance(payload, dict) else {}
     matches = re.findall(r"```json\s*(.*?)```", appendix, flags=re.DOTALL)
     if not matches:
         return {}

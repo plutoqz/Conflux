@@ -61,9 +61,9 @@ def offline_cases() -> list[dict[str, Any]]:
         "_arbitration": "Web failed; RAG and Model may vote.",
         "_evidence_json": json.dumps(evidence, ensure_ascii=False),
         "_source_statuses": {
-            "RAG": {"status": "success", "detail": "offline", "content": "ok"},
+            "RAG": {"status": "success", "detail": "offline", "content": "ok", "can_support_external_fact": True},
             "Web": {"status": "failed", "detail": "offline", "error": "timeout", "content": ""},
-            "Model": {"status": "success", "detail": "offline", "content": "ok"},
+            "Model": {"status": "success", "detail": "offline", "content": "ok", "can_support_external_fact": False},
         },
         "_run_summary": {
             "mode": "phase2",

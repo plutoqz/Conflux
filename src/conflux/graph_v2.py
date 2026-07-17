@@ -7,6 +7,7 @@ Graph 结构：
 """
 
 import json
+import re
 import time
 from typing import TypedDict
 
@@ -19,6 +20,8 @@ from .agent import ResearchAgent, FINAL_MARKER
 from .config import get
 from .evidence import EvidenceGraph, build_evidence_graph_from_results
 from .source_status import (
+    EXTERNAL_EVIDENCE_CLASSES,
+    AgentClaim,
     SourceResult,
     fallback_result,
     parse_source_results,
@@ -50,7 +53,13 @@ class MultiAgentState(TypedDict):
     _verified_answer: str
     _factcheck_status: str
     _factcheck_report: str
+    _factcheck_findings: dict
     _deep_research: str
+    _deep_queries: list[str]
+    _deep_arbitration: str
+    _deep_factcheck_report: str
+    _deep_evidence_json: str
+    _deep_source_statuses: dict
     _run_summary: dict
     _quality_report: dict
     _pipeline_stage: str
@@ -232,6 +241,7 @@ def dispatch_node(state: MultiAgentState) -> dict:
             "started_at": started_at,
             "elapsed_ms": 0,
             "stages": ["dispatch"],
+            "l4_enabled": bool(get("research", "enable_l4", default=True)),
             "slo_p95_ms": int(get("slo", "survey_p95_ms", default=45000)),
             "slo_status": "running",
         },
@@ -239,21 +249,119 @@ def dispatch_node(state: MultiAgentState) -> dict:
 
 
 def rag_agent_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
-    """RAG 子 Agent：仅用 search_rag"""
-    result = _run_agent(state["query"], agent)
+    """RAG retrieval is already structured; do not summarize it twice."""
+    result = _run_exclusive_tool(agent, state["query"])
+    if result is None:
+        result = fallback_result("RAG", "RAG Agent 未配置唯一检索工具。").to_tool_text()
     return {"rag_result": result}
 
 
 def web_agent_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
-    """Web 子 Agent：仅用 search_web"""
-    result = _run_agent(state["query"], agent)
+    """Web retrieval is already structured; do not summarize it twice."""
+    result = _run_exclusive_tool(agent, state["query"])
+    if result is None:
+        result = fallback_result("Web", "Web Agent 未配置唯一检索工具。").to_tool_text()
     return {"web_result": result}
 
 
 def model_agent_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
-    """Model 子 Agent：仅用 ask_model"""
-    result = _run_agent(state["query"], agent)
-    return {"model_result": result}
+    """Run one post-retrieval Model Analyst call over structured external evidence."""
+
+    external_results = {
+        "RAG": _source_result_from_agent_text("RAG", state.get("rag_result", "")),
+        "Web": _source_result_from_agent_text("Web", state.get("web_result", "")),
+    }
+    external_graph = build_evidence_graph_from_results(external_results)
+    evidence_table = _analyst_evidence_table(external_graph)
+    gaps = _evidence_gaps(external_results, external_graph)
+    prompt = f"""你是检索后的研究分析员，不是新的事实来源。请只做解释、比较、提出假设和识别证据缺口。
+
+用户问题：{state['query']}
+
+结构化外部证据：
+{json.dumps(evidence_table, ensure_ascii=False, indent=2)}
+
+当前未覆盖问题：
+{chr(10).join(f'- {gap}' for gap in gaps)}
+
+请输出简洁 Markdown：
+1. 证据支持的比较与解释，必须引用证据 ID；
+2. 明确标注的“模型推断”，不得声称是外部事实；
+3. 证据冲突和局限；
+4. 2-4 条下一轮检索词。
+"""
+    response = agent.raw_model.invoke([
+        SystemMessage(content="你是研究分析员。外部事实只能来自给定证据，自己的内容一律标记为模型推断。"),
+        HumanMessage(content=prompt),
+    ])
+    analysis = str(response.content).strip()
+    claims = _model_analysis_claims(analysis)
+    result = SourceResult(
+        source="Model",
+        status="success" if analysis else "fallback",
+        detail="post-retrieval model analyst",
+        content=analysis or "模型分析未返回内容。",
+        evidence_class="model_inference",
+        claims=claims,
+        metadata={"evidence_ids": [item["id"] for item in evidence_table], "identified_gaps": gaps},
+    )
+    return {
+        "model_result": result.to_tool_text(),
+        "_run_summary": _append_stage(state, "model_analysis"),
+        "_pipeline_stage": "model_analyzed",
+    }
+
+
+def _analyst_evidence_table(graph: EvidenceGraph) -> list[dict]:
+    return [
+        {
+            "id": node.id,
+            "claim": node.claim,
+            "quote": node.verbatim_quote,
+            "source": node.source,
+            "paper_id": node.paper_id,
+            "section": node.paper_section,
+            "evidence_class": node.evidence_class,
+            "relevance": node.relevance,
+            "limitations": node.limitations,
+        }
+        for node in graph.nodes.values()
+        if node.source in {"RAG", "Web"}
+    ]
+
+
+def _evidence_gaps(results: dict[str, SourceResult], graph: EvidenceGraph) -> list[str]:
+    gaps = []
+    for source, result in results.items():
+        if result.status != "success":
+            gaps.append(f"{source} 当前状态为 {result.status}，需要更精确的检索。")
+    if not graph.nodes:
+        gaps.append("没有可验证的外部声明。")
+    if graph.consensus_summary().get("true_consensus_count", 0) == 0:
+        gaps.append("尚无由两个独立外部来源支持的同一声明。")
+    return gaps or ["检查时间敏感性、样本范围和方法局限。"]
+
+
+def _model_analysis_claims(text: str) -> list[AgentClaim]:
+    claims = []
+    for raw in text.splitlines():
+        cleaned = re.sub(r"^[-*\d.)\s]+", "", raw).strip()
+        if len(cleaned) < 20:
+            continue
+        claims.append(AgentClaim(
+            claim=cleaned[:240],
+            source="Model",
+            verbatim_quote=cleaned[:500],
+            paper_section="analysis",
+            relevance=0.0,
+            research_type="model_analysis",
+            confidence=0.45,
+            limitations=["model inference; cannot support external factual claims"],
+            evidence_class="model_inference",
+        ))
+        if len(claims) >= 6:
+            break
+    return claims
 
 
 def evidence_merge(state: MultiAgentState, *, arbitrator_model=None) -> dict:
@@ -276,7 +384,6 @@ def evidence_merge(state: MultiAgentState, *, arbitrator_model=None) -> dict:
     ])
 
     graph = build_evidence_graph_from_results(source_results)
-    _dedup_graph(graph)
     evidence_json = graph.to_json()
     source_statuses = {source: result.to_dict() for source, result in source_results.items()}
 
@@ -300,25 +407,6 @@ def evidence_merge(state: MultiAgentState, *, arbitrator_model=None) -> dict:
     }
 
 
-def _dedup_graph(graph: EvidenceGraph) -> None:
-    """简单去重：合并前 30 个字符相同的节点"""
-    seen: dict[str, str] = {}
-    to_remove = []
-    for nid, node in list(graph.nodes.items()):
-        key = node.claim[:30].strip().lower()
-        if key in seen:
-            # 合并到已存在的节点
-            existing_id = seen[key]
-            existing = graph.nodes[existing_id]
-            existing.supporting.extend(node.supporting)
-            existing.derived_from.extend(node.derived_from)
-            # 取较高的权威分
-            existing.authority_score = max(existing.authority_score, node.authority_score)
-            to_remove.append(nid)
-        else:
-            seen[key] = nid
-    for nid in to_remove:
-        del graph.nodes[nid]
 
 
 def _run_arbitration(
@@ -336,17 +424,14 @@ def _run_arbitration(
     Level 3: 溯源深挖 → 对冲突声明标注需要回溯原始 Agent 输出
     Level 4: 人工升级 → 不可自动裁决标记 [HUMAN_ESCALATION_NEEDED]
 
-    权威分权重：
-    - RAG (本地知识库): 0.7 — 可控可审计
-    - Web: 0.5 — 权威性参差
-    - Model: 0.4 — 无溯源、有幻觉风险
+    权威分来自每条 EvidenceItem 的证据类型、相关度和来源状态，不能按 RAG/Web 通道固定赋值。
     """
     evidence_hint = ""
     if evidence_summary:
         evidence_hint = f"\n证据网络摘要：{evidence_summary}\n"
     status_hint = source_status_markdown(source_statuses or {})
 
-    prompt = f"""你是信息仲裁器，遵循五级冲突升级协议。权威分权重：RAG=0.7, Web=0.5, Model=0.4。
+    prompt = f"""你是信息仲裁器，遵循五级冲突升级协议。必须使用证据节点中的 authority_score，禁止按 RAG/Web/Model 通道固定赋权。
 状态为 success 的来源可以正常参与共识投票；low_relevance 可作为弱相关证据参与低权重投票；no_evidence / failed / fallback 必须排除在投票外，只能作为检索缺口、失败说明或模型推断风险提示。
 你必须明确区分：
 - 多源真实共识：至少两个 success 来源支持；
@@ -372,9 +457,8 @@ def _run_arbitration(
 列出两个 success 来源支持、一源未覆盖、弱相关、无证据或失败的声明。标注缺失/弱相关/无证据来源。
 
 ## Level 2 — 权威加权投票
-对于存在分歧的声明，按权威分加权计算：
-- 声明 A (RAG 0.7 + Web 0.5) vs 声明 B (Model 0.4) → 采纳声明 A
-success 正常加权；low_relevance 降权；no_evidence/failed/fallback 不能投票。
+对于存在分歧的声明，按证据节点实际 authority_score 加权；同行评审、权威文件、预印本和社区内容必须区分。
+success 正常加权；low_relevance 降权；model_inference、no_evidence/failed/fallback 不能作为外部事实投票。
 
 ## Level 3 — 溯源深挖建议
 对于加权后仍存争议的声明，标注「建议回溯原始 Agent 输出交叉验证」。
@@ -417,10 +501,12 @@ def synthesize_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
 - 不得把 no_evidence/failed/fallback 来源当作真实来源；
 - low_relevance 只能作为弱相关上下文，必须标注低置信；
 - 模型世界知识只能作为 Model 来源，不能替代 Web/RAG 证据；
-- 每个关键事实声明后标注来源类型，例如 [RAG]、[Web]、[Model]；
+- 每个外部事实声明后必须使用工具提供的精确引用，例如 [RAG:paper#chunk-001] 或 [Web:https://...]；
+- [RAG:low_relevance]、[Web:no_evidence] 等状态说明不是引用，必须写入“信息来源”小节而非事实声明后；
+- 模型分析只能标注 [Model]，并明确写“模型推断”；
 - 分层输出：多源 success 为高置信；单源 success 为中低置信；low_relevance 为低置信；仅 Model 可用时允许回答但必须标注“模型推断，缺少外部证据支持”；三源均无内容时才拒答；
 - 对单源声明、弱相关证据和工具无证据/失败后的推断明确降低置信度；
-- 主报告保持简洁，证据图、原始三源输出由系统附录提供，不要大段复制。"""),
+- 主报告保持简洁（目标1200–2500字），证据图、原始三源输出由系统附录提供，不要大段复制。"""),
         HumanMessage(content=f"""用户问题：{state['query']}
 
 来源状态：
@@ -430,7 +516,7 @@ def synthesize_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
 
 {merged}{arb_section}
 
-请输出以下小节：
+请输出以下小节（总字数控制在1200–2500字）：
 ## 最终结论
 用 3-6 条给出核心结论，逐条标注来源和置信度。
 
@@ -535,18 +621,19 @@ def factcheck_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
     如果发现无证据支持的声明，标记问题并生成修正版报告。
     """
     report = state.get("final_answer", "")
-    merged = state.get("_merged", "")
     evidence_json = state.get("_evidence_json", "")
     source_statuses = state.get("_source_statuses") or {}
-    if not report or not merged:
+    if not report:
         return {
             "_verified_answer": report,
             "_factcheck_status": "skipped",
             "_factcheck_report": "FactCheck 跳过：缺少报告或来源。",
+            "_factcheck_findings": {"issues": ["缺少待核查报告。"], "verified_claim_ratio": 0.0},
             "_run_summary": _append_stage(state, "factcheck_skipped"),
         }
 
     deterministic_findings = _deterministic_factcheck(report, source_statuses, evidence_json)
+    evidence_items = _factcheck_evidence_items(evidence_json)
 
     prompt = f"""你是事实核查员（Fact-Checker）。请检查以下调研报告中的关键声明。
 
@@ -560,14 +647,11 @@ success 来源可作为有效证据；low_relevance 只能作为弱相关证据�
 确定性预检查：
 {json.dumps(deterministic_findings, ensure_ascii=False, indent=2)}
 
-证据图：
-{evidence_json[:3000]}
-
-原始信息源：
-{merged[:4000]}
+结构化证据声明（逐条核验，不使用原始文本截断）：
+{json.dumps(evidence_items, ensure_ascii=False, indent=2)}
 
 调研报告：
-{report[:3000]}
+{report}
 
 请输出（精简）：
 1. 已验证的声明（可追溯到 success 来源）— 列出 3-5 个
@@ -589,28 +673,27 @@ success 来源可作为有效证据；low_relevance 只能作为弱相关证据�
     deterministic_passed = not deterministic_findings["issues"]
     if deterministic_passed and "验证通过" in fc_text and "无法验证" not in fc_text and "需修正" not in fc_text:
         status = "passed"
-        final_answer = report
     else:
         status = "needs_review"
-        revised_report = _revise_report_after_factcheck(report, deterministic_findings)
-        final_answer = (
-            f"{revised_report.rstrip()}\n\n"
-            "## FactCheck 验证结果\n"
-            f"{_factcheck_findings_markdown(deterministic_findings)}\n\n"
-            "### Verification Revision\n"
-            "- A deterministic revision pass removed invalid no_evidence/failed/fallback source citations where possible.\n"
-            "- Review status: awaiting_user_review. A human can accept uncertainty, request another revision, or add a manual source note.\n\n"
-            f"{fc_text.strip()}\n"
-        )
     factcheck_report = f"{_factcheck_findings_markdown(deterministic_findings)}\n\n{fc_text.strip()}"
-
+    next_state = {
+        **state,
+        "_verified_answer": factcheck_report,
+        "_factcheck_status": status,
+        "_factcheck_report": factcheck_report,
+        "_factcheck_findings": deterministic_findings,
+        "_review_status": "awaiting_user_review" if status == "needs_review" else "accepted",
+        "_run_summary": _append_stage(state, "factcheck"),
+        "_pipeline_stage": "factchecked",
+    }
     return {
         "_verified_answer": factcheck_report,
         "_factcheck_status": status,
         "_factcheck_report": factcheck_report,
-        "final_answer": final_answer,
-        "_review_status": "awaiting_user_review" if status == "needs_review" else "accepted",
-        "_run_summary": _append_stage(state, "factcheck"),
+        "_factcheck_findings": deterministic_findings,
+        "_review_status": next_state["_review_status"],
+        "_quality_report": evaluate_run_quality(next_state),
+        "_run_summary": next_state["_run_summary"],
         "_pipeline_stage": "factchecked",
     }
 
@@ -632,7 +715,7 @@ def _revise_report_after_factcheck(report: str, findings: dict) -> str:
 
 
 def _deterministic_factcheck(report: str, source_statuses: dict, evidence_json: str) -> dict:
-    """Cheap deterministic checks before LLM FactCheck."""
+    """Match each key report claim against structured, source-backed evidence."""
 
     success_sources = {
         source
@@ -662,11 +745,8 @@ def _deterministic_factcheck(report: str, source_statuses: dict, evidence_json: 
             f"报告把 no_evidence/failed/fallback 来源 {', '.join(invalid_mentions)} 用作事实证据引用。"
         )
 
-    try:
-        evidence_payload = json.loads(evidence_json) if evidence_json else {}
-    except json.JSONDecodeError:
-        evidence_payload = {}
-    nodes = evidence_payload.get("nodes") or []
+    evidence_items = _factcheck_evidence_items(evidence_json)
+    nodes = [item for item in evidence_items if item.get("claim")]
     model_only_allowed = (
         not nodes
         and "Model" in success_sources
@@ -676,6 +756,45 @@ def _deterministic_factcheck(report: str, source_statuses: dict, evidence_json: 
     if not nodes and not model_only_allowed:
         issues.append("证据图没有任何来自 success/low_relevance 来源的声明节点，关键事实无法追溯。")
 
+    report_claims = _extract_key_report_claims(report)
+    claim_checks = []
+    for claim in report_claims:
+        cited = _cited_sources(claim)
+        candidates = [item for item in nodes if not cited or item.get("source") in cited]
+        ranked = sorted(
+            ((item, _claim_text_overlap(claim, str(item.get("claim") or ""))) for item in candidates),
+            key=lambda pair: pair[1],
+            reverse=True,
+        )
+        best, overlap = ranked[0] if ranked else ({}, 0.0)
+        source = str(best.get("source") or "")
+        source_status = str((source_statuses.get(source) or {}).get("status") or "")
+        evidence_class = str(best.get("evidence_class") or "")
+        if overlap >= 0.12 and source_status == "success" and evidence_class in EXTERNAL_EVIDENCE_CLASSES:
+            verification = "verified"
+        elif overlap >= 0.12 and source_status == "low_relevance":
+            verification = "weak_evidence"
+        elif overlap >= 0.12 and evidence_class == "model_inference" and "Model" in cited:
+            verification = "model_inference"
+        else:
+            verification = "unverified"
+        claim_checks.append({
+            "claim": claim,
+            "cited_sources": sorted(cited),
+            "matched_evidence_id": best.get("id", ""),
+            "matched_source": source,
+            "overlap": round(overlap, 3),
+            "verification": verification,
+        })
+
+    verified_count = sum(item["verification"] == "verified" for item in claim_checks)
+    verified_ratio = verified_count / len(claim_checks) if claim_checks else 0.0
+    unverified = [item for item in claim_checks if item["verification"] == "unverified"]
+    if unverified:
+        issues.append(f"{len(unverified)} 条关键声明未匹配到可核验的结构化证据。")
+    if claim_checks and verified_ratio <= 0.5:
+        issues.append(f"关键声明外部证据覆盖率仅为 {verified_ratio:.0%}，未超过 50%。")
+
     if "不确定" not in report and (non_evidence_sources or len(evidence_sources) < 2):
         issues.append("存在失败/单源条件，但报告没有明确不确定性说明。")
 
@@ -684,8 +803,76 @@ def _deterministic_factcheck(report: str, source_statuses: dict, evidence_json: 
         "low_relevance_sources": sorted(low_relevance_sources),
         "non_evidence_sources": sorted(non_evidence_sources),
         "evidence_node_count": len(nodes),
+        "report_claim_count": len(report_claims),
+        "verified_claim_count": verified_count,
+        "verified_claim_ratio": round(verified_ratio, 3),
+        "claim_checks": claim_checks,
         "issues": issues,
     }
+
+
+def _factcheck_evidence_items(evidence_json: str) -> list[dict]:
+    try:
+        payload = json.loads(evidence_json) if evidence_json else {}
+    except json.JSONDecodeError:
+        return []
+    items = []
+    for node in payload.get("nodes") or []:
+        items.append({
+            key: node.get(key)
+            for key in (
+                "id",
+                "claim",
+                "source",
+                "evidence_class",
+                "paper_id",
+                "paper_section",
+                "verbatim_quote",
+                "evidence_refs",
+                "confidence",
+                "limitations",
+            )
+        })
+    return items
+
+
+def _extract_key_report_claims(report: str) -> list[str]:
+    claims = []
+    in_conclusion = False
+    for raw in report.splitlines():
+        line = raw.strip()
+        heading = re.match(r"^#{1,6}\s+(.+)$", line)
+        if heading:
+            in_conclusion = "最终结论" in heading.group(1) or "核心结论" in heading.group(1)
+            continue
+        if in_conclusion and re.match(r"^(?:[-*]|\d+[.)])\s+", line):
+            claims.append(re.sub(r"^(?:[-*]|\d+[.)])\s+", "", line))
+    if claims:
+        return claims[:12]
+    return [
+        line.strip()
+        for line in report.splitlines()
+        if len(line.strip()) >= 30 and not line.lstrip().startswith("#")
+    ][:12]
+
+
+def _cited_sources(claim: str) -> set[str]:
+    return set(re.findall(r"\[(RAG|Web|Model)(?::[^\]]+)?\]", claim))
+
+
+def _claim_text_overlap(left: str, right: str) -> float:
+    def tokens(text: str) -> set[str]:
+        cleaned = re.sub(r"\[(RAG|Web|Model)(?::[^\]]+)?\]", "", text, flags=re.IGNORECASE)
+        english = set(re.findall(r"[a-z][a-z0-9_-]{2,}", cleaned.lower()))
+        chinese = re.sub(r"[^\u4e00-\u9fff]", "", cleaned)
+        bigrams = {chinese[index:index + 2] for index in range(max(0, len(chinese) - 1))}
+        return english | bigrams
+
+    left_tokens = tokens(left)
+    right_tokens = tokens(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
 
 
 def _factcheck_findings_markdown(findings: dict) -> str:
@@ -695,6 +882,7 @@ def _factcheck_findings_markdown(findings: dict) -> str:
         f"- low_relevance 来源：{', '.join(findings.get('low_relevance_sources') or []) or '无'}",
         f"- no_evidence/failed/fallback 来源：{', '.join(findings.get('non_evidence_sources') or []) or '无'}",
         f"- 证据节点数：{findings.get('evidence_node_count', 0)}",
+        f"- 关键声明核验覆盖率：{float(findings.get('verified_claim_ratio', 0.0)):.0%}",
     ]
     issues = findings.get("issues") or []
     if issues:
@@ -712,11 +900,10 @@ def factcheck_router(state: MultiAgentState) -> str:
 
 
 def fanout(state: MultiAgentState) -> list[Send]:
-    """并行派发到三个子 Agent"""
+    """并行执行两个外部检索源；Model 必须等待检索完成。"""
     return [
         Send("rag_agent", state),
         Send("web_agent", state),
-        Send("model_agent", state),
     ]
 
 
@@ -785,8 +972,15 @@ def process_user_feedback(
     return str(response.content)
 
 
-def deeper_research_node(state: MultiAgentState, *, model: BaseChatModel) -> dict:
-    """L4 Research Loop：基于首轮报告提取子问题，并生成一次深化摘要。"""
+def deeper_research_node(
+    state: MultiAgentState,
+    *,
+    model: BaseChatModel,
+    rag_agent: ResearchAgent | None = None,
+    web_agent: ResearchAgent | None = None,
+    arbitrator_model=None,
+) -> dict:
+    """L4 loop: discover gaps, retrieve new evidence, re-arbitrate, and verify."""
     max_questions = int(get("research", "max_deep_questions", default=2))
     report = state.get("final_answer", "")
     if not report or max_questions <= 0:
@@ -818,21 +1012,63 @@ def deeper_research_node(state: MultiAgentState, *, model: BaseChatModel) -> dic
             "_pipeline_stage": "deep_research_skipped",
         }
 
-    prompt = f"""你是 Conflux 的深化调研节点。请基于已有三源结果和最终报告，对下列子问题给出补充分析。
+    deep_queries = [f"{state['query']} {question}" for question in questions]
+    combined_deep_query = f"{state['query']} {' '.join(questions)}"
+    fresh_results: dict[str, SourceResult] = {}
+    for source, source_agent in (("RAG", rag_agent), ("Web", web_agent)):
+        payloads = []
+        if source_agent is not None:
+            payload = _run_exclusive_tool(source_agent, combined_deep_query)
+            if payload:
+                payloads.extend(
+                    result for result in parse_source_results(payload) if result.source == source
+                )
+        existing_payload = (state.get("_source_statuses") or {}).get(source)
+        if existing_payload:
+            payloads.insert(0, SourceResult.from_dict(existing_payload))
+        fresh_results[source] = _combine_source_results(source, payloads)
+
+    model_payload = (state.get("_source_statuses") or {}).get("Model")
+    fresh_results["Model"] = (
+        SourceResult.from_dict(model_payload)
+        if model_payload
+        else fallback_result("Model", "深化研究不新增 Model 外部证据。")
+    )
+    deep_graph = build_evidence_graph_from_results(fresh_results)
+    deep_evidence_json = deep_graph.to_json()
+    deep_statuses = {source: result.to_dict() for source, result in fresh_results.items()}
+    deep_merged = "\n\n---\n\n".join(
+        _format_source_section(f"深化 {source}", result)
+        for source, result in fresh_results.items()
+    )
+    deep_arbitration = ""
+    if arbitrator_model:
+        deep_arbitration = _run_arbitration(
+            state["query"],
+            deep_merged,
+            arbitrator_model,
+            deep_evidence_json,
+            deep_statuses,
+        )
+
+    prompt = f"""你是 Conflux 的深化调研节点。请基于本轮新检索证据，对子问题给出补充分析。
 
 原始问题：{state['query']}
 
 需要深化的子问题：
 {chr(10).join(f"- {q}" for q in questions)}
 
-三源原始输出：
-{state.get('_merged', '')[:4000]}
+本轮结构化证据：
+{json.dumps(_analyst_evidence_table(deep_graph), ensure_ascii=False, indent=2)}
 
 来源状态：
-{source_status_markdown(state.get('_source_statuses') or {})}
+{source_status_markdown(deep_statuses)}
+
+本轮仲裁：
+{deep_arbitration}
 
 已有报告：
-{report[:3000]}
+{report}
 
 要求：
 - 只基于提供材料和明确的模型推理补充；
@@ -848,22 +1084,66 @@ def deeper_research_node(state: MultiAgentState, *, model: BaseChatModel) -> dic
     ]
     response = model.invoke(messages)
     deep = str(response.content).strip()
-    final_answer = f"{report.rstrip()}\n\n## 深化研究补充\n{deep}\n"
-    run_summary = _append_stage(state, "deep_research")
+    deep_findings = _deterministic_factcheck(deep, deep_statuses, deep_evidence_json)
+    deep_factcheck = _factcheck_findings_markdown(deep_findings)
     next_state = {
         **state,
         "_deep_research": deep,
-        "final_answer": final_answer,
-        "_run_summary": run_summary,
+        "_deep_queries": deep_queries,
+        "_deep_arbitration": deep_arbitration,
+        "_deep_factcheck_report": deep_factcheck,
+        "_deep_evidence_json": deep_evidence_json,
+        "_deep_source_statuses": deep_statuses,
+        "_run_summary": _append_stage(state, "deep_research"),
         "_pipeline_stage": "deep_researched",
     }
     return {
         "_deep_research": deep,
-        "final_answer": final_answer,
+        "_deep_queries": deep_queries,
+        "_deep_arbitration": deep_arbitration,
+        "_deep_factcheck_report": deep_factcheck,
+        "_deep_evidence_json": deep_evidence_json,
+        "_deep_source_statuses": deep_statuses,
         "_quality_report": evaluate_run_quality(next_state),
-        "_run_summary": run_summary,
+        "_run_summary": next_state["_run_summary"],
         "_pipeline_stage": "deep_researched",
     }
+
+
+def _combine_source_results(source: str, results: list[SourceResult]) -> SourceResult:
+    if not results:
+        return fallback_result(source, "深化研究没有获得结构化结果。")
+    valid = [result for result in results if result.is_valid_evidence]
+    if not valid:
+        return results[-1]
+    claims = []
+    seen = set()
+    for result in valid:
+        for claim in result.claims:
+            key = (claim.paper_id.casefold(), re.sub(r"\s+", " ", claim.claim).casefold())
+            if key not in seen:
+                seen.add(key)
+                claims.append(claim)
+    status = "success" if any(result.status == "success" for result in valid) else "low_relevance"
+    evidence_class = max(
+        (result.evidence_class for result in valid),
+        key=lambda value: {
+            "peer_reviewed": 5,
+            "authoritative_document": 4,
+            "preprint": 3,
+            "community_content": 2,
+            "model_inference": 1,
+        }.get(value, 0),
+    )
+    return SourceResult(
+        source=source,
+        status=status,
+        detail="deep research retrieval",
+        content="\n\n".join(result.content for result in valid if result.content),
+        claims=claims,
+        evidence_class=evidence_class,
+        metadata={"round_count": len(results), "deep_research": True},
+    )
 
 
 def _append_stage(state: MultiAgentState, stage: str) -> dict:
@@ -915,16 +1195,24 @@ def create_multi_agent_graph(
     # FactCheck 验证节点（L2 验证循环）
     fc_agent = ResearchAgent(arbitrator_model or synthesizer_model, [])
     graph.add_node("factcheck", lambda s: factcheck_node(s, agent=fc_agent))
-    graph.add_node("deeper_research", lambda s: deeper_research_node(s, model=arbitrator_model or synthesizer_model))
+    graph.add_node(
+        "deeper_research",
+        lambda s: deeper_research_node(
+            s,
+            model=arbitrator_model or synthesizer_model,
+            rag_agent=rag_agent,
+            web_agent=web_agent,
+            arbitrator_model=arbitrator_model,
+        ),
+    )
 
     graph.set_entry_point("dispatch")
 
-    # dispatch → fan-out to three agents
-    graph.add_conditional_edges("dispatch", fanout, path_map=["rag_agent", "web_agent", "model_agent"])
+    # dispatch → external retrieval fan-out → post-retrieval Model Analyst
+    graph.add_conditional_edges("dispatch", fanout, path_map=["rag_agent", "web_agent"])
 
-    # 每个 agent → evidence_merge
-    graph.add_edge("rag_agent", "evidence_merge")
-    graph.add_edge("web_agent", "evidence_merge")
+    graph.add_edge("rag_agent", "model_agent")
+    graph.add_edge("web_agent", "model_agent")
     graph.add_edge("model_agent", "evidence_merge")
 
     # merge → synthesize → factcheck → end

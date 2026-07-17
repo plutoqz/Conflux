@@ -61,13 +61,18 @@ def ask_model(query: str) -> str:
         status="success",
         detail="LLM world knowledge",
         content=body,
+        evidence_class="model_inference",
         claims=[
             AgentClaim(
                 claim=claim_text,
                 source="Model",
+                verbatim_quote=claim_text,
+                paper_section="model_analysis",
+                research_type="model_inference",
                 evidence_refs=["[Model:world-knowledge]"],
                 confidence=0.55,
                 limitations=["model knowledge / inference; not external retrieved evidence"],
+                evidence_class="model_inference",
             )
         ] if claim_text else [],
         metadata={"evidence_type": "model knowledge / inference"},

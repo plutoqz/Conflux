@@ -224,6 +224,12 @@ def query_command(
         artifacts = write_report_artifacts(query, final_state, output_dir=output_dir)
         print(f"Markdown report: {artifacts.markdown_path.resolve()}")
         print(f"HTML report: {artifacts.html_path.resolve()}")
+        if artifacts.evidence_json_path:
+            print(f"Evidence JSON: {artifacts.evidence_json_path.resolve()}")
+        if artifacts.raw_sources_path:
+            print(f"Raw sources: {artifacts.raw_sources_path.resolve()}")
+        if artifacts.deep_evidence_json_path:
+            print(f"Deep evidence JSON: {artifacts.deep_evidence_json_path.resolve()}")
     else:
         print("\nWarning: no final answer was generated. Check API, embedding, and tool configuration.\n")
 
@@ -242,6 +248,9 @@ def query_command(
         "trace_path": str(trace_path),
         "report_md_path": str(artifacts.markdown_path.resolve()) if artifacts else "",
         "report_html_path": str(artifacts.html_path.resolve()) if artifacts else "",
+        "report_evidence_path": str(artifacts.evidence_json_path.resolve()) if artifacts and artifacts.evidence_json_path else "",
+        "report_sources_path": str(artifacts.raw_sources_path.resolve()) if artifacts and artifacts.raw_sources_path else "",
+        "report_deep_evidence_path": str(artifacts.deep_evidence_json_path.resolve()) if artifacts and artifacts.deep_evidence_json_path else "",
         "source_statuses": {
             source: payload.get("status")
             for source, payload in (final_state.get("_source_statuses") or {}).items()
@@ -250,6 +259,13 @@ def query_command(
         "quality": final_state.get("_quality_report") or {},
     })
     write_run_summary(summary, summary_path)
+    final_state["_report_artifacts"] = {
+        "markdown_path": summary["report_md_path"],
+        "html_path": summary["report_html_path"],
+        "evidence_json_path": summary["report_evidence_path"],
+        "raw_sources_path": summary["report_sources_path"],
+        "deep_evidence_json_path": summary["report_deep_evidence_path"],
+    }
     print(f"Trace JSONL: {trace_path.resolve()}")
     print(f"Run summary: {summary_path.resolve()}")
 

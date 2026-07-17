@@ -60,10 +60,17 @@ def event_from_state_key(
     status = "completed"
     text = str(value)
     lowered = text.lower()
-    if "failed" in lowered or "error" in lowered:
-        status = "failed"
-    elif "fallback" in lowered:
-        status = "fallback"
+
+    # For agent results, extract the actual SourceResult status from the
+    # CONFLUX_SOURCE_RESULT_JSON marker instead of scanning raw text for
+    # "failed"/"error" substrings (which may appear in body content).
+    if key in ("rag_result", "web_result", "model_result"):
+        status = _trace_agent_status(text)
+    else:
+        if "failed" in lowered or "error" in lowered:
+            status = "failed"
+        elif "fallback" in lowered:
+            status = "fallback"
     elapsed_ms = round((time.time() - started_at) * 1000, 2) if started_at else 0.0
     return TraceEvent(
         stage=stage,
@@ -101,3 +108,25 @@ def write_run_summary(summary: dict[str, Any], path: str | Path) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return out_path
+
+
+def _trace_agent_status(text: str) -> str:
+    """Derive agent-level trace status from the SourceResult payload.
+
+    Scans for the CONFLUX_SOURCE_RESULT_JSON marker and reads the real
+    ``status`` field, avoiding false "failed" signals caused by the word
+    "failed" appearing in tool output body text.
+    """
+    from .source_status import parse_source_results
+
+    results = parse_source_results(text)
+    if not results:
+        return "completed"
+    status = results[-1].status
+    if status in ("no_evidence", "failed"):
+        return "failed"
+    if status == "fallback":
+        return "fallback"
+    if status == "low_relevance":
+        return "low_relevance"
+    return "completed"

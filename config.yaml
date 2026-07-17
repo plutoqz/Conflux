@@ -11,6 +11,8 @@ models:
     api_key:
     temperature: 0.3
     max_tokens: 4096
+    timeout: 60
+    max_retries: 1
 
   cheap:
     provider: openai_compatible
@@ -19,6 +21,8 @@ models:
     api_key:
     temperature: 0.0
     max_tokens: 1024
+    timeout: 60
+    max_retries: 1
 
 embedding:
   provider: openai_compatible
@@ -51,7 +55,7 @@ research:
   enable_l4: true
   max_deep_questions: 2
   max_verify_iterations: 1
-  max_rewrite_attempts: 1
+  max_rewrite_attempts: 2
 
 slo:
   survey_p95_ms: 45000

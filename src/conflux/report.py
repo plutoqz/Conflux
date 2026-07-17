@@ -28,6 +28,9 @@ QUALITY_HEADING = "## \u8d28\u91cf\u8bc4\u5206"
 class ReportArtifacts:
     markdown_path: Path
     html_path: Path
+    evidence_json_path: Path | None = None
+    raw_sources_path: Path | None = None
+    deep_evidence_json_path: Path | None = None
 
 
 def slugify(value: str, max_length: int = 48) -> str:
@@ -43,13 +46,14 @@ def build_markdown_report(query: str, state: dict[str, Any]) -> str:
     final_answer = _sanitize_report_text(_strip_code_fence(str(state.get("final_answer", "")).strip()))
     verified = _sanitize_report_text(str(state.get("_verified_answer", "")).strip())
     deep_research = _sanitize_report_text(str(state.get("_deep_research", "")).strip())
+    deep_arbitration = _sanitize_report_text(str(state.get("_deep_arbitration", "")).strip())
+    deep_factcheck = _sanitize_report_text(str(state.get("_deep_factcheck_report", "")).strip())
     arbitration = _sanitize_report_text(str(state.get("_arbitration", "")).strip())
     evidence_json = str(state.get("_evidence_json", "")).strip()
+    deep_evidence_json = str(state.get("_deep_evidence_json", "")).strip()
     source_statuses = state.get("_source_statuses") or {}
     run_summary = state.get("_run_summary") or {}
     quality_report = state.get("_quality_report") or evaluate_run_quality(state)
-    merged = _sanitize_report_text(str(state.get("_merged", "")).strip())
-
     sections = [
         f"{REPORT_TITLE}\n",
         f"- \u67e5\u8be2\uff1a{query}",
@@ -71,6 +75,12 @@ def build_markdown_report(query: str, state: dict[str, Any]) -> str:
     ])
     if deep_research:
         sections.extend(["", "## L4 \u6df1\u5316\u7814\u7a76", _demote_markdown_headings(deep_research)])
+        if deep_evidence_json:
+            sections.extend(["", "## L4 深化证据摘要", _evidence_summary_markdown(deep_evidence_json)])
+        if deep_arbitration:
+            sections.extend(["", "## L4 深化仲裁", _demote_markdown_headings(deep_arbitration)])
+        if deep_factcheck:
+            sections.extend(["", "## L4 深化核查", _demote_markdown_headings(deep_factcheck)])
     if arbitration:
         sections.extend(["", "## \u4e09\u6e90\u4ef2\u88c1", _demote_markdown_headings(arbitration)])
     if evidence_json:
@@ -78,13 +88,13 @@ def build_markdown_report(query: str, state: dict[str, Any]) -> str:
         citation_appendix = _rag_citation_appendix(source_statuses)
         if citation_appendix:
             sections.extend(["", "## Appendix C: RAG Chunk Citations", citation_appendix])
-        sections.extend(["", EVIDENCE_JSON_HEADING, f"```json\n{_safe_fenced_json(evidence_json)}\n```"])
+        # Evidence JSON and raw outputs are saved as separate appendix files,
+        # not included in the main report body to keep it readable.
     if run_summary:
         sections.extend(["", RUN_SUMMARY_HEADING, _run_summary_markdown(run_summary)])
     if quality_report:
         sections.extend(["", QUALITY_HEADING, _quality_report_markdown(quality_report)])
-    if merged:
-        sections.extend(["", RAW_OUTPUT_HEADING, _demote_markdown_headings(merged)])
+    # Raw source outputs are saved as a separate appendix file.
 
     return "\n".join(sections).rstrip() + "\n"
 
@@ -173,12 +183,51 @@ def write_report_artifacts(
     stem = f"{stamp}-{slugify(query)}"
     markdown_path = out_dir / f"{stem}.md"
     html_path = out_dir / f"{stem}.html"
+    evidence_json_path = out_dir / f"{stem}.evidence.json"
+    deep_evidence_json_path = out_dir / f"{stem}.deep-evidence.json"
+    raw_sources_path = out_dir / f"{stem}.sources.md"
 
     markdown = build_markdown_report(query, state)
     html_doc = markdown_to_html(markdown)
     markdown_path.write_text(markdown, encoding="utf-8")
     html_path.write_text(html_doc, encoding="utf-8")
-    return ReportArtifacts(markdown_path=markdown_path, html_path=html_path)
+    evidence_text = str(state.get("_evidence_json") or "").strip()
+    if evidence_text:
+        try:
+            evidence_payload = json.loads(evidence_text)
+            evidence_text = json.dumps(evidence_payload, ensure_ascii=False, indent=2)
+        except json.JSONDecodeError:
+            pass
+        evidence_json_path.write_text(evidence_text + "\n", encoding="utf-8")
+    else:
+        evidence_json_path = None
+
+    deep_evidence_text = str(state.get("_deep_evidence_json") or "").strip()
+    if deep_evidence_text:
+        try:
+            deep_payload = json.loads(deep_evidence_text)
+            deep_evidence_text = json.dumps(deep_payload, ensure_ascii=False, indent=2)
+        except json.JSONDecodeError:
+            pass
+        deep_evidence_json_path.write_text(deep_evidence_text + "\n", encoding="utf-8")
+    else:
+        deep_evidence_json_path = None
+
+    raw_sources = _sanitize_report_text(str(state.get("_merged") or "").strip())
+    if raw_sources:
+        raw_sources_path.write_text(
+            f"# 原始来源输出\n\n{raw_sources.rstrip()}\n",
+            encoding="utf-8",
+        )
+    else:
+        raw_sources_path = None
+    return ReportArtifacts(
+        markdown_path=markdown_path,
+        html_path=html_path,
+        evidence_json_path=evidence_json_path,
+        raw_sources_path=raw_sources_path,
+        deep_evidence_json_path=deep_evidence_json_path,
+    )
 
 
 def _strip_code_fence(text: str) -> str:
@@ -312,7 +361,8 @@ def _evidence_summary_markdown(evidence_json: str) -> str:
     statuses = payload.get("source_statuses") or {}
     lines = [
         f"- \u8bc1\u636e\u8282\u70b9\u603b\u6570\uff1a{summary.get('total_nodes', 0)}",
-        f"- Consensus/uncontested nodes: {summary.get('consensus_count', 0)}",
+        f"- True multi-source consensus clusters: {summary.get('true_consensus_count', summary.get('consensus_count', 0))}",
+        f"- Uncontested nodes: {summary.get('uncontested_count', 0)}",
         f"- Contested nodes: {summary.get('contested_count', 0)}",
         f"- Single-source nodes: {summary.get('single_source_count', 0)}",
         f"- Average authority: {summary.get('avg_authority', 0)}",
@@ -365,7 +415,7 @@ def _quality_report_markdown(report: dict[str, Any]) -> str:
         "- \u662f\u5426\u8fbe\u6807\uff1a\u662f" if report.get("passed") else "- \u662f\u5426\u8fbe\u6807\uff1a\u5426",
     ]
     for name, score in scores.items():
-        lines.append(f"- {name}\uff1a{score} / 5")
+        lines.append(f"- {name}\uff1a{score} / 5" if score is not None else f"- {name}：不适用")
     notes = report.get("notes") or []
     if notes:
         lines.append("- \u5907\u6ce8\uff1a" + "\uff1b".join(str(note) for note in notes))

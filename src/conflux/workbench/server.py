@@ -991,6 +991,7 @@ def run_query(payload: dict[str, Any]) -> dict[str, Any]:
         "elapsed_ms": elapsed_ms,
         "stdout": stream.getvalue()[-6000:],
         "final_answer": str(state.get("final_answer") or "")[:4000],
+        "artifacts": state.get("_report_artifacts") or {},
     }
 
 

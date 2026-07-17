@@ -33,6 +33,8 @@ def _chat_openai(cfg: dict, base_url: str | None = None) -> BaseChatModel:
         model=cfg["model"],
         temperature=cfg.get("temperature", 0.3),
         max_tokens=cfg.get("max_tokens", 4096),
+        timeout=cfg.get("timeout", 60),
+        max_retries=cfg.get("max_retries", 1),
     )
     url = _resolve(cfg, "base_url", default=base_url)
     if url:
@@ -117,6 +119,8 @@ def create_chat_model(preset: str = "reasoning") -> BaseChatModel:
             model=cfg["model"],
             temperature=cfg.get("temperature", 0.3),
             max_tokens=cfg.get("max_tokens", 4096),
+            timeout=cfg.get("timeout", 60),
+            max_retries=cfg.get("max_retries", 1),
         )
         key = _resolve(cfg, "api_key", "ANTHROPIC_API_KEY")
         if key:

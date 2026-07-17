@@ -6,7 +6,15 @@ import re
 
 from langchain_core.tools import tool
 
-from ..query_planner import entity_score, extract_entities, important_terms, overlap_score, plan_queries
+from ..config import get
+from ..query_planner import (
+    entity_score,
+    extract_entities,
+    important_terms,
+    overlap_score,
+    plan_queries,
+    rewrite_queries,
+)
 from ..rag.retriever import HybridRetriever
 from ..source_status import AgentClaim, SourceResult
 
@@ -19,8 +27,17 @@ def create_rag_tool(retriever: HybridRetriever):
         """Search the local knowledge base and return chunk-level evidence."""
 
         plan = plan_queries(query, target="rag")
+        retry_queries: list[str] = []
         try:
             docs = _search_with_plan(retriever, plan.subqueries)
+            for attempt in range(1, int(get("research", "max_rewrite_attempts", default=1)) + 1):
+                scored_attempt = _score_docs(query, docs)
+                top_attempt = scored_attempt[0]["score"] if scored_attempt else 0.0
+                if top_attempt >= 0.55:
+                    break
+                rewritten = rewrite_queries(query, target="rag", attempt=attempt)
+                retry_queries.extend(rewritten)
+                docs = _merge_documents(docs, _search_with_plan(retriever, rewritten))
         except Exception as exc:
             return SourceResult(
                 source="RAG",
@@ -40,7 +57,7 @@ def create_rag_tool(retriever: HybridRetriever):
                 metadata={"query_plan": plan.to_dict(), "result_count": 0},
             ).to_tool_text()
 
-        scored_docs = _score_docs(query, docs)
+        scored_docs = _limit_per_paper(_score_docs(query, docs), limit=2)
         kept_docs = [item for item in scored_docs if item["score"] >= 0.25]
         top_score = scored_docs[0]["score"] if scored_docs else 0.0
         sources = sorted({str(doc.metadata.get("source", "unknown")) for doc in docs})
@@ -85,6 +102,9 @@ def create_rag_tool(retriever: HybridRetriever):
             char_end = doc.metadata.get("char_end")
             evidence_ref = _rag_evidence_ref(source, chunk_id)
             text = doc.page_content.strip()
+            paper_id = _paper_id(doc.metadata, source)
+            paper_section = _paper_section(doc.metadata, text)
+            evidence_class = _rag_evidence_class(doc.metadata, source)
 
             citations.append({
                 "ref": evidence_ref,
@@ -96,20 +116,30 @@ def create_rag_tool(retriever: HybridRetriever):
                 "text": text[:500],
                 "relevance_score": scored["score"],
                 "score_breakdown": scored["breakdown"],
+                "paper_id": paper_id,
+                "paper_section": paper_section,
+                "evidence_class": evidence_class,
             })
             parts.append(
                 f"[Source {i + 1}] {evidence_ref} {source} ({chunk_id}) "
                 f"relevance={scored['score']:.2f}\n{text}\n"
             )
 
-            claim_text = _claim_from_chunk(text)
+            claim_text = _claim_from_chunk(text, preferred_section=paper_section)
             if claim_text:
                 claims.append(AgentClaim(
                     claim=claim_text,
                     source="RAG",
+                    verbatim_quote=claim_text,
+                    paper_id=paper_id,
+                    paper_section=paper_section,
+                    relevance=scored["score"],
+                    research_type=str(doc.metadata.get("research_type") or doc.metadata.get("document_type") or ""),
+                    metric=_extract_metric(claim_text),
                     evidence_refs=[evidence_ref],
                     confidence=confidence,
                     limitations=[limitation],
+                    evidence_class=evidence_class,
                 ))
 
         return SourceResult(
@@ -117,9 +147,11 @@ def create_rag_tool(retriever: HybridRetriever):
             status=status,
             detail="Local Chroma hybrid retrieval",
             content="\n".join(parts),
+            evidence_class=_strongest_evidence_class(claims),
             claims=claims,
             metadata={
                 "query_plan": plan.to_dict(),
+                "retry_queries": retry_queries,
                 "result_count": len(docs),
                 "kept_count": len(kept_docs),
                 "dropped_count": len(docs) - len(kept_docs),
@@ -149,6 +181,31 @@ def _search_with_plan(retriever: HybridRetriever, subqueries: list[str]):
     return docs
 
 
+def _merge_documents(existing, additional):
+    merged = []
+    seen = set()
+    for doc in [*existing, *additional]:
+        key = str(doc.metadata.get("chunk_id") or doc.metadata.get("source") or doc.page_content[:120])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(doc)
+    return merged
+
+
+def _limit_per_paper(scored_docs: list[dict], limit: int) -> list[dict]:
+    kept = []
+    counts: dict[str, int] = {}
+    for item in scored_docs:
+        doc = item["doc"]
+        identity = _paper_id(doc.metadata, str(doc.metadata.get("source", "unknown"))).casefold()
+        if counts.get(identity, 0) >= limit:
+            continue
+        counts[identity] = counts.get(identity, 0) + 1
+        kept.append(item)
+    return kept
+
+
 def _rag_evidence_ref(source: str, chunk_id: str) -> str:
     if chunk_id:
         if "#p" in chunk_id:
@@ -160,13 +217,85 @@ def _rag_evidence_ref(source: str, chunk_id: str) -> str:
     return f"[RAG:{source}#chunk-unknown]"
 
 
-def _claim_from_chunk(text: str, max_length: int = 220) -> str:
-    for raw in re.split(r"[\n。.!?]+", text):
-        cleaned = re.sub(r"\s+", " ", raw).strip(" -\t")
-        if len(cleaned) >= 12:
-            return cleaned[:max_length]
-    cleaned = re.sub(r"\s+", " ", text).strip()
-    return cleaned[:max_length]
+def _claim_from_chunk(text: str, max_length: int = 220, preferred_section: str = "") -> str:
+    """Extract a factual sentence, skipping titles and prioritising paper sections."""
+
+    section = preferred_section.casefold()
+    candidates: list[tuple[int, str]] = []
+    current_section = section
+    priorities = {"results": 5, "result": 5, "limitations": 4, "limitation": 4, "method": 3, "methods": 3, "abstract": 2}
+    for line_number, raw_line in enumerate(text.splitlines()):
+        line = raw_line.strip()
+        heading = re.match(r"^#{1,6}\s+(.+)$", line)
+        if heading:
+            current_section = heading.group(1).strip().casefold()
+            continue
+        if not line or _looks_like_title(line, line_number):
+            continue
+        for raw in re.split(r"(?<=[。.!?])\s*", line):
+            cleaned = re.sub(r"\s+", " ", raw).strip(" -*\t")
+            if len(cleaned) < 20 or _looks_like_title(cleaned, line_number):
+                continue
+            priority = max(
+                (score for name, score in priorities.items() if name in current_section),
+                default=1,
+            )
+            if re.search(r"\b(result|found|show|demonstrat|improv|reduc|increase|decrease)\w*\b|结果|表明|发现|提升|降低", cleaned, re.IGNORECASE):
+                priority += 2
+            candidates.append((priority, cleaned[:max_length]))
+    if candidates:
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+    return ""
+
+
+def _looks_like_title(text: str, line_number: int) -> bool:
+    stripped = text.strip()
+    if stripped.startswith("#"):
+        return True
+    if line_number == 0 and not re.search(r"[。.!?]$", stripped):
+        return True
+    words = re.findall(r"[A-Za-z]+", stripped)
+    return bool(words) and len(words) <= 18 and sum(word[:1].isupper() for word in words) / len(words) > 0.75
+
+
+def _paper_id(metadata: dict, source: str) -> str:
+    return str(
+        metadata.get("paper_id")
+        or metadata.get("doi")
+        or metadata.get("arxiv_id")
+        or metadata.get("document_id")
+        or source
+    ).strip()
+
+
+def _paper_section(metadata: dict, text: str) -> str:
+    explicit = str(metadata.get("paper_section") or metadata.get("section") or "").strip()
+    if explicit:
+        return explicit.casefold()
+    match = re.search(r"^#{1,6}\s+(abstract|methods?|results?|limitations?)\b", text, re.IGNORECASE | re.MULTILINE)
+    return match.group(1).casefold() if match else "unknown"
+
+
+def _rag_evidence_class(metadata: dict, source: str) -> str:
+    declared = str(metadata.get("evidence_class") or metadata.get("publication_type") or "").casefold()
+    if declared in {"peer_reviewed", "journal", "conference", "proceedings"} or metadata.get("peer_reviewed") is True:
+        return "peer_reviewed"
+    if declared in {"preprint", "arxiv"} or "arxiv" in source.casefold():
+        return "preprint"
+    return "authoritative_document"
+
+
+def _strongest_evidence_class(claims: list[AgentClaim]) -> str:
+    rank = {"peer_reviewed": 5, "authoritative_document": 4, "preprint": 3, "community_content": 2, "model_inference": 1}
+    if not claims:
+        return "authoritative_document"
+    return max((claim.evidence_class for claim in claims), key=lambda value: rank.get(value, 0))
+
+
+def _extract_metric(text: str) -> str:
+    match = re.search(r"\b\d+(?:\.\d+)?\s*(?:%|m|cm|mm|km|s|ms|hours?|days?)\b", text, re.IGNORECASE)
+    return match.group(0) if match else ""
 
 
 def _score_docs(query: str, docs) -> list[dict]:

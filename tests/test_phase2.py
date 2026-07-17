@@ -73,16 +73,15 @@ def test_multi_agent_graph_compiles_and_factcheck_updates_final_answer():
     from conflux.graph_v2 import create_multi_agent_graph
 
     reasoning = FakeModel([
-        "```final\nRAG 回答：Shor 算法会威胁 RSA。\n```",
-        "```final\nWeb 回答：NIST 已发布 PQC 标准。\n```",
-        "```final\nModel 回答：量子计算影响公钥密码。\n```",
-        "综合报告：量子计算威胁 RSA，后量子密码是迁移方向。",
+        "## 证据比较\n模型推断：RAG 与 Web 分别覆盖算法风险和标准进展。",
+        "## 最终结论\n- Shor 算法威胁 RSA。[RAG]\n\n## 信息来源\nRAG/Web 可用。\n\n## 不确定性\n迁移时间仍不确定。\n\n## 证据摘要\n当前结论来自外部证据。\n\n## 工程落地建议\n制定迁移清单。",
     ])
     cheap = FakeModel([
-        "仲裁：RAG、Web、Model 存在核心共识。",
+        "仲裁：RAG 与 Web 提供不同但互补的外部证据。",
         "无法验证的声明：后量子迁移时间表未在原始来源中出现。\n整体验证结论：部分通过",
         "子问题一：迁移优先级如何确定？\n子问题二：哪些系统最先迁移？",
-        "### 深化补充\n优先处理长期保密数据和公钥基础设施。",
+        "深化仲裁：新检索仍需补充独立来源。",
+        "### 深化补充\n模型推断：优先处理长期保密数据和公钥基础设施。",
     ])
 
     rag_agent = create_sub_agent("rag", reasoning, fake_rag)
@@ -116,9 +115,12 @@ def test_multi_agent_graph_compiles_and_factcheck_updates_final_answer():
     assert result["_arbitration"]
     assert result["_evidence_json"]
     assert result["_factcheck_status"] == "needs_review"
-    assert "## FactCheck 验证结果" in result["final_answer"]
+    assert result["_factcheck_report"]
     assert result["_deep_research"]
-    assert "## 深化研究补充" in result["final_answer"]
+    assert result["_deep_queries"]
+    assert result["_deep_factcheck_report"]
+    assert result["_deep_evidence_json"]
+    assert len(reasoning.calls) == 2  # Model Analyst once, then final synthesis once.
     assert result["_run_summary"]["slo_status"] == "pass"
     assert "deep_research" in result["_run_summary"]["stages"]
 
@@ -386,18 +388,14 @@ def test_phase2_marks_failed_web_as_failed_not_consensus():
         ).to_tool_text()
 
     reasoning = FakeModel([
-        "```final\nRAG 摘要。\n```",
-        "```final\nRAG 摘要。\n```",
-        "```final\nWeb 检索失败，不能作为真实来源。\n```",
-        "```final\nWeb 检索失败，不能作为真实来源。\n```",
-        "```final\nModel 摘要。\n```",
-        "```final\nModel 摘要。\n```",
+        "## 证据分析\n模型推断：RAG 支持反馈闭环，Web 检索失败。",
         "## 最终结论\n- Loop Engineering 关注反馈闭环。[RAG][Model]\n\n## 信息来源\nWeb failed。\n\n## 不确定性\nWeb 失败，仍需外部检索。\n\n## 证据摘要\nRAG 与 Model 有部分一致。\n\n## 工程落地建议\n建立状态标注。",
     ])
     cheap = FakeModel([
         "仲裁：RAG 与 Model 可投票，Web failed 不参与。",
         "验证通过：所有关键声明均有信息源支持",
         "如何补齐 Web 权威来源？",
+        "深化仲裁：RAG 有证据，Web 仍失败。",
         "### 深化补充\n证据支持：当前只验证了 RAG 与 Model，Web 需重试。",
     ])
 

@@ -10,21 +10,22 @@ from __future__ import annotations
 
 import json
 import re
+from hashlib import sha256
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
-from .source_status import SourceResult
+from .source_status import EXTERNAL_EVIDENCE_CLASSES, EvidenceItem, SourceResult
 
 
 EvidenceSource = Literal["RAG", "Web", "Model", "FactCheck", "Synthesize"]
 
-SOURCE_AUTHORITY = {
-    "RAG": 0.7,
-    "Web": 0.5,
-    "Model": 0.4,
-    "FactCheck": 0.8,
-    "Synthesize": 0.6,
+EVIDENCE_AUTHORITY = {
+    "peer_reviewed": 0.9,
+    "authoritative_document": 0.85,
+    "preprint": 0.72,
+    "community_content": 0.42,
+    "model_inference": 0.2,
 }
 
 LOW_RELEVANCE_AUTHORITY_MULTIPLIER = 0.6
@@ -56,6 +57,13 @@ class EvidenceNode:
         "consensus_gap": 0.3,
     })
     verified: bool = False
+    paper_id: str = ""
+    evidence_class: str = ""
+    verbatim_quote: str = ""
+    paper_section: str = ""
+    relevance: float = 0.0
+    research_type: str = ""
+    metric: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -70,7 +78,7 @@ class EvidenceGraph:
 
     def add_node(self, node: EvidenceNode) -> None:
         if node.authority_score == 0.5:
-            node.authority_score = SOURCE_AUTHORITY.get(node.source, node.authority_score)
+            node.authority_score = EVIDENCE_AUTHORITY.get(node.evidence_class, 0.2)
         self.nodes[node.id] = node
 
     def add_support(self, supporter_id: str, supported_id: str) -> None:
@@ -102,6 +110,12 @@ class EvidenceGraph:
         ]
 
     def consensus_summary(self) -> dict:
+        """Summarise uncontested vs contested nodes and true multi-source consensus.
+
+        A claim reaches *consensus* only when it is supported by at least two
+        independent external-fact sources (RAG or Web) with distinct paper/URL
+        identity — a RAG paper and a Web page reprinting it do not count as two.
+        """
         uncontested = []
         contested = []
         source_counts: dict[str, int] = {}
@@ -112,11 +126,33 @@ class EvidenceGraph:
             else:
                 uncontested.append(node)
 
+        external_nodes = {
+            node.id: node
+            for node in self.nodes.values()
+            if node.evidence_class in EXTERNAL_EVIDENCE_CLASSES
+        }
+        consensus_components = []
+        for component in _support_components(external_nodes):
+            identity_groups = _independent_identity_groups(
+                [external_nodes[node_id] for node_id in component]
+            )
+            if len(identity_groups) >= 2:
+                consensus_components.append({
+                    "node_ids": sorted(component),
+                    "source_identities": sorted(group[0] for group in identity_groups),
+                })
+        independent_source_count = len(_independent_identity_groups(list(external_nodes.values())))
+        true_consensus_count = len(consensus_components)
+
         return {
             "total_nodes": len(self.nodes),
-            "consensus_count": len(uncontested),
+            "consensus_count": true_consensus_count,
+            "true_consensus_count": true_consensus_count,
+            "uncontested_count": len(uncontested),
             "contested_count": len(contested),
             "single_source_count": len(self.find_single_source()),
+            "independent_external_sources": independent_source_count,
+            "consensus_components": consensus_components,
             "source_counts": source_counts,
             "contested_pairs": [
                 {"a": left.claim[:80], "b": right.claim[:80]}
@@ -203,10 +239,17 @@ def build_evidence_graph_from_results(results: dict[str, SourceResult]) -> Evide
                     claim=claim.claim[:240],
                     source=source,
                     source_detail=result.detail or result.source,
-                    authority_score=_authority_for_result(source, result),
+                    authority_score=_authority_for_item(result, claim),
                     evidence_refs=claim.evidence_refs,
                     confidence=_confidence_for_result(claim.confidence, result),
                     limitations=_limitations_for_result(claim.limitations, result),
+                    paper_id=_paper_id_for_item(claim),
+                    evidence_class=claim.evidence_class or result.evidence_class,
+                    verbatim_quote=claim.verbatim_quote,
+                    paper_section=claim.paper_section,
+                    relevance=claim.relevance,
+                    research_type=claim.research_type,
+                    metric=claim.metric,
                 ))
         else:
             for node in extract_claims_from_text(
@@ -218,16 +261,28 @@ def build_evidence_graph_from_results(results: dict[str, SourceResult]) -> Evide
                 node.authority_score = _authority_for_result(source, result)
                 node.confidence = _confidence_for_result(node.confidence, result)
                 node.limitations = _limitations_for_result(node.limitations, result)
+                node.evidence_class = result.evidence_class
                 graph.add_node(node)
+        _deduplicate_source_nodes(graph, source)
     graph.link_surface_relations()
     graph.propagate_uncertainty()
     return graph
 
 
 def _authority_for_result(source: str, result: SourceResult) -> float:
-    authority = SOURCE_AUTHORITY.get(source, 0.5)
+    authority = EVIDENCE_AUTHORITY.get(result.evidence_class, 0.2)
     if result.is_low_relevance:
         authority *= LOW_RELEVANCE_AUTHORITY_MULTIPLIER
+    return round(authority, 3)
+
+
+def _authority_for_item(result: SourceResult, item: EvidenceItem) -> float:
+    evidence_class = item.evidence_class or result.evidence_class
+    authority = EVIDENCE_AUTHORITY.get(evidence_class, 0.2)
+    if result.is_low_relevance:
+        authority *= LOW_RELEVANCE_AUTHORITY_MULTIPLIER
+    if item.relevance:
+        authority *= 0.7 + (0.3 * max(0.0, min(1.0, item.relevance)))
     return round(authority, 3)
 
 
@@ -267,7 +322,7 @@ def extract_claims_from_text(
             claim=paragraph[:200],
             source=source,
             source_detail=source_detail,
-            authority_score=SOURCE_AUTHORITY.get(source, 0.5),
+            authority_score=0.2,
         ))
     return nodes
 
@@ -320,3 +375,116 @@ def _claim_polarity(text: str) -> str:
     ]
     lowered = text.lower()
     return "negative" if any(marker in lowered for marker in negative_markers) else "positive"
+
+
+def _support_components(nodes: dict[str, EvidenceNode]) -> list[set[str]]:
+    """Return connected support components; unrelated claims stay isolated."""
+
+    remaining = set(nodes)
+    components: list[set[str]] = []
+    while remaining:
+        root = remaining.pop()
+        component = {root}
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            node = nodes[current]
+            neighbours = (set(node.supporting) | set(node.derived_from)) & set(nodes)
+            for neighbour in neighbours:
+                if neighbour not in component:
+                    component.add(neighbour)
+                    remaining.discard(neighbour)
+                    stack.append(neighbour)
+        components.append(component)
+    return components
+
+
+def _paper_id_for_item(item: EvidenceItem) -> str:
+    if item.paper_id.strip():
+        return _normalize_identity(item.paper_id)
+    for ref in item.evidence_refs:
+        identity = _identity_from_ref(ref)
+        if identity:
+            return identity
+    return ""
+
+
+def _identity_from_ref(ref: str) -> str:
+    text = str(ref).strip().strip("[]")
+    if text.startswith("RAG:"):
+        return _normalize_identity(text[4:].split("#chunk", 1)[0])
+    if text.startswith("Web:"):
+        return _normalize_identity(text[4:])
+    return ""
+
+
+def _normalize_identity(value: str) -> str:
+    text = re.sub(r"^https?://(dx\.)?doi\.org/", "doi:", value.strip(), flags=re.IGNORECASE)
+    text = re.sub(r"^https?://(www\.)?arxiv\.org/(abs|pdf)/", "arxiv:", text, flags=re.IGNORECASE)
+    text = re.sub(r"\.pdf$", "", text, flags=re.IGNORECASE)
+    text = text.rstrip("/").lower()
+    arxiv_match = re.fullmatch(r"(?:arxiv:|paper:)?(\d{4}\.\d{4,5})(?:v\d+)?", text)
+    if arxiv_match:
+        return f"arxiv:{arxiv_match.group(1)}"
+    return text
+
+
+def _evidence_identity(node: EvidenceNode) -> str:
+    return _explicit_evidence_identity(node) or f"{node.source.lower()}:{node.id}"
+
+
+def _explicit_evidence_identity(node: EvidenceNode) -> str:
+    if node.paper_id:
+        return _normalize_identity(node.paper_id)
+    for ref in node.evidence_refs:
+        identity = _identity_from_ref(ref)
+        if identity:
+            return identity
+    return ""
+
+
+def _deduplicate_source_nodes(graph: EvidenceGraph, source: str) -> None:
+    """Drop exact normalized duplicates within one source, never prefix matches."""
+
+    seen: set[str] = set()
+    for node_id, node in list(graph.nodes.items()):
+        if node.source != source:
+            continue
+        normalized = re.sub(r"\s+", " ", node.claim).strip().casefold()
+        digest = sha256(normalized.encode("utf-8")).hexdigest()
+        key = f"{_explicit_evidence_identity(node) or source.casefold()}:{digest}"
+        if key in seen:
+            del graph.nodes[node_id]
+        else:
+            seen.add(key)
+
+
+def _independent_identity_groups(nodes: list[EvidenceNode]) -> list[list[str]]:
+    """Group mirrors/reprints of the same claim before counting independence."""
+
+    groups: list[tuple[EvidenceNode, list[str]]] = []
+    for node in nodes:
+        identity = _evidence_identity(node)
+        for representative, identities in groups:
+            same_document = identity in identities
+            mirrored_claim = (
+                _claim_overlap(node.claim, representative.claim) >= 0.9
+                and (
+                    _is_scholarly_mirror(identity)
+                    or any(_is_scholarly_mirror(item) for item in identities)
+                )
+            )
+            if same_document or mirrored_claim:
+                if identity not in identities:
+                    identities.append(identity)
+                break
+        else:
+            groups.append((node, [identity]))
+    return [identities for _, identities in groups]
+
+
+def _is_scholarly_mirror(identity: str) -> bool:
+    return any(
+        marker in identity
+        for marker in ("semanticscholar.org/", "openalex.org/", "api.crossref.org/")
+    )
