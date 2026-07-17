@@ -132,6 +132,55 @@ Run the local research workbench:
 python -m conflux.workbench --host 127.0.0.1 --port 8765
 ```
 
+## 项目进度审计
+
+研究画像中的 `project_paths` 用于登记本地项目。首次运行建立基线：
+
+```powershell
+python -m conflux.progress snapshot --profile profiles/example_gis_agent.yaml --out-dir reports/progress
+```
+
+后续运行会比较 Git 提交、未提交文件、测试状态、研究产物和报告变化，并生成带证据引用的 Markdown/JSON 审计报告：
+
+```powershell
+python -m conflux.progress audit --profile profiles/example_gis_agent.yaml --since last --test-command "python -m pytest -q" --out-dir reports/progress
+```
+
+也可以在本地工作台的“进度审计”页面选择画像和项目路径后运行。审计只读取本地证据，不会上传项目文件，也不会执行未明确配置的命令。
+
+## 多项目进度监控
+
+工作台的“项目监控”页面统一展示本地/远程版本、未提交变更、计划基线、文档、实验产物、报告和最近审计结果。首期只支持手动刷新，Git 监控严格只读：不会执行 `pull`、`push`、`checkout` 或 `fetch`。远程检查通过 `git ls-remote` 读取版本；如果远程对象尚未进入本地对象库，界面会明确提示无法计算精确 ahead/behind。
+
+每个项目在 `projects/` 下使用一份 YAML 作为权威配置。项目路径可以是 Git 仓库，也可以是只有文档、数据或实验产物的普通目录。非 Git 目录会显示“Git 不适用”，不会被记为故障。
+
+```yaml
+version: 1
+id: kg-llm
+name: KG + LLM 研究
+path: E:\research\kg-llm
+documents:
+  directories: [docs, notes]
+artifacts:
+  result_dirs: [experiments, results]
+  report_dirs: [reports]
+plan:
+  overall_goal: 验证知识图谱增强大模型推理的有效性。
+  milestones:
+  - id: baseline
+    title: 完成基线与消融实验
+    status: in_progress
+  next_actions:
+  - 整理实验数据并补充误差分析。
+refresh:
+  mode: manual
+  schedule_enabled: false
+  interval_minutes: null
+  timezone: Asia/Shanghai
+```
+
+“提取计划候选”会读取已配置的 Markdown 文档并返回总体目标、阶段目标和后续计划候选。候选项始终保持待确认状态，不会自动改写项目 YAML。`schedule_enabled`、`interval_minutes` 和 `next_refresh_at` 已预留给后续定时任务，当前不会启动后台调度。
+
 Run with checkpoint-ready state:
 
 ```powershell

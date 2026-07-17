@@ -624,13 +624,18 @@ Sprint goal: make `ResearchProfile` real and create deterministic paper ingestio
 
 ## 17. Current Implementation And Test Nodes
 
-Status after R4:
+Status after R6:
 
 - R1 Research Profile is implemented with typed profile loading, validation, AcademyHunter-style profile mapping, and CLI entrypoints.
 - R2 Paper Ingestion Core is implemented with offline fixtures, arXiv query planning/search, record normalization, deduplication, and negative filtering.
 - R3 Paper Radar and Inbox is implemented with deterministic relevance scoring, offline analysis, reading-level assignment, Markdown inbox, and JSON inbox.
 - R4 RAG Promotion is implemented with explicit ingestion policy, `LocalPaper` metadata, citation refs, reviewable promoted paper documents, optional Chroma indexing, and optional AcademyHunter-style PDF download/full-text chunk support.
 - R4.5 Local Research Workbench is implemented with a no-extra-dependency local web UI for paper inbox, promotion review, report browsing, model probing, and real query execution with temporary custom API URL/key/model overrides.
+- R6 进度审计 MVP 已实现：支持本地 Git、测试、研究产物和报告采集，基线对比，证据引用约束，Markdown/JSON 输出，以及工作台审计界面。
+- R6.1 多项目进度监控已实现：`projects/*.yaml` 项目注册表、只读本地/远程 Git 版本检查、非 Git 研究目录、结构化目标与阶段计划、待确认的文档计划候选、手动刷新 API，以及统一项目面板。
+- R6.1 的 Git 边界是纯监控，不执行 `pull`、`push`、`checkout` 或 `fetch`。远程对象不在本地时只提示无法精确比较，不隐式修改仓库。
+- 项目配置是目标和计划的权威来源；文档提取结果只能作为 `pending_confirmation` 候选。
+- 刷新策略已预留 `schedule_enabled`、`interval_minutes`、`last_refreshed_at` 和 `next_refresh_at`，首期不启动调度器。
 
 Hands-on test points:
 
@@ -639,6 +644,8 @@ python -m conflux.profile validate profiles/example_gis_agent.yaml
 python -m conflux.papers crawl --profile profiles/example_gis_agent.yaml --source arxiv --dry-run
 python -m conflux.papers inbox --profile profiles/example_gis_agent.yaml --fixture tests/fixtures/papers/arxiv_sample.json --out-dir reports/papers_demo
 python -m conflux.papers promote reports/papers_demo/paper_inbox.json --out-dir data/documents/papers
+python -m conflux.progress snapshot --profile profiles/example_gis_agent.yaml --out-dir reports/progress
+python -m conflux.progress audit --profile profiles/example_gis_agent.yaml --since last --out-dir reports/progress
 python -m conflux.workbench --host 127.0.0.1 --port 8765
 ```
 

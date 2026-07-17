@@ -9,6 +9,13 @@ let activeQuery = null;
 let profileOptimizationOriginal = null;
 let profileOptimizationDraft = null;
 let profileOptimizationState = 'idle';
+let projectsCache = [];
+let selectedProjectId = '';
+let activeProjectTab = 'overview';
+let projectPlanAnalysis = null;
+let projectCharterDraft = null;
+let planAnalysisTimers = [];
+let projectRegistryDir = 'projects';
 
 function escapeHtml(value) {
   return String(value == null ? '' : value).replace(/[&<>"']/g, (char) => ({
@@ -84,6 +91,16 @@ async function api(path, payload) {
   const data = await response.json();
   if (!response.ok && !data.error) data.error = '请求失败（HTTP ' + response.status + '）';
   return data;
+}
+
+function fmtIsoDate(value) {
+  if (!value) return '-';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false
+  }).format(parsed);
 }
 
 async function authFetch(path, options) {
@@ -312,13 +329,31 @@ function hasEmbeddingCredential() {
   return Boolean($('embeddingApiKey').value.trim() || $('apiKey').value.trim() || credentials.embedding_api_key || credentials.openai_api_key);
 }
 
+function webSearchState() {
+  const configured = (statusCache && statusCache.defaults && statusCache.defaults.web_search) || {};
+  const provider = ($('webSearchProvider') && $('webSearchProvider').value) || configured.provider || 'duckduckgo';
+  const credentials = (statusCache && statusCache.credentials) || {};
+  const ready = provider !== 'serpapi' || Boolean(($('serpapiApiKey') && $('serpapiApiKey').value.trim()) || credentials.serpapi_api_key);
+  return { provider, ready };
+}
+
+function updateWebSearchFields() {
+  const state = webSearchState();
+  const serpapi = state.provider === 'serpapi';
+  $('serpapiKeyField').hidden = !serpapi;
+  $('webSearchConfigHint').textContent = serpapi
+    ? 'SerpAPI 需要 API Key；保存后仅写入本地工作台环境文件。'
+    : 'DuckDuckGo 无需 API Key，可直接用于网络搜索。';
+  updateQueryReadiness();
+  if (statusCache) renderCapabilities(statusCache.credentials || {});
+}
+
 function updateQueryReadiness() {
   const state = $('queryReadiness');
   if (!statusCache) return;
-  const credentials = statusCache.credentials || {};
   const reasoning = hasReasoningCredential();
   const embedding = hasEmbeddingCredential();
-  const search = Boolean(credentials.serpapi_api_key);
+  const search = webSearchState().ready;
   const button = $('runQuery');
 
   state.className = 'query-readiness';
@@ -340,10 +375,11 @@ function updateQueryReadiness() {
 
 function capabilityRows(credentials) {
   const profilesReady = Boolean(statusCache && (statusCache.profiles || []).length);
+  const search = webSearchState();
   return [
     { name: '推理模型', detail: '生成、仲裁与事实核查', ready: Boolean(credentials.openai_api_key || credentials.reasoning_api_key), icon: 'brain-circuit', required: true },
     { name: '向量检索', detail: '检索本地论文和文档', ready: Boolean(credentials.embedding_api_key || credentials.openai_api_key), icon: 'database', required: false },
-    { name: '网络搜索', detail: '获取外部最新证据', ready: Boolean(credentials.serpapi_api_key), icon: 'globe-2', required: false },
+    { name: '网络搜索', detail: search.provider === 'serpapi' ? 'SerpAPI 外部证据' : 'DuckDuckGo 外部证据', ready: search.ready, icon: 'globe-2', required: false },
     { name: '研究画像', detail: '指导论文搜索和评分', ready: profilesReady, icon: 'user-round-search', required: true }
   ];
 }
@@ -375,6 +411,14 @@ function renderCapabilities(credentials) {
   refreshIcons();
 }
 
+function syncProgressProjectPath(force = false) {
+  if (!statusCache) return;
+  const selected = (statusCache.profiles || []).find((profile) => profile.path === $('progressProfile').value);
+  const projectPath = selected && (selected.project_paths || [])[0];
+  if (force) $('progressProjectPath').value = projectPath || '';
+  else if (projectPath && !$('progressProjectPath').value.trim()) $('progressProjectPath').value = projectPath;
+}
+
 async function refreshStatus(options = {}) {
   try {
     const response = await authFetch('/api/status');
@@ -400,25 +444,758 @@ async function refreshStatus(options = {}) {
       $('profilePath').appendChild(option);
     }
 
+    const currentProgressProfile = $('progressProfile').value;
+    $('progressProfile').innerHTML = '';
+    profiles.forEach((profile) => {
+      const option = document.createElement('option');
+      option.value = profile.path;
+      option.textContent = profile.display || profile.name || profile.path;
+      option.selected = profile.path === (currentProgressProfile || nextStatus.defaults.profile);
+      $('progressProfile').appendChild(option);
+    });
+    if (!profiles.length) {
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = '没有可用画像';
+      $('progressProfile').appendChild(option);
+    }
+
     if (!initialized || options.resetDefaults) {
       $('fixturePath').value = nextStatus.defaults.fixture || '';
       $('inboxOut').value = nextStatus.defaults.inbox_dir || '';
       $('promoteInbox').value = (nextStatus.defaults.inbox_dir || '') + '/paper_inbox.json';
       $('promoteOut').value = nextStatus.defaults.promote_dir || '';
+      $('progressOut').value = nextStatus.defaults.progress_dir || 'reports/workbench/progress';
       $('baseUrl').value = (nextStatus.defaults.reasoning || {}).base_url || '';
       $('modelName').value = (nextStatus.defaults.reasoning || {}).model || '';
       $('embeddingBaseUrl').value = (nextStatus.defaults.embedding || {}).base_url || '';
       $('embeddingModel').value = (nextStatus.defaults.embedding || {}).model || '';
+      $('webSearchProvider').value = (nextStatus.defaults.web_search || {}).provider || 'duckduckgo';
       if (nextStatus.saved_depth) $('depthSelect').value = nextStatus.saved_depth;
     }
 
+    updateWebSearchFields();
     renderCapabilities(nextStatus.credentials || {});
+    syncProgressProjectPath(!initialized || options.resetDefaults);
     renderReports();
     initialized = true;
   } catch (error) {
     $('busyDot').className = 'busy-dot error';
     $('busyText').textContent = '状态不可用';
     toast('无法读取工作台状态：' + error.message, 'err');
+  }
+}
+
+function projectHealthLabel(health) {
+  return ({ ok: '状态正常', info: '需要关注', warning: '存在提醒', error: '需要处理' })[health] || '未知';
+}
+
+function projectHealthClass(health) {
+  return ({ ok: 'ok', info: 'info', warning: 'warn', error: 'error' })[health] || 'neutral';
+}
+
+function repositoryState(repo) {
+  if (!repo || !repo.is_repository) return { label: 'Git 不适用', detail: '文档或实验目录', className: 'neutral' };
+  if ((repo.errors || []).length) return { label: '读取失败', detail: 'Git 状态不可用', className: 'error' };
+  if (!repo.remote_name) return { label: '仅本地', detail: '未配置远程仓库', className: 'neutral' };
+  if (!repo.remote_checked) {
+    const cached = repo.sync_status === 'in_sync' ? '本地跟踪引用一致' : '等待远程检查';
+    return { label: '远程未刷新', detail: cached, className: 'neutral' };
+  }
+  const states = {
+    in_sync: ['版本一致', '本地与远程版本一致', 'ok'],
+    ahead: ['本地领先', '领先远程 ' + Number(repo.ahead || 0) + ' 个提交', 'info'],
+    behind: ['本地落后', '落后远程 ' + Number(repo.behind || 0) + ' 个提交', 'warn'],
+    diverged: ['版本分叉', '本地领先 ' + Number(repo.ahead || 0) + '、落后 ' + Number(repo.behind || 0), 'error'],
+    unknown: ['待人工确认', '远程版本尚未进入本地对象库', 'warn'],
+    local_only: ['仅本地', '未配置可比较的远程分支', 'neutral']
+  };
+  const state = states[repo.sync_status] || ['状态未知', '无法计算版本差异', 'neutral'];
+  return { label: state[0], detail: state[1], className: state[2] };
+}
+
+async function loadProjects(options = {}) {
+  const refresh = Boolean(options.refresh);
+  const button = refresh ? (options.projectId ? $('refreshSelectedProject') : $('refreshProjects')) : null;
+  if (button) enterBusy(button, options.projectId ? '检查项目' : '检查全部');
+  $('projectsError').hidden = true;
+  try {
+    let data;
+    if (refresh) {
+      data = await api('/api/projects/refresh', { project_id: options.projectId || '' });
+    } else {
+      const response = await authFetch('/api/projects', { cache: 'no-store' });
+      data = await response.json().catch(() => ({}));
+      if (!response.ok && !data.error) data.error = '请求失败（HTTP ' + response.status + '）';
+    }
+    if (!data.ok) throw new Error(data.error || '项目状态加载失败');
+    if (refresh && options.projectId) {
+      const refreshed = (data.projects || [])[0];
+      projectsCache = projectsCache.map((item) => item.project.id === options.projectId ? refreshed : item);
+    } else {
+      projectsCache = data.projects || [];
+    }
+    if (!projectsCache.some((item) => item.project.id === selectedProjectId)) {
+      selectedProjectId = projectsCache[0] ? projectsCache[0].project.id : '';
+    }
+    projectRegistryDir = data.registry_dir || projectRegistryDir;
+    renderProjects(data.registry_errors || [], data.registry_dir || 'projects/');
+    if (refresh) toast(options.projectId ? '项目状态已检查' : '全部项目状态已检查', 'ok');
+  } catch (error) {
+    $('projectsErrorMessage').textContent = error.message;
+    $('projectsError').hidden = false;
+    $('projectSummaryState').textContent = '加载失败';
+    $('projectSummaryState').className = 'status-pill error';
+    $('projectSummaryText').textContent = '无法读取项目注册表';
+    if (refresh) toast('项目检查失败：' + error.message, 'err');
+  } finally {
+    if (button) leaveBusy(button);
+  }
+}
+
+function renderProjects(registryErrors, registryDir) {
+  const errorCount = projectsCache.filter((item) => item.health === 'error').length;
+  const warningCount = projectsCache.filter((item) => item.health === 'warning').length;
+  $('projectNavCount').textContent = String(projectsCache.length);
+  $('projectCount').textContent = String(projectsCache.length);
+  $('projectRegistryPath').textContent = registryDir;
+  if (errorCount) {
+    $('projectSummaryState').textContent = errorCount + ' 个需处理';
+    $('projectSummaryState').className = 'status-pill error';
+  } else if (warningCount) {
+    $('projectSummaryState').textContent = warningCount + ' 个有提醒';
+    $('projectSummaryState').className = 'status-pill warn';
+  } else {
+    $('projectSummaryState').textContent = projectsCache.length ? '状态正常' : '等待登记';
+    $('projectSummaryState').className = 'status-pill ' + (projectsCache.length ? 'ok' : 'neutral');
+  }
+  $('projectSummaryText').textContent = projectsCache.length
+    ? '共 ' + projectsCache.length + ' 个项目，远程版本仅在手动检查时读取'
+    : '项目注册表为空';
+
+  $('projectRegistryErrors').hidden = !registryErrors.length;
+  $('projectRegistryErrorList').innerHTML = registryErrors.map((error) => '<p>' + escapeHtml(error) + '</p>').join('');
+  $('projectsEmpty').hidden = projectsCache.length > 0;
+  $('projectList').innerHTML = projectsCache.map((overview) => {
+    const project = overview.project || {};
+    const repo = overview.repository || {};
+    const alerts = overview.alerts || [];
+    const branch = repo.is_repository ? (repo.branch || 'detached') : '非 Git 目录';
+    const version = repo.is_repository && repo.head ? repo.head.slice(0, 8) : (overview.documents || {}).count + ' 份文档';
+    return '<button class="project-row" type="button" role="option" data-project-id="' + escapeHtml(project.id) + '" aria-selected="' + String(project.id === selectedProjectId) + '">' +
+      '<span class="project-row-state ' + escapeHtml(overview.health || '') + '" aria-hidden="true"></span>' +
+      '<span class="project-row-copy"><strong>' + escapeHtml(project.name || project.id) + '</strong><small title="' + escapeHtml(project.path || '') + '">' + escapeHtml(project.path || '') + '</small></span>' +
+      '<span class="project-row-meta"><span>' + escapeHtml(branch) + '</span><code>' + escapeHtml(version) + '</code>' +
+      (alerts.length ? '<span class="project-row-alerts"><i data-lucide="triangle-alert" aria-hidden="true"></i>' + alerts.length + '</span>' : '') + '</span></button>';
+  }).join('');
+  document.querySelectorAll('.project-row').forEach((button) => button.addEventListener('click', () => {
+    if (selectedProjectId !== button.dataset.projectId) {
+      activeProjectTab = 'overview';
+      projectPlanAnalysis = null;
+      projectCharterDraft = null;
+    }
+    selectedProjectId = button.dataset.projectId;
+    renderProjects(registryErrors, registryDir);
+  }));
+  renderSelectedProject();
+  refreshIcons();
+}
+
+function renderSelectedProject() {
+  const overview = projectsCache.find((item) => item.project.id === selectedProjectId);
+  $('projectDetailEmpty').hidden = Boolean(overview);
+  $('projectDetail').hidden = !overview;
+  if (!overview) return;
+  const project = overview.project || {};
+  const repo = overview.repository || {};
+  const plan = project.plan || {};
+  renderProjectCharter(overview.plan_context || {});
+  const audit = overview.latest_audit || null;
+  const repoState = repositoryState(repo);
+  $('projectDetailName').textContent = project.name || project.id;
+  $('projectDetailDescription').textContent = project.description || '未填写项目说明';
+  $('projectDetailPath').textContent = project.path || '-';
+  $('projectHealth').textContent = projectHealthLabel(overview.health);
+  $('projectHealth').className = 'status-pill ' + projectHealthClass(overview.health);
+  $('projectRepoState').textContent = repoState.label;
+  $('projectRepoState').className = 'status-pill ' + repoState.className;
+  $('projectRepoBranch').textContent = repo.is_repository ? (repo.branch || 'detached HEAD') : '不适用';
+  $('projectLocalVersion').textContent = repo.is_repository && repo.head ? repo.head.slice(0, 12) : '-';
+  $('projectRemoteVersion').textContent = repo.remote_head
+    ? repo.remote_head.slice(0, 12)
+    : (repo.cached_remote_head ? repo.cached_remote_head.slice(0, 12) + '（缓存）' : '-');
+  $('projectDirtyFiles').textContent = repo.is_repository ? Number((repo.dirty_files || []).length) + ' 个未提交文件' : '不适用';
+  $('projectSyncDetail').textContent = repoState.detail;
+  $('projectLocalMarker').textContent = repo.is_repository ? (repo.branch || '本地') : '本地目录';
+  $('projectRemoteMarker').textContent = repo.remote_name || '无远程';
+  $('projectRemoteUrl').textContent = repo.remote_url || '未配置';
+  $('projectRefreshedAt').textContent = fmtIsoDate(overview.refreshed_at);
+
+  $('projectOverallGoal').textContent = plan.overall_goal || '尚未定义总体目标';
+  const milestones = plan.milestones || [];
+  const completedCount = milestones.filter((item) => item.status === 'completed').length;
+  $('projectMilestoneSummary').textContent = milestones.length ? completedCount + '/' + milestones.length + ' 已完成' : '0 个阶段';
+  $('projectMilestoneSummary').className = 'status-pill ' + (completedCount === milestones.length && milestones.length ? 'ok' : 'neutral');
+  $('projectTimelineEmpty').hidden = milestones.length > 0;
+  const milestoneLabels = { completed: '已完成', in_progress: '进行中', planned: '计划中', blocked: '受阻' };
+  $('projectTimeline').innerHTML = milestones.map((milestone) => {
+    const date = milestone.planned_end || milestone.planned_start || '';
+    return '<li class="plan-milestone ' + escapeHtml(milestone.status || 'planned') + '"><strong>' + escapeHtml(milestone.title || '') + '</strong><small>' +
+      escapeHtml(milestoneLabels[milestone.status] || '计划中') + (date ? ' · ' + escapeHtml(date) : '') + '</small></li>';
+  }).join('');
+  const sources = plan.source_documents || [];
+  $('projectPlanSources').textContent = sources.length ? sources.join('、') : '项目配置';
+  const progress = audit && (audit.real_progress || [])[0];
+  $('projectActualEvidence').textContent = progress ? progress.summary : (audit ? '已建立基线，暂无新进展证据' : '尚未建立审计基线');
+
+  $('projectDocumentCount').textContent = Number((overview.documents || {}).count || 0);
+  $('projectResultCount').textContent = Number((overview.results || {}).count || 0);
+  $('projectReportCount').textContent = Number((overview.reports || {}).count || 0);
+  const testLabels = { passed: '通过', failed: '失败', timed_out: '超时', error: '错误', not_run: '未运行' };
+  $('projectTestState').textContent = testLabels[audit && audit.test_status] || '未运行';
+  $('projectAuditState').textContent = audit ? (audit.baseline_status === 'created' ? '基线已建立' : '已有周期对比') : '未审计';
+  $('projectAuditState').className = 'status-pill ' + (audit ? 'ok' : 'neutral');
+  renderAuditItems('projectNextActions', plan.next_actions || [], 'action');
+  renderCompactFiles('projectRecentDocuments', overview.documents || {});
+  renderCompactFiles('projectRecentResults', overview.results || {});
+  renderCompactFiles('projectRecentReports', overview.reports || {});
+  renderProjectAuditSummary(audit);
+
+  $('projectConfigPath').textContent = project.source_file || (projectRegistryDir.replace(/[\\\/]$/, '') + '/' + project.id + '.yaml');
+  $('projectRefreshMode').textContent = (project.refresh || {}).mode === 'scheduled' ? '定时（当前未启用）' : '手动检查';
+  $('projectNameConfig').value = project.name || project.id;
+  $('projectPathConfig').value = project.path || '';
+  $('projectDescriptionConfig').value = project.description || '';
+  $('projectTestCommandConfig').value = (project.test || {}).command || '';
+  $('projectDocumentDirsConfig').value = ((project.documents || {}).directories || []).join('\n');
+  $('projectDocumentFilesConfig').value = ((project.documents || {}).root_files || []).join('\n');
+  $('projectResultDirsConfig').value = ((project.artifacts || {}).result_dirs || []).join('\n');
+  $('projectReportDirsConfig').value = ((project.artifacts || {}).report_dirs || []).join('\n');
+  $('projectSettingsMessage').textContent = '';
+
+  const alerts = overview.alerts || [];
+  $('projectAlertCount').textContent = String(alerts.length);
+  $('projectAlertCount').className = 'status-pill ' + (alerts.some((item) => item.severity === 'error') ? 'error' : (alerts.some((item) => item.severity === 'warning') ? 'warn' : 'neutral'));
+  $('projectAlerts').innerHTML = alerts.length ? alerts.map((alert) => {
+    const icon = alert.severity === 'error' ? 'circle-x' : (alert.severity === 'warning' ? 'triangle-alert' : 'info');
+    return '<div class="project-alert ' + escapeHtml(alert.severity || 'info') + '"><span class="project-alert-icon"><i data-lucide="' + icon + '" aria-hidden="true"></i></span><div><strong>' +
+      escapeHtml(alert.title || '') + '</strong><p>' + escapeHtml(alert.detail || '') + '</p></div></div>';
+  }).join('') : '<div class="inline-empty">当前没有需要处理的提醒。</div>';
+  renderPlanAnalysis();
+  renderCharterDraft();
+  selectProjectTab(activeProjectTab);
+  refreshIcons();
+}
+
+function selectProjectTab(tabName) {
+  const tabs = Array.from(document.querySelectorAll('[data-project-tab]'));
+  if (!tabs.some((tab) => tab.dataset.projectTab === tabName)) tabName = 'overview';
+  activeProjectTab = tabName;
+  tabs.forEach((tab) => {
+    const active = tab.dataset.projectTab === tabName;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', String(active));
+  });
+  document.querySelectorAll('[data-project-panel]').forEach((panel) => {
+    const active = panel.dataset.projectPanel === tabName;
+    panel.classList.toggle('active', active);
+    panel.hidden = !active;
+  });
+}
+
+function renderCompactFiles(targetId, summary) {
+  const target = $(targetId);
+  const files = summary.recent_files || [];
+  if (!files.length) {
+    target.innerHTML = '<div class="inline-empty compact">暂无文件</div>';
+    return;
+  }
+  target.innerHTML = files.map((file) =>
+    '<div class="compact-file-row"><span title="' + escapeHtml(file.path || '') + '">' + escapeHtml(file.path || '') + '</span>' +
+    '<small>' + escapeHtml(fmtSize(file.size_bytes)) + ' · ' + escapeHtml(fmtIsoDate(file.modified_at)) + '</small></div>'
+  ).join('');
+}
+
+function renderProjectAuditSummary(audit) {
+  $('projectAuditPeriod').textContent = audit
+    ? ((audit.period || '最近周期') + ' · ' + fmtIsoDate(audit.captured_at))
+    : '尚未建立审计基线';
+  renderAuditItems('projectAuditProgressList', audit && audit.real_progress, 'progress');
+  renderAuditItems('projectAuditRiskList', audit && audit.risks, 'risk');
+  renderAuditItems('projectAuditWeakList', audit && audit.weak_signals, 'weak');
+  renderAuditItems('projectAuditAdviceList', audit && audit.recommended_next_actions, 'action');
+}
+
+async function saveRegisteredProject() {
+  const button = $('saveRegisteredProject');
+  const name = $('registeredProjectName').value.trim();
+  const path = $('registeredProjectPath').value.trim();
+  if (!name || !path) {
+    toast('请填写项目名称和本地目录', 'warn');
+    (name ? $('registeredProjectPath') : $('registeredProjectName')).focus();
+    return;
+  }
+  enterBusy(button, '保存项目');
+  $('projectRegisterError').hidden = true;
+  try {
+    const milestone = $('registeredProjectMilestone').value.trim();
+    const data = await api('/api/projects/save', {
+      id: $('registeredProjectId').value.trim(),
+      name,
+      path,
+      description: $('registeredProjectDescription').value.trim(),
+      overall_goal: $('registeredProjectGoal').value.trim(),
+      milestones: milestone ? [{ id: 'current-stage', title: milestone, status: 'in_progress' }] : [],
+      next_actions: $('registeredProjectNextActions').value.trim(),
+      test_command: $('registeredProjectTest').value.trim(),
+      document_dirs: $('registeredDocumentDirs').value.trim(),
+      result_dirs: $('registeredResultDirs').value.trim(),
+      report_dirs: $('registeredReportDirs').value.trim()
+    });
+    if (!data.ok) throw new Error(data.error || '项目保存失败');
+    selectedProjectId = data.project.project.id;
+    $('projectRegisterPanel').open = false;
+    $('projectRegisterForm').hidden = true;
+    await loadProjects();
+    toast('项目已登记', 'ok');
+  } catch (error) {
+    $('projectRegisterErrorMessage').textContent = error.message;
+    $('projectRegisterError').hidden = false;
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+async function saveSelectedProjectSettings() {
+  if (!selectedProjectId) return;
+  const name = $('projectNameConfig').value.trim();
+  const path = $('projectPathConfig').value.trim();
+  if (!name || !path) {
+    const target = name ? $('projectPathConfig') : $('projectNameConfig');
+    target.focus();
+    $('projectSettingsMessage').textContent = '项目名称和本地目录不能为空';
+    $('projectSettingsMessage').className = 'form-message error';
+    return;
+  }
+  const button = $('saveProjectSettings');
+  enterBusy(button, '保存设置');
+  $('projectSettingsMessage').textContent = '';
+  try {
+    const data = await api('/api/projects/settings', {
+      project_id: selectedProjectId,
+      name,
+      path,
+      description: $('projectDescriptionConfig').value.trim(),
+      test_command: $('projectTestCommandConfig').value.trim(),
+      document_dirs: $('projectDocumentDirsConfig').value,
+      document_files: $('projectDocumentFilesConfig').value,
+      result_dirs: $('projectResultDirsConfig').value,
+      report_dirs: $('projectReportDirsConfig').value
+    });
+    if (!data.ok) throw new Error(data.error || '项目设置保存失败');
+    projectsCache = projectsCache.map((item) => item.project.id === selectedProjectId ? data.project : item);
+    renderProjects([], projectRegistryDir);
+    selectProjectTab('settings');
+    $('projectSettingsMessage').textContent = '已保存到项目配置';
+    $('projectSettingsMessage').className = 'form-message success';
+    toast('项目设置已保存', 'ok');
+  } catch (error) {
+    $('projectSettingsMessage').textContent = error.message;
+    $('projectSettingsMessage').className = 'form-message error';
+    toast('项目设置保存失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+function renderProjectCharter(planContext) {
+  const charter = planContext.charter || {};
+  const available = charter.status === 'available';
+  const isProjectCharter = String(charter.path || '').toLowerCase() === 'project.md';
+  $('projectCharterPath').textContent = available ? (charter.path || charter.kind || '已发现') : '尚未发现';
+  $('projectCharterMessage').textContent = charter.message || (available ? '已发现可用于计划分析的项目纲领。' : '缺少纲领时仍可监控，但智能分析依据不足。');
+  $('projectCharterState').textContent = available ? (charter.approved ? '已确认依据' : '可用依据') : '依据不足';
+  $('projectCharterState').className = 'status-pill ' + (available ? 'ok' : 'warn');
+  $('generateProjectCharter').hidden = isProjectCharter;
+}
+
+function beginPlanAnalysisProgress() {
+  planAnalysisTimers.forEach(window.clearTimeout);
+  planAnalysisTimers = [];
+  $('planAnalysisProgress').hidden = false;
+  const steps = Array.from(document.querySelectorAll('[data-analysis-step]'));
+  steps.forEach((step) => step.className = '');
+  const activate = (index) => {
+    steps.forEach((step, stepIndex) => {
+      step.classList.toggle('complete', stepIndex < index);
+      step.classList.toggle('active', stepIndex === index);
+    });
+  };
+  activate(0);
+  planAnalysisTimers.push(window.setTimeout(() => activate(1), 450));
+  planAnalysisTimers.push(window.setTimeout(() => activate(2), 1000));
+}
+
+function finishPlanAnalysisProgress() {
+  planAnalysisTimers.forEach(window.clearTimeout);
+  planAnalysisTimers = [];
+  document.querySelectorAll('[data-analysis-step]').forEach((step) => {
+    step.classList.remove('active');
+    step.classList.add('complete');
+  });
+  window.setTimeout(() => { $('planAnalysisProgress').hidden = true; }, 250);
+}
+
+async function analyzeSelectedProjectPlan() {
+  if (!selectedProjectId) return;
+  const button = $('analyzeProjectPlan');
+  projectPlanAnalysis = null;
+  $('planAnalysisBand').hidden = false;
+  $('planAnalysisContent').hidden = true;
+  $('planAnalysisError').hidden = true;
+  $('planAnalysisSummary').textContent = '正在归纳项目文档并核验实际证据。';
+  $('planAnalysisCount').textContent = '分析中';
+  beginPlanAnalysisProgress();
+  enterBusy(button, '分析计划');
+  try {
+    const data = await api('/api/projects/plan-analysis', { project_id: selectedProjectId, force: true });
+    if (!data.ok) {
+      showPlanAnalysisError(data);
+      return;
+    }
+    projectPlanAnalysis = data.analysis || null;
+    if (!projectPlanAnalysis) {
+      showPlanAnalysisError({ ok: false, reason: '模型未返回可审查的计划分析。', error: data });
+      return;
+    }
+    projectPlanAnalysis.overall_goal.selected = false;
+    (projectPlanAnalysis.items || []).forEach((item) => { item.selected = false; });
+    renderProjectCharter(data.plan_context || {});
+    renderPlanAnalysis();
+    toast('项目计划分析已完成，请审查后再确认写入', 'ok');
+  } catch (error) {
+    showPlanAnalysisError({ ok: false, reason: '计划分析请求未完成，请检查工作台服务和网络连接。', error: error.message });
+  } finally {
+    finishPlanAnalysisProgress();
+    leaveBusy(button);
+  }
+}
+
+function showPlanAnalysisError(data) {
+  projectPlanAnalysis = null;
+  $('planAnalysisBand').hidden = false;
+  $('planAnalysisContent').hidden = true;
+  $('planAnalysisError').hidden = false;
+  $('planAnalysisErrorMessage').textContent = data.reason || '计划分析未完成，请稍后重试。';
+  $('planAnalysisErrorDetail').textContent = JSON.stringify(data, null, 2);
+  $('planAnalysisSummary').textContent = '本次分析没有产生候选，也没有修改项目配置。';
+  $('planAnalysisCount').textContent = '未完成';
+  refreshIcons();
+}
+
+function renderPlanAnalysis() {
+  const band = $('planAnalysisBand');
+  if (!projectPlanAnalysis) {
+    band.hidden = $('planAnalysisError').hidden;
+    $('planAnalysisContent').hidden = true;
+    return;
+  }
+  const items = projectPlanAnalysis.items || [];
+  const milestones = items.filter((item) => item.type === 'milestone');
+  const actions = items.filter((item) => item.type === 'next_action');
+  band.hidden = false;
+  $('planAnalysisError').hidden = true;
+  $('planAnalysisContent').hidden = false;
+  $('planAnalysisSummary').textContent = '已结合文档、代码、测试和研究产物生成可审查计划；写入前请核对来源与判断理由。';
+  $('planAnalysisCount').textContent = (items.length + 1) + ' 项';
+  $('analysisMilestoneCount').textContent = milestones.length + ' 项';
+  $('analysisActionCount').textContent = actions.length + ' 项';
+  $('analysisOverallGoal').innerHTML = renderPlanAnalysisItem({
+    id: 'overall_goal',
+    type: 'overall_goal',
+    title: (projectPlanAnalysis.overall_goal || {}).summary || '',
+    summary: '项目文档归纳出的总体方向。',
+    declared_status: 'planned',
+    actual_status: 'needs_review',
+    source_refs: (projectPlanAnalysis.overall_goal || {}).source_refs || [],
+    evidence_refs: [],
+    acceptance_criteria: [],
+    criteria_origin: 'none',
+    confidence: 1,
+    rationale: '总体目标用于定义权威计划方向，不直接判定完成状态。',
+    selected: Boolean((projectPlanAnalysis.overall_goal || {}).selected)
+  });
+  $('analysisMilestones').innerHTML = milestones.map(renderPlanAnalysisItem).join('') || '<div class="inline-empty">文档中没有足够依据归纳里程碑。</div>';
+  $('analysisNextActions').innerHTML = actions.map(renderPlanAnalysisItem).join('') || '<div class="inline-empty">文档中没有足够依据归纳后续计划。</div>';
+  bindPlanAnalysisItems();
+
+  const warnings = (projectPlanAnalysis.analysis || {}).warnings || [];
+  $('planAnalysisWarnings').hidden = !warnings.length;
+  $('planAnalysisWarningList').innerHTML = warnings.map((warning) => '<p>' + escapeHtml(warning) + '</p>').join('');
+  const diff = projectPlanAnalysis.diff || {};
+  $('planDiffGoal').textContent = (diff.overall_goal || {}).changed ? '将更新' : '无变化';
+  $('planDiffMilestones').textContent = ((diff.milestones_to_add || []).length) + ' 项';
+  $('planDiffActions').textContent = ((diff.next_actions_to_add || []).length) + ' 项';
+  $('confirmPlanApply').checked = false;
+  updatePlanAnalysisConfirmation();
+  refreshIcons();
+}
+
+function renderPlanAnalysisItem(item) {
+  const declaredLabels = { planned: '计划中', in_progress: '进行中', completed: '文档称已完成', blocked: '文档称受阻' };
+  const actualLabels = { planned: '尚无实现证据', in_progress: '证据显示进行中', completed: '证据支持完成', blocked: '证据显示受阻', needs_review: '需要复核' };
+  const actualClasses = { planned: 'neutral', in_progress: 'warn', completed: 'ok', blocked: 'error', needs_review: 'warn' };
+  const sources = item.source_refs || [];
+  const evidence = item.evidence_refs || [];
+  const criteria = item.acceptance_criteria || [];
+  const sourceText = sources.map((ref) => ref.path + ':' + ref.line_start + (ref.line_end !== ref.line_start ? '-' + ref.line_end : '')).join('；') || '无';
+  const evidenceText = evidence.join('；') || '无直接证据';
+  const criteriaText = criteria.length ? criteria.join('；') + (item.criteria_origin === 'suggested' ? '（模型建议）' : '') : '文档未给出明确验收标准';
+  return '<div class="analysis-item ' + (item.selected ? 'selected' : '') + '" data-analysis-id="' + escapeHtml(item.id) + '">' +
+    '<label class="analysis-select"><input type="checkbox" data-analysis-select ' + (item.selected ? 'checked' : '') + '><span class="sr-only">选择' + escapeHtml(item.title) + '</span></label>' +
+    '<div class="analysis-item-main"><textarea class="analysis-item-title" rows="1" maxlength="500" data-analysis-title aria-label="计划标题">' + escapeHtml(item.title) + '</textarea>' +
+    '<div class="analysis-item-meta"><span class="status-pill neutral">人工计划：' + escapeHtml(declaredLabels[item.declared_status] || '计划中') + '</span>' +
+    '<span class="status-pill ' + escapeHtml(actualClasses[item.actual_status] || 'neutral') + '">证据：' + escapeHtml(actualLabels[item.actual_status] || '需要复核') + '</span>' +
+    '<span class="status-pill neutral">' + sources.length + ' 个来源</span><span class="status-pill neutral">' + evidence.length + ' 条证据</span></div>' +
+    '<details><summary><i data-lucide="chevron-down" aria-hidden="true"></i><span>查看摘要、验收与证据</span></summary><div class="analysis-item-detail"><p>' + escapeHtml(item.summary || '暂无补充摘要。') + '</p><dl>' +
+    '<div><dt>验收标准</dt><dd>' + escapeHtml(criteriaText) + '</dd></div><div><dt>文档来源</dt><dd><code>' + escapeHtml(sourceText) + '</code></dd></div>' +
+    '<div><dt>实际证据</dt><dd><code>' + escapeHtml(evidenceText) + '</code></dd></div><div><dt>判断理由</dt><dd>' + escapeHtml(item.rationale || '模型未提供补充理由。') + '</dd></div>' +
+    '<div><dt>置信度</dt><dd>' + Math.round(Number(item.confidence || 0) * 100) + '%</dd></div></dl></div></details></div></div>';
+}
+
+function bindPlanAnalysisItems() {
+  document.querySelectorAll('[data-analysis-id]').forEach((row) => {
+    const item = findPlanAnalysisItem(row.dataset.analysisId);
+    if (!item) return;
+    row.querySelector('[data-analysis-select]').addEventListener('change', (event) => {
+      item.selected = event.target.checked;
+      row.classList.toggle('selected', item.selected);
+      updatePlanAnalysisConfirmation();
+    });
+    row.querySelector('[data-analysis-title]').addEventListener('input', (event) => {
+      item.title = event.target.value;
+      updatePlanAnalysisConfirmation();
+    });
+  });
+}
+
+function findPlanAnalysisItem(itemId) {
+  if (!projectPlanAnalysis) return null;
+  if (itemId === 'overall_goal') {
+    const goal = projectPlanAnalysis.overall_goal || {};
+    if (!goal.title) goal.title = goal.summary || '';
+    return goal;
+  }
+  return (projectPlanAnalysis.items || []).find((item) => item.id === itemId) || null;
+}
+
+function selectedPlanAnalysisItems() {
+  if (!projectPlanAnalysis) return [];
+  const values = (projectPlanAnalysis.items || []).filter((item) => item.selected);
+  if ((projectPlanAnalysis.overall_goal || {}).selected) values.unshift({ id: 'overall_goal', ...projectPlanAnalysis.overall_goal });
+  return values;
+}
+
+function updatePlanAnalysisConfirmation() {
+  const selected = selectedPlanAnalysisItems();
+  const hasEmpty = selected.some((item) => !String(item.title || item.summary || '').trim());
+  $('applyPlanAnalysis').disabled = !selected.length || hasEmpty || !$('confirmPlanApply').checked;
+}
+
+async function applySelectedPlanAnalysis() {
+  const selected = selectedPlanAnalysisItems();
+  if (!selected.length || !projectPlanAnalysis) return;
+  const edits = {};
+  selected.forEach((item) => { edits[item.id] = String(item.title || item.summary || '').trim(); });
+  const button = $('applyPlanAnalysis');
+  enterBusy(button, '写入计划');
+  try {
+    const data = await api('/api/projects/plan-analysis/apply', {
+      project_id: selectedProjectId,
+      confirmed: true,
+      generated_at: (projectPlanAnalysis.analysis || {}).generated_at,
+      selection_ids: selected.map((item) => item.id),
+      edits
+    });
+    if (!data.ok) throw new Error(data.error || '计划写入失败');
+    projectsCache = projectsCache.map((item) => item.project.id === selectedProjectId ? data.project : item);
+    projectPlanAnalysis = null;
+    renderSelectedProject();
+    toast('已将审查通过的内容写入项目计划', 'ok');
+  } catch (error) {
+    toast('计划写入失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+async function generateSelectedProjectCharter() {
+  if (!selectedProjectId) return;
+  const button = $('generateProjectCharter');
+  enterBusy(button, '生成草案');
+  try {
+    const data = await api('/api/projects/charter/generate', { project_id: selectedProjectId });
+    if (!data.ok) {
+      showPlanAnalysisError(data);
+      return;
+    }
+    projectCharterDraft = data.draft || null;
+    renderCharterDraft();
+    toast('PROJECT.md 草案已生成，确认前不会写入项目', 'ok');
+  } catch (error) {
+    showPlanAnalysisError({ ok: false, reason: '纲领草案生成请求未完成。', error: error.message });
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+function renderCharterDraft() {
+  $('charterDraftBand').hidden = !projectCharterDraft;
+  if (!projectCharterDraft) return;
+  $('charterDraftPreview').textContent = projectCharterDraft.content || '';
+  $('charterDraftModel').textContent = projectCharterDraft.model || '模型草案';
+  $('confirmCharterApply').checked = false;
+  $('applyProjectCharter').disabled = true;
+}
+
+async function applySelectedProjectCharter() {
+  if (!projectCharterDraft || !$('confirmCharterApply').checked) return;
+  const button = $('applyProjectCharter');
+  enterBusy(button, '写入纲领');
+  try {
+    const data = await api('/api/projects/charter/apply', {
+      project_id: selectedProjectId,
+      confirmed: true,
+      sha256: projectCharterDraft.sha256,
+      content: projectCharterDraft.content
+    });
+    if (!data.ok) throw new Error(data.error || 'PROJECT.md 写入失败');
+    projectsCache = projectsCache.map((item) => item.project.id === selectedProjectId ? data.project : item);
+    projectCharterDraft = null;
+    renderSelectedProject();
+    toast('PROJECT.md 已写入并登记为项目文档', 'ok');
+  } catch (error) {
+    toast('纲领写入失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+async function auditSelectedProject() {
+  if (!selectedProjectId) return;
+  const button = $('auditSelectedProject');
+  enterBusy(button, '审计项目');
+  try {
+    const data = await api('/api/progress/audit', {
+      project_id: selectedProjectId,
+      out_dir: (statusCache && statusCache.defaults.progress_dir) || 'reports/workbench/progress'
+    });
+    if (!data.ok) throw new Error(data.error || '进度审计失败');
+    renderProgressAudit(data);
+    activeProjectTab = 'evidence';
+    await loadProjects();
+    selectProjectTab('evidence');
+    toast(data.report.baseline_status === 'created' ? '项目基线已建立' : '进度审计已完成', 'ok');
+  } catch (error) {
+    toast('进度审计失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+function renderAuditItems(targetId, items, kind) {
+  const target = $(targetId);
+  if (!items || !items.length) {
+    target.innerHTML = '<div class="inline-empty">暂无相关记录。</div>';
+    return;
+  }
+  const icon = { progress: 'circle-check', risk: 'triangle-alert', weak: 'minus', action: 'arrow-right' }[kind] || 'dot';
+  target.innerHTML = items.map((item) => {
+    const summary = typeof item === 'string' ? item : item.summary;
+    const evidence = typeof item === 'string' ? [] : (item.evidence_refs || []);
+    const refs = evidence.length
+      ? '<div class="audit-evidence">' + evidence.map((ref) => '<code>' + escapeHtml(ref) + '</code>').join('') + '</div>'
+      : '';
+    return '<div class="audit-item ' + kind + '"><span class="audit-item-icon"><i data-lucide="' + icon + '" aria-hidden="true"></i></span>' +
+      '<div><p>' + escapeHtml(summary || '') + '</p>' + refs + '</div></div>';
+  }).join('');
+}
+
+function renderProgressAudit(data) {
+  const report = data.report || {};
+  const snapshot = report.snapshot || {};
+  const test = snapshot.test_result || {};
+  const realProgress = report.real_progress || [];
+  const risks = report.risks || [];
+  const testLabels = { passed: '通过', failed: '失败', timed_out: '超时', error: '错误', not_run: '未运行' };
+
+  $('progressEmpty').hidden = true;
+  $('progressError').hidden = true;
+  $('progressContent').hidden = false;
+  $('progressPeriod').textContent = report.period || '审计完成';
+  $('progressStatus').textContent = report.baseline_status === 'created' ? '基线已建立' : (risks.length ? '存在风险' : '审计完成');
+  $('progressStatus').className = 'status-pill ' + (risks.length ? 'warn' : 'ok');
+  $('progressBranch').textContent = snapshot.git_available === false ? '不适用（非 Git）' : (snapshot.git_branch || '未识别');
+  $('progressTestStatus').textContent = testLabels[test.status] || test.status || '未知';
+  $('progressDirtyCount').textContent = Number((snapshot.dirty_files || []).length);
+  $('progressArtifactCount').textContent = Number((snapshot.result_files || []).length);
+  $('realProgressCount').textContent = String(realProgress.length);
+  $('realProgressCount').className = 'status-pill ' + (realProgress.length ? 'ok' : 'neutral');
+  $('progressRiskCount').textContent = String(risks.length);
+  $('progressRiskCount').className = 'status-pill ' + (risks.length ? 'warn' : 'ok');
+  $('progressMarkdownPath').textContent = data.markdown_path || '-';
+  $('progressJsonPath').textContent = data.json_path || '-';
+  $('progressTestOutput').textContent = test.output || '本次未执行测试或测试命令没有输出。';
+
+  renderAuditItems('realProgressList', realProgress, 'progress');
+  renderAuditItems('progressRiskList', risks, 'risk');
+  renderAuditItems('weakSignalsList', report.weak_signals || [], 'weak');
+  renderAuditItems('nextActionsList', report.recommended_next_actions || [], 'action');
+  refreshIcons();
+}
+
+async function runProgressAudit() {
+  const button = $('runProgressAudit');
+  const projectPath = $('progressProjectPath').value.trim();
+  if (!$('progressProfile').value) {
+    toast('请先选择研究画像', 'warn');
+    return;
+  }
+  if (!projectPath) {
+    $('progressProjectPath').focus();
+    toast('请填写本地项目路径', 'warn');
+    return;
+  }
+
+  enterBusy(button, '审计项目');
+  $('progressError').hidden = true;
+  $('progressStatus').textContent = '正在采集';
+  $('progressStatus').className = 'status-pill neutral';
+  try {
+    const data = await api('/api/progress/audit', {
+      profile: $('progressProfile').value,
+      project_path: projectPath,
+      test_command: $('progressTestCommand').value.trim(),
+      out_dir: $('progressOut').value.trim(),
+      test_timeout: 120
+    });
+    if (data.ok) {
+      renderProgressAudit(data);
+      await Promise.all([refreshStatus(), renderDashboard(), loadProjects()]);
+      toast(data.report.baseline_status === 'created' ? '项目基线已建立' : '进度审计已完成', 'ok');
+    } else {
+      throw new Error(data.error || '进度审计失败');
+    }
+  } catch (error) {
+    $('progressContent').hidden = true;
+    $('progressEmpty').hidden = true;
+    $('progressErrorMessage').textContent = error.message;
+    $('progressError').hidden = false;
+    $('progressStatus').textContent = '审计失败';
+    $('progressStatus').className = 'status-pill error';
+    toast('进度审计失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
   }
 }
 
@@ -451,7 +1228,7 @@ const reportIconMap = { '.md': 'file-text', '.html': 'file-code-2', '.json': 'br
 
 function allReports() {
   if (!statusCache) return [];
-  const merged = (statusCache.reports || []).concat(statusCache.paper_outputs || []);
+  const merged = statusCache.reports || [];
   const unique = new Map();
   merged.forEach((item) => unique.set(item.path, item));
   return Array.from(unique.values());
@@ -509,10 +1286,11 @@ async function openFile(path) {
   $('previewPath').textContent = path;
   $('previewEmpty').hidden = true;
   const url = '/api/file?path=' + encodeURIComponent(path);
-  if (path.toLowerCase().endsWith('.html')) {
+  const lowerPath = path.toLowerCase();
+  if (lowerPath.endsWith('.html') || lowerPath.endsWith('.md') || lowerPath.endsWith('.markdown')) {
     $('preview').hidden = false;
     $('fileText').hidden = true;
-    $('preview').src = url;
+    $('preview').src = lowerPath.endsWith('.html') ? url : '/api/markdown?path=' + encodeURIComponent(path);
     return;
   }
   $('preview').hidden = true;
@@ -581,6 +1359,8 @@ async function saveModel() {
       embedding_base_url: $('embeddingBaseUrl').value,
       embedding_api_key: $('embeddingApiKey').value,
       embedding_model: $('embeddingModel').value,
+      web_search_provider: $('webSearchProvider').value,
+      serpapi_api_key: $('serpapiApiKey').value,
       depth: $('depthSelect').value
     });
     if (data.ok) {
@@ -738,7 +1518,7 @@ async function runPromotion() {
     $('promotionOutput').textContent = JSON.stringify(data, null, 2);
     if (data.ok) {
       await Promise.all([refreshStatus(), renderDashboard()]);
-      toast('知识库已更新：' + Number(data.documents || 0) + ' 篇文档，' + Number(data.indexed || 0) + ' 条索引', 'ok');
+      toast('知识库已更新：' + Number(data.papers || 0) + ' 篇论文，' + Number(data.indexed || 0) + ' 条索引；已生成中文入库总结', 'ok');
     } else toast(data.error || '知识入库失败', 'err');
   } catch (error) {
     $('promotionOutput').hidden = false;
@@ -1052,19 +1832,50 @@ function bindEvents() {
   $('sidebarBackdrop').addEventListener('click', closeSidebar);
   $('quickQueryBtn').addEventListener('click', sendQuickQuery);
   $('paperSource').addEventListener('change', updatePaperSourceFields);
+  $('progressProfile').addEventListener('change', () => syncProgressProjectPath(true));
+  $('projectRegisterPanel').addEventListener('toggle', () => {
+    $('projectRegisterForm').hidden = !$('projectRegisterPanel').open;
+    if ($('projectRegisterPanel').open) window.setTimeout(() => $('registeredProjectName').focus(), 0);
+  });
+  $('closeProjectRegister').addEventListener('click', () => {
+    $('projectRegisterPanel').open = false;
+    $('projectRegisterForm').hidden = true;
+  });
+  $('saveRegisteredProject').addEventListener('click', saveRegisteredProject);
+  $('refreshProjects').addEventListener('click', () => loadProjects({ refresh: true }));
+  $('refreshSelectedProject').addEventListener('click', () => loadProjects({ refresh: true, projectId: selectedProjectId }));
+  document.querySelectorAll('[data-project-tab]').forEach((button) => button.addEventListener('click', () => selectProjectTab(button.dataset.projectTab)));
+  $('analyzeProjectPlan').addEventListener('click', analyzeSelectedProjectPlan);
+  $('applyPlanAnalysis').addEventListener('click', applySelectedPlanAnalysis);
+  $('confirmPlanApply').addEventListener('change', updatePlanAnalysisConfirmation);
+  $('generateProjectCharter').addEventListener('click', generateSelectedProjectCharter);
+  $('applyProjectCharter').addEventListener('click', applySelectedProjectCharter);
+  $('confirmCharterApply').addEventListener('change', () => {
+    $('applyProjectCharter').disabled = !$('confirmCharterApply').checked;
+  });
+  $('saveProjectSettings').addEventListener('click', saveSelectedProjectSettings);
+  $('auditSelectedProject').addEventListener('click', auditSelectedProject);
+  $('registeredProjectPath').addEventListener('blur', () => {
+    if ($('registeredProjectName').value.trim()) return;
+    const parts = $('registeredProjectPath').value.trim().replace(/[\\\/]+$/, '').split(/[\\\/]/);
+    $('registeredProjectName').value = parts[parts.length - 1] || '';
+  });
   $('reportFilter').addEventListener('change', renderReports);
   $('reportSort').addEventListener('change', renderReports);
   $('reportSearch').addEventListener('input', renderReports);
   $('reloadReports').addEventListener('click', () => refreshStatus());
   $('refreshBtn').addEventListener('click', async () => {
     enterBusy($('refreshBtn'), '刷新');
-    await Promise.all([refreshStatus(), renderDashboard()]);
+    await Promise.all([refreshStatus(), renderDashboard(), loadProjects()]);
     leaveBusy($('refreshBtn'));
     toast('工作台已刷新', 'ok');
   });
   $('testModel').addEventListener('click', runModelTest);
   $('saveModel').addEventListener('click', saveModel);
+  $('webSearchProvider').addEventListener('change', updateWebSearchFields);
+  $('serpapiApiKey').addEventListener('input', updateQueryReadiness);
   $('runInbox').addEventListener('click', runInbox);
+  $('runProgressAudit').addEventListener('click', runProgressAudit);
   $('optimizeProfile').addEventListener('click', optimizeProfile);
   $('applyProfileOptimization').addEventListener('click', applyProfileOptimization);
   $('dismissProfileOptimization').addEventListener('click', resetProfileOptimization);
@@ -1104,7 +1915,7 @@ async function startWorkbench() {
   updatePaperSourceFields();
   const initialTarget = window.location.hash.slice(1);
   nav($(initialTarget) ? initialTarget : 'dashboard');
-  await Promise.all([refreshStatus({ resetDefaults: true }), renderDashboard()]);
+  await Promise.all([refreshStatus({ resetDefaults: true }), renderDashboard(), loadProjects()]);
 }
 
 async function init() {

@@ -84,26 +84,13 @@ def gather_knowledge_stats(project_root: Path) -> dict[str, Any]:
 
 
 def _corpus_stats(docs_dir: Path, manifest_path: Path) -> dict[str, Any]:
-    """Statistics from the local document corpus."""
+    """Statistics from the current local document corpus.
 
-    # Try manifest first (fast path)
-    if manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            return {
-                "total_files": manifest.get("total_files", 0),
-                "total_size_kb": manifest.get("total_size_kb", 0),
-                "formats": manifest.get("formats", {}),
-                "categories": manifest.get("categories", {}),
-                "category_labels": {k: CATEGORY_LABELS.get(k, k) for k in (manifest.get("categories") or {})},
-                "format_labels": _format_labels_map(manifest.get("formats", {})),
-                "files": manifest.get("files", [])[:100],
-                "_source": "manifest.json",
-            }
-        except Exception:
-            pass
+    The historical manifest is not authoritative because paper promotion writes
+    directly into the corpus. A live scan keeps the dashboard consistent after
+    every import instead of returning stale manifest totals.
+    """
 
-    # Slow path: scan files
     return _scan_documents(docs_dir)
 
 
@@ -234,6 +221,7 @@ def _papers_stats(papers_dir: Path) -> dict[str, Any]:
         return {"total": 0, "by_format": {}, "inbox_available": False}
 
     markdown_files = list(papers_dir.rglob("*.md"))
+    summary_files = [path for path in markdown_files if path.name.endswith("#summary.md")]
     json_files = list(papers_dir.rglob("*.json"))
     total_size = sum(
         (f.stat().st_size for f in markdown_files + json_files if f.is_file()),
@@ -254,7 +242,7 @@ def _papers_stats(papers_dir: Path) -> dict[str, Any]:
             pass
 
     return {
-        "total": len(markdown_files) + len(json_files),
+        "total": len(summary_files),
         "markdown": len(markdown_files),
         "json": len(json_files),
         "total_size_kb": round(total_size / 1024, 1),

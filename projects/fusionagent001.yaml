@@ -1,0 +1,34 @@
+version: 1
+id: fusionagent001
+name: FusionAgent地理数据融合智能体
+path: E:\code\FusionAgent
+description: ''
+enabled: true
+documents:
+  directories:
+  - docs
+  root_files:
+  - None
+artifacts:
+  result_dirs:
+  - tests
+  report_dirs:
+  - 文档
+test:
+  command: ''
+  timeout_seconds: 120
+plan:
+  overall_goal: ''
+  milestones: []
+  next_actions: []
+  source_documents:
+  - None
+  updated_at: ''
+refresh:
+  mode: manual
+  schedule_enabled: false
+  interval_minutes: null
+  timezone: Asia/Shanghai
+  last_refreshed_at: ''
+  next_refresh_at: ''
+metadata: {}

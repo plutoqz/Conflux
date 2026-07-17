@@ -1,4 +1,5 @@
 import json
+import subprocess
 from io import BytesIO
 from pathlib import Path
 
@@ -15,6 +16,27 @@ def test_workbench_status_sanitizes_api_keys(monkeypatch):
 
     assert status["credentials"]["openai_api_key"] is True
     assert "secret-test-key" not in payload
+
+
+def test_workbench_status_treats_duckduckgo_as_ready_without_api_key(monkeypatch):
+    from conflux import config
+    from conflux.workbench.server import build_status
+
+    monkeypatch.delenv("SERPAPI_API_KEY", raising=False)
+    monkeypatch.setattr(config, "load", lambda: {
+        "models": {},
+        "embedding": {},
+        "web_search": {"provider": "duckduckgo", "max_results": 5},
+    })
+
+    status = build_status()
+
+    assert status["defaults"]["web_search"] == {
+        "provider": "duckduckgo",
+        "max_results": 5,
+        "requires_api_key": False,
+        "ready": True,
+    }
 
 
 def test_model_probe_uses_custom_openai_compatible_endpoint(monkeypatch):
@@ -137,8 +159,9 @@ def test_frontend_profile_optimization_is_previewable_and_undoable():
     assert "'/api/profile/optimize'" in app
 
 
-def test_workbench_runs_offline_inbox_and_promotion(tmp_path):
+def test_workbench_runs_offline_inbox_and_promotion(tmp_path, monkeypatch):
     from conflux.workbench.server import run_paper_inbox, run_paper_promotion
+    from conflux.workbench import server
 
     inbox_dir = tmp_path / "inbox"
     promoted_dir = tmp_path / "promoted"
@@ -154,6 +177,8 @@ def test_workbench_runs_offline_inbox_and_promotion(tmp_path):
     assert inbox["stats"]["deep"] == 1
     assert Path(inbox_dir / "paper_inbox.json").exists()
 
+    monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
+
     promoted = run_paper_promotion({
         "inbox": str(inbox_dir / "paper_inbox.json"),
         "out_dir": str(promoted_dir),
@@ -161,8 +186,15 @@ def test_workbench_runs_offline_inbox_and_promotion(tmp_path):
 
     assert promoted["ok"] is True
     assert promoted["documents"] == 1
+    assert promoted["papers"] == 1
     assert promoted["decisions"] == {"summary_only": 1}
     assert Path(promoted_dir / "paper_promotion_manifest.json").exists()
+    report = tmp_path / promoted["report_path"]
+    assert report.exists()
+    report_text = report.read_text(encoding="utf-8")
+    assert "# 论文入库总结" in report_text
+    assert "实际写入：1 篇" in report_text
+    assert "## 已入库论文" in report_text
 
 
 def test_workbench_safe_file_read_scope():
@@ -171,6 +203,40 @@ def test_workbench_safe_file_read_scope():
     assert _safe_read_path("docs/graduate_research_copilot_execution_plan.md") is not None
     assert _safe_read_path(".env") is None
     assert _safe_read_path("config.yaml") is None
+
+
+def test_markdown_preview_renders_headings_and_escapes_raw_html(tmp_path, monkeypatch):
+    from conflux.workbench import server
+
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    source = docs / "result.md"
+    source.write_text("# 中文标题\n\n**结论**\n\n<script>alert(1)</script>\n", encoding="utf-8")
+    monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
+
+    rendered = server.render_markdown_preview("docs/result.md")
+
+    assert rendered is not None
+    assert "<h1>中文标题</h1>" in rendered
+    assert "<strong>结论</strong>" in rendered
+    assert "<script>alert(1)</script>" not in rendered
+    assert "&lt;script&gt;" in rendered
+
+
+def test_knowledge_stats_reflect_new_papers_even_with_stale_manifest(tmp_path):
+    from conflux.knowledge.stats import gather_knowledge_stats
+
+    documents = tmp_path / "data" / "documents"
+    papers = documents / "papers" / "papers"
+    papers.mkdir(parents=True)
+    (documents / "manifest.json").write_text(json.dumps({"total_files": 0}), encoding="utf-8")
+    (papers / "paper-2607.00001#summary.md").write_text("# 论文摘要\n", encoding="utf-8")
+
+    stats = gather_knowledge_stats(tmp_path)
+
+    assert stats["totals"]["documents"] >= 2
+    assert stats["totals"]["papers"] == 1
+    assert stats["corpus"]["_source"] == "filesystem_scan"
 
 
 def test_csp_header_present_in_responses():
@@ -297,6 +363,26 @@ def test_workbench_config_merge_keeps_reasoning_and_unrelated_secrets(tmp_path, 
     assert saved["CONFLUX_EMBEDDING__API_KEY"] == "embedding-key"
     assert saved["SERPAPI_API_KEY"] == "search-key"
     assert saved["CONFLUX_ACCESS_TOKEN"] == "access-key"
+
+
+def test_workbench_config_saves_web_search_provider_and_key(tmp_path, monkeypatch):
+    from dotenv import dotenv_values
+    from conflux.workbench import config_store
+
+    env_file = tmp_path / ".env.workbench"
+    monkeypatch.setattr(config_store, "WORKBENCH_ENV", env_file)
+    monkeypatch.setattr(config_store, "_loaded_env_keys", set())
+    monkeypatch.setattr(config_store, "_original_env_values", {})
+
+    config_store.save_workbench_env(
+        web_search_provider="serpapi",
+        serpapi_api_key="search-secret",
+    )
+
+    saved = dotenv_values(env_file)
+    assert saved["CONFLUX_WEB_SEARCH__PROVIDER"] == "serpapi"
+    assert saved["SERPAPI_API_KEY"] == "search-secret"
+    config_store.save_workbench_env(clear_keys=["CONFLUX_WEB_SEARCH__PROVIDER", "SERPAPI_API_KEY"])
 
 
 def test_workbench_config_clear_restores_parent_environment(tmp_path, monkeypatch):
@@ -772,3 +858,174 @@ def test_paper_search_error_uses_summary_and_collapsible_raw_details():
     assert "查看具体报错" in html
     assert "搜索过于频繁，已被限流，建议稍后再试。" in app
     assert "JSON.stringify(data, null, 2)" in app
+
+
+def test_workbench_progress_audit_creates_and_compares_baseline(tmp_path):
+    from conflux.workbench.server import run_progress_audit
+
+    project = tmp_path / "project"
+    project.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", *args],
+            cwd=project,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=True,
+        )
+
+    git("init")
+    git("config", "user.name", "Workbench Test")
+    git("config", "user.email", "workbench@example.com")
+    (project / "README.md").write_text("# Project\n", encoding="utf-8")
+    git("add", "README.md")
+    git("commit", "-m", "Initial project")
+
+    profile = tmp_path / "profile.yaml"
+    profile.write_text("\n".join([
+        "id: progress-profile",
+        "name: Progress Profile",
+        "fields: [cs.AI]",
+        f"research_questions: [{json.dumps('What changed?')}]",
+        "keywords: [progress]",
+        f"project_paths: [{json.dumps(str(project))}]",
+    ]), encoding="utf-8")
+    output = tmp_path / "audit-output"
+    payload = {
+        "profile": str(profile),
+        "project_path": str(project),
+        "out_dir": str(output),
+    }
+
+    first = run_progress_audit(payload)
+    (project / "method.py").write_text("VALUE = 1\n", encoding="utf-8")
+    git("add", "method.py")
+    git("commit", "-m", "Add research method")
+    second = run_progress_audit(payload)
+
+    assert first["ok"] is True
+    assert first["report"]["baseline_status"] == "created"
+    assert second["report"]["baseline_status"] == "compared"
+    assert second["report"]["real_progress"][0]["evidence_refs"][0].startswith("git:")
+    assert Path(second["markdown_path"]).exists()
+    assert Path(second["snapshot_path"]).exists()
+
+
+def test_frontend_exposes_evidence_backed_progress_audit():
+    html = Path("src/conflux/workbench/static/index.html").read_text(encoding="utf-8")
+    app = Path("src/conflux/workbench/static/app.js").read_text(encoding="utf-8")
+
+    for element_id in (
+        "progress",
+        "progressProfile",
+        "progressProjectPath",
+        "progressTestCommand",
+        "runProgressAudit",
+        "realProgressList",
+        "progressRiskList",
+        "weakSignalsList",
+        "nextActionsList",
+    ):
+        assert f'id="{element_id}"' in html
+    assert "'/api/progress/audit'" in app
+    assert "renderProgressAudit(data)" in app
+    assert "item.evidence_refs" in app
+
+
+def test_frontend_exposes_unified_project_monitoring_panel():
+    html = Path("src/conflux/workbench/static/index.html").read_text(encoding="utf-8")
+    app = Path("src/conflux/workbench/static/app.js").read_text(encoding="utf-8")
+    css = Path("src/conflux/workbench/static/app.css").read_text(encoding="utf-8")
+
+    for element_id in (
+        "projects",
+        "projectList",
+        "refreshProjects",
+        "refreshSelectedProject",
+        "projectRegisterForm",
+        "projectRepoState",
+        "projectTimeline",
+        "projectActualEvidence",
+        "analyzeProjectPlan",
+        "applyPlanAnalysis",
+        "generateProjectCharter",
+        "applyProjectCharter",
+        "auditSelectedProject",
+        "projectAuditProgressList",
+        "projectConfigPath",
+    ):
+        assert f'id="{element_id}"' in html
+    for project_tab in ("overview", "plan", "evidence", "settings"):
+        assert f'data-project-tab="{project_tab}"' in html
+    assert "'/api/projects/refresh'" in app
+    assert "'/api/projects/save'" in app
+    assert "'/api/projects/plan-analysis'" in app
+    assert "'/api/projects/plan-analysis/apply'" in app
+    assert "'/api/projects/charter/generate'" in app
+    assert "'/api/projects/charter/apply'" in app
+    assert "repo.is_repository" in app
+    assert "nav('progress')" not in app[app.index("async function auditSelectedProject"):app.index("function renderAuditItems")]
+    assert ".project-workspace" in css
+    assert ".plan-timeline" in css
+    assert "--sidebar: #0c485e" in css
+    assert "--sidebar-active: #3b755f" in css
+    assert "--control-height: 40px" in css
+    assert "min-height: var(--control-height)" in css
+
+
+def test_frontend_exposes_fixed_knowledge_reports_search_and_project_settings():
+    html = Path("src/conflux/workbench/static/index.html").read_text(encoding="utf-8")
+    app = Path("src/conflux/workbench/static/app.js").read_text(encoding="utf-8")
+    css = Path("src/conflux/workbench/static/app.css").read_text(encoding="utf-8")
+
+    for element_id in (
+        "webSearchProvider",
+        "serpapiApiKey",
+        "saveProjectSettings",
+        "projectNameConfig",
+        "projectDocumentFilesConfig",
+        "planAnalysisError",
+        "planAnalysisErrorDetail",
+    ):
+        assert f'id="{element_id}"' in html
+    assert 'class="single-line-textarea"' in html
+    assert "'/api/projects/settings'" in app
+    assert "'/api/markdown?path='" in app
+    assert "JSON.stringify(data, null, 2)" in app
+    assert "const merged = statusCache.reports || []" in app
+    assert ".single-line-textarea" in css
+    assert ".project-plan-section { background: transparent; }" in css
+    assert "container-type: inline-size" in css
+    assert "@container (min-width: 520px)" in css
+    assert ".query-layout > .surface" in css
+
+
+def test_project_refresh_contract_is_manual_and_scheduler_is_inactive(tmp_path, monkeypatch):
+    import yaml
+    from conflux.workbench import server
+
+    project = tmp_path / "project"
+    project.mkdir()
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    (projects_dir / "manual.yaml").write_text(yaml.safe_dump({
+        "id": "manual",
+        "name": "Manual project",
+        "path": "project",
+        "refresh": {
+            "mode": "manual",
+            "schedule_enabled": False,
+            "interval_minutes": 120,
+            "next_refresh_at": "",
+        },
+    }, sort_keys=False), encoding="utf-8")
+    monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
+
+    result = server.build_projects_overview()
+
+    assert result["refresh_mode"] == "manual"
+    assert result["scheduler_active"] is False
+    assert result["projects"][0]["project"]["refresh"]["interval_minutes"] == 120
+    assert result["projects"][0]["repository"]["sync_status"] == "not_applicable"

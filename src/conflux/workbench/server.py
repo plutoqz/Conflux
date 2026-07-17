@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import email.utils
+import html
 import hashlib
 import hmac
 import io
@@ -27,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+import markdown
 
 from conflux import config
 from conflux.knowledge.paper_indexer import promote_inbox
@@ -35,6 +37,24 @@ from conflux.paper_ingestion.filters import paper_matches_negative_filter
 from conflux.paper_ingestion.inbox_report import write_inbox_artifacts
 from conflux.paper_ingestion.pipeline import build_inbox
 from conflux.paper_ingestion.scorer import reading_level_for_score
+from conflux.project_registry import (
+    Milestone,
+    ProjectDefinition,
+    ProjectPlan,
+    ProjectRegistry,
+    RefreshPolicy,
+    analysis_diff,
+    build_evidence_catalog,
+    build_plan_prompt,
+    charter_draft_prompt,
+    discover_plan_documents,
+    extract_plan_suggestions,
+    monitor_project,
+    normalize_plan_analysis,
+    public_document_context,
+)
+from conflux.progress_audit import audit_project, write_progress_artifacts
+from conflux.progress_audit.progress_report import load_snapshot
 from conflux.research_profile import ResearchProfile, load_profile
 from conflux.workbench.config_store import (
     WORKBENCH_ENV,
@@ -51,6 +71,9 @@ DEFAULT_PROFILE = "profiles/example_gis_agent.yaml"
 DEFAULT_FIXTURE = "tests/fixtures/papers/arxiv_sample.json"
 DEFAULT_INBOX_DIR = "reports/workbench/papers"
 DEFAULT_PROMOTE_DIR = "data/documents/papers"
+DEFAULT_PROGRESS_DIR = "reports/workbench/progress"
+DEFAULT_PROJECTS_DIR = "projects"
+DEFAULT_PROJECT_CACHE_DIR = "reports/workbench/projects"
 WORKBENCH_ENV = WORKBENCH_ENV  # re-export from config_store (already imported above)
 
 # Content-Security-Policy for the workbench SPA
@@ -105,6 +128,10 @@ def build_status() -> dict[str, Any]:
     reasoning = dict(raw.get("models", {}).get("reasoning") or {})
     cheap = dict(raw.get("models", {}).get("cheap") or {})
     embedding = dict(raw.get("embedding") or {})
+    web_search = dict(raw.get("web_search") or {})
+    web_provider = str(web_search.get("provider") or "duckduckgo").strip().lower()
+    web_requires_key = web_provider == "serpapi"
+    web_ready = not web_requires_key or _has_env("SERPAPI_API_KEY")
 
     return {
         "project_root": str(PROJECT_ROOT),
@@ -116,9 +143,16 @@ def build_status() -> dict[str, Any]:
             "fixture": DEFAULT_FIXTURE,
             "inbox_dir": DEFAULT_INBOX_DIR,
             "promote_dir": DEFAULT_PROMOTE_DIR,
+            "progress_dir": DEFAULT_PROGRESS_DIR,
             "reasoning": _sanitize_model_config(reasoning, "OPENAI_API_KEY"),
             "cheap": _sanitize_model_config(cheap, "OPENAI_API_KEY"),
             "embedding": _sanitize_model_config(embedding, "OPENAI_API_KEY"),
+            "web_search": {
+                "provider": web_provider,
+                "max_results": int(web_search.get("max_results") or 5),
+                "requires_api_key": web_requires_key,
+                "ready": web_ready,
+            },
         },
         "workbench_env": str(WORKBENCH_ENV) if WORKBENCH_ENV.exists() else "",
         "saved_depth": os.environ.get("CONFLUX_DEPTH", "standard"),
@@ -179,13 +213,13 @@ def _parse_json_object(content: str) -> dict[str, Any]:
         start = text.find("{")
         end = text.rfind("}")
         if start < 0 or end <= start:
-            raise ValueError("模型没有返回可识别的画像 JSON。")
+            raise ValueError("模型没有返回可识别的 JSON。")
         try:
             parsed = json.loads(text[start:end + 1])
         except json.JSONDecodeError as exc:
-            raise ValueError("模型返回的画像格式无效，请重试。") from exc
+            raise ValueError("模型返回的 JSON 格式无效，请重试。") from exc
     if not isinstance(parsed, dict):
-        raise ValueError("模型返回的画像不是 JSON 对象。")
+        raise ValueError("模型返回的内容不是 JSON 对象。")
     return parsed
 
 
@@ -751,6 +785,8 @@ def save_model_config(payload: dict[str, Any]) -> dict[str, Any]:
             embedding_base_url=str(payload.get("embedding_base_url") or "").strip(),
             embedding_api_key=str(payload.get("embedding_api_key") or "").strip(),
             embedding_model=str(payload.get("embedding_model") or "").strip(),
+            web_search_provider=str(payload.get("web_search_provider") or "").strip(),
+            serpapi_api_key=str(payload.get("serpapi_api_key") or "").strip(),
             depth=str(payload.get("depth") or "standard").strip(),
         )
         return {"ok": True, "saved": count}
@@ -878,15 +914,92 @@ def run_paper_promotion(payload: dict[str, Any]) -> dict[str, Any]:
         actions[decision.action] = actions.get(decision.action, 0) + 1
 
     artifacts = result.artifacts
+    promoted_papers = {
+        str(document.metadata.get("paper_id") or "")
+        for document in result.documents
+        if (document.metadata or {}).get("content_scope") == "summary"
+    } - {""}
+    report_path = _write_paper_promotion_report(
+        result,
+        inbox=inbox,
+        out_dir=out_dir,
+    )
     return {
         "ok": True,
         "documents": len(result.documents),
+        "papers": len(promoted_papers),
         "indexed": result.indexed_count,
         "decisions": actions,
         "documents_dir": _rel(artifacts.documents_dir) if artifacts else "",
         "manifest_path": _rel(artifacts.manifest_path) if artifacts else "",
         "sources_path": _rel(artifacts.sources_path) if artifacts else "",
+        "report_path": _rel(report_path),
     }
+
+
+def _write_paper_promotion_report(result: Any, *, inbox: str, out_dir: str) -> Path:
+    """Write one concise Chinese report for a complete promotion run."""
+
+    report_dir = PROJECT_ROOT / "reports" / "workbench" / "papers"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    path = report_dir / f"paper_promotion_{stamp}.md"
+    counter = 2
+    while path.exists():
+        path = report_dir / f"paper_promotion_{stamp}-{counter}.md"
+        counter += 1
+    action_labels = {
+        "pinned": "用户强制收录",
+        "full_text": "全文入库",
+        "summary_only": "摘要入库",
+        "metadata_only": "仅保留元数据",
+        "skip": "跳过",
+    }
+    action_counts: dict[str, int] = {}
+    for decision in result.decisions:
+        action_counts[decision.action] = action_counts.get(decision.action, 0) + 1
+
+    summaries: dict[str, dict[str, Any]] = {}
+    for document in result.documents:
+        metadata = document.metadata or {}
+        if metadata.get("content_scope") != "summary":
+            continue
+        paper_id = str(metadata.get("paper_id") or "未知 ID")
+        summaries[paper_id] = metadata
+
+    lines = [
+        "# 论文入库总结",
+        "",
+        f"- 入库时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- 收件箱：`{_rel(inbox)}`",
+        f"- 知识库目录：`{_rel(out_dir)}`",
+        f"- 处理论文：{len(result.decisions)} 篇",
+        f"- 实际写入：{len(summaries)} 篇",
+        f"- 向量索引：{int(result.indexed_count)} 条",
+        "",
+        "## 处理结果",
+        "",
+    ]
+    for action, count in sorted(action_counts.items()):
+        lines.append(f"- {action_labels.get(action, action)}：{count} 篇")
+    lines.extend(["", "## 已入库论文", ""])
+    if summaries:
+        for paper_id, metadata in summaries.items():
+            title = str(metadata.get("paper_title") or "未命名论文")
+            action = action_labels.get(str(metadata.get("ingestion_action") or ""), "已入库")
+            score = float(metadata.get("relevance_score") or 0)
+            lines.append(f"- **{title}**（`{paper_id}`，{action}，相关度 {score:.3f}）")
+    else:
+        lines.append("- 本次没有论文达到知识文档写入条件。")
+    lines.extend([
+        "",
+        "## 说明",
+        "",
+        "单篇论文的知识文档保存在知识库目录中，供检索和引用使用；研究成果页仅展示本次入库汇总。",
+        "",
+    ])
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
 
 
 def run_model_probe(payload: dict[str, Any]) -> dict[str, Any]:
@@ -995,6 +1108,738 @@ def run_query(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def run_progress_audit(payload: dict[str, Any]) -> dict[str, Any]:
+    registered_id = str(payload.get("project_id") or "").strip()
+    if registered_id:
+        project = _project_registry().get(registered_id)
+        if project is None:
+            return {"ok": False, "error": f"未找到已登记项目：{registered_id}"}
+        project_path = Path(project.path)
+        audit_id = project.id
+        result_dirs = project.result_dirs
+        report_dirs = project.report_dirs
+        configured_test = project.test_command
+        configured_timeout = project.test_timeout_seconds
+    else:
+        project = None
+        profile_path = Path(_path_value(payload.get("profile"), DEFAULT_PROFILE))
+        profile = load_profile(profile_path)
+        project_value = str(payload.get("project_path") or "").strip()
+        if project_value:
+            project_path = Path(project_value).expanduser().resolve()
+        else:
+            projects = profile.normalized_project_paths(profile_path.parent)
+            if not projects:
+                return {"ok": False, "error": "研究画像未配置项目路径，请先填写本地项目路径。"}
+            project_path = projects[0]
+        audit_id = profile.id
+        result_dirs = ("results", "artifacts", "experiments")
+        report_dirs = ("reports",)
+        configured_test = ""
+        configured_timeout = 120
+
+    output_root = Path(_path_value(payload.get("out_dir"), DEFAULT_PROGRESS_DIR)) / audit_id
+    snapshot_path = output_root / "project_snapshot.json"
+    baseline = load_snapshot(snapshot_path)
+    test_command = str(payload.get("test_command") or configured_test).strip() or None
+    timeout = max(1, min(600, int(payload.get("test_timeout") or configured_timeout)))
+    report = audit_project(
+        project_path,
+        baseline=baseline,
+        project_id=audit_id,
+        test_command=test_command,
+        result_dirs=result_dirs,
+        report_dirs=report_dirs,
+        test_timeout_seconds=timeout,
+    )
+    artifacts = write_progress_artifacts(report, out_dir=output_root)
+    if project is not None:
+        _write_project_cache(project.id, monitor_project(
+            project,
+            audit_root=Path(_path_value(payload.get("out_dir"), DEFAULT_PROGRESS_DIR)),
+            check_remote=False,
+        ))
+    return {
+        "ok": True,
+        "report": report.to_dict(),
+        "markdown_path": str(artifacts.markdown_path),
+        "json_path": str(artifacts.json_path),
+        "snapshot_path": str(artifacts.snapshot_path),
+    }
+
+
+def build_projects_overview() -> dict[str, Any]:
+    loaded = _project_registry().load_all()
+    projects = []
+    for project in loaded.projects:
+        cached = _load_project_cache(project.id)
+        if cached and (cached.get("project") or {}).get("path") == project.path:
+            cached["project"] = project.to_dict()
+            if not cached.get("plan_context"):
+                cached["plan_context"] = public_document_context(discover_plan_documents(project, max_files=1))
+            projects.append(cached)
+        else:
+            projects.append(monitor_project(
+                project,
+                audit_root=PROJECT_ROOT / DEFAULT_PROGRESS_DIR,
+                check_remote=False,
+            ))
+    return {
+        "ok": True,
+        "projects": projects,
+        "registry_errors": loaded.errors,
+        "registry_dir": str(PROJECT_ROOT / DEFAULT_PROJECTS_DIR),
+        "refresh_mode": "manual",
+        "scheduler_active": False,
+    }
+
+
+def refresh_projects(payload: dict[str, Any]) -> dict[str, Any]:
+    loaded = _project_registry().load_all()
+    project_id = str(payload.get("project_id") or "").strip()
+    selected = [project for project in loaded.projects if not project_id or project.id == project_id]
+    if project_id and not selected:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    refreshed = []
+    for project in selected:
+        overview = monitor_project(
+            project,
+            audit_root=PROJECT_ROOT / DEFAULT_PROGRESS_DIR,
+            check_remote=True,
+        )
+        _write_project_cache(project.id, overview)
+        refreshed.append(overview)
+    return {
+        "ok": True,
+        "projects": refreshed,
+        "registry_errors": loaded.errors,
+        "refresh_mode": "manual",
+        "scheduler_active": False,
+    }
+
+
+def save_registered_project(payload: dict[str, Any]) -> dict[str, Any]:
+    name = str(payload.get("name") or "").strip()
+    project_id = str(payload.get("id") or "").strip().lower()
+    if not project_id:
+        project_id = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")
+        project_id = project_id or f"project-{str(int(time.time()))[-8:]}"
+    milestones = []
+    for index, item in enumerate(payload.get("milestones") or [], start=1):
+        if isinstance(item, dict):
+            milestone = Milestone.from_dict(item)
+        else:
+            milestone = Milestone(id=f"milestone-{index}", title=str(item or "").strip())
+        if milestone.title:
+            milestone.id = milestone.id or f"milestone-{index}"
+            milestones.append(milestone)
+    project = ProjectDefinition(
+        id=project_id,
+        name=name,
+        path=str(payload.get("path") or "").strip(),
+        description=str(payload.get("description") or "").strip(),
+        document_dirs=_split_lines(payload.get("document_dirs")) or ["docs"],
+        document_files=_split_lines(payload.get("document_files")) or ["README.md"],
+        result_dirs=_split_lines(payload.get("result_dirs")) or ["results", "artifacts", "experiments"],
+        report_dirs=_split_lines(payload.get("report_dirs")) or ["reports"],
+        test_command=str(payload.get("test_command") or "").strip(),
+        plan=ProjectPlan(
+            overall_goal=str(payload.get("overall_goal") or "").strip(),
+            milestones=milestones,
+            next_actions=_split_lines(payload.get("next_actions")),
+            source_documents=_split_lines(payload.get("source_documents")),
+        ),
+        refresh=RefreshPolicy(
+            mode="manual",
+            schedule_enabled=False,
+            interval_minutes=None,
+            timezone=str(payload.get("timezone") or "Asia/Shanghai").strip(),
+        ),
+    )
+    path = _project_registry().save(project)
+    saved = _project_registry().get(project.id)
+    if saved is None:
+        raise RuntimeError("项目配置已写入，但无法重新读取")
+    overview = monitor_project(
+        saved,
+        audit_root=PROJECT_ROOT / DEFAULT_PROGRESS_DIR,
+        check_remote=False,
+    )
+    _write_project_cache(project.id, overview)
+    return {"ok": True, "path": str(path), "project": overview}
+
+
+def suggest_project_plan(payload: dict[str, Any]) -> dict[str, Any]:
+    project_id = str(payload.get("project_id") or "").strip()
+    project = _project_registry().get(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    suggestions = extract_plan_suggestions(project)
+    translation = {"requested": bool(payload.get("translate")), "translated": 0, "error": ""}
+    if translation["requested"]:
+        suggestions, translation = _translate_plan_suggestions(suggestions)
+    return {
+        "ok": True,
+        "project_id": project.id,
+        "suggestions": suggestions,
+        "translation": translation,
+        "message": "候选项不会自动写入权威项目配置，请确认后再编辑 YAML。",
+    }
+
+
+def analyze_project_plan(payload: dict[str, Any]) -> dict[str, Any]:
+    """Generate a reviewable LLM plan analysis without changing project files."""
+
+    project_id = str(payload.get("project_id") or "").strip()
+    project = _project_registry().get(project_id)
+    if project is None:
+        return {"ok": False, "reason": f"未找到已登记项目：{project_id}", "error": "project_not_found"}
+
+    context = discover_plan_documents(project)
+    public_context = public_document_context(context)
+    if not context.get("documents"):
+        return {
+            "ok": False,
+            "reason": "没有找到可供分析的 Markdown 项目文档，请先在项目设置中登记文档目录或根目录文档。",
+            "error": json.dumps(public_context.get("warnings") or ["no_readable_documents"], ensure_ascii=False),
+            "plan_context": public_context,
+        }
+
+    model = _default_model_name("reasoning") or _default_model_name("cheap")
+    base_url = _default_base_url("reasoning") or _default_base_url("cheap")
+    api_key = _default_api_key("reasoning") or _default_api_key("cheap")
+    if not model or not api_key:
+        return {
+            "ok": False,
+            "reason": "尚未配置可用的计划分析模型，请先到“模型与环境”配置模型名称、URL 和 API Key。",
+            "error": "missing_model_or_api_key",
+            "plan_context": public_context,
+        }
+
+    overview = monitor_project(project, audit_root=PROJECT_ROOT / DEFAULT_PROGRESS_DIR, check_remote=False)
+    evidence = build_evidence_catalog(project, overview)
+    prompt = build_plan_prompt(project, context, evidence)
+    result = run_model_probe({
+        "model": model,
+        "base_url": base_url,
+        "api_key": api_key,
+        "prompt": prompt,
+        "temperature": 0.1,
+        "max_tokens": 7200,
+        "timeout": 150,
+    })
+    if not result.get("ok"):
+        return _plan_model_error(result, public_context)
+
+    raw_content = str(result.get("content") or "")
+    try:
+        parsed = _parse_json_object(raw_content)
+        analysis = normalize_plan_analysis(
+            parsed,
+            context=context,
+            evidence=evidence,
+            model=str(result.get("model") or model),
+            code_revision=str((overview.get("repository") or {}).get("head") or ""),
+        )
+    except ValueError as first_error:
+        repair_prompt = prompt + "\n\n上一次输出未通过校验：" + str(first_error) + (
+            "\n请修复格式和内容后重新输出完整 JSON。上一次输出：\n" + raw_content[:20_000]
+        )
+        repaired = run_model_probe({
+            "model": model,
+            "base_url": base_url,
+            "api_key": api_key,
+            "prompt": repair_prompt,
+            "temperature": 0.0,
+            "max_tokens": 7200,
+            "timeout": 150,
+        })
+        if not repaired.get("ok"):
+            return _plan_model_error(repaired, public_context, prefix="计划结构修复失败")
+        try:
+            parsed = _parse_json_object(str(repaired.get("content") or ""))
+            analysis = normalize_plan_analysis(
+                parsed,
+                context=context,
+                evidence=evidence,
+                model=str(repaired.get("model") or model),
+                code_revision=str((overview.get("repository") or {}).get("head") or ""),
+            )
+        except ValueError as second_error:
+            return {
+                "ok": False,
+                "reason": "模型返回的计划结构不符合要求，已自动修复一次但仍无法使用。请检查项目文档或稍后重试。",
+                "error": f"首次校验：{first_error}\n二次校验：{second_error}",
+                "plan_context": public_context,
+            }
+
+    analysis["diff"] = analysis_diff(project, analysis)
+    path = _write_plan_analysis_cache(project.id, analysis)
+    return {
+        "ok": True,
+        "project_id": project.id,
+        "plan_context": public_context,
+        "analysis": analysis,
+        "cache_path": str(path),
+        "message": "分析结果仅供审查，尚未修改项目计划。",
+    }
+
+
+def apply_project_plan_analysis(payload: dict[str, Any]) -> dict[str, Any]:
+    """Apply explicitly selected cached analysis items to authoritative YAML."""
+
+    project_id = str(payload.get("project_id") or "").strip()
+    project = _project_registry().get(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    if payload.get("confirmed") is not True:
+        return {"ok": False, "error": "写入计划前必须明确确认。"}
+    analysis = _load_plan_analysis_cache(project.id)
+    if analysis is None:
+        return {"ok": False, "error": "计划分析缓存不存在，请重新运行分析。"}
+    expected = str(payload.get("generated_at") or "")
+    actual_generated = str((analysis.get("analysis") or {}).get("generated_at") or "")
+    if not expected or expected != actual_generated:
+        return {"ok": False, "error": "计划分析结果已变化，请重新审查后确认。"}
+
+    current_context = discover_plan_documents(project)
+    current_hashes = {
+        str(item.get("path")): str(item.get("sha256"))
+        for item in current_context.get("documents") or []
+    }
+    if current_hashes != dict((analysis.get("analysis") or {}).get("source_hashes") or {}):
+        return {"ok": False, "error": "项目文档在分析后发生变化，请重新运行计划分析。"}
+
+    selected_ids = {str(value) for value in payload.get("selection_ids") or []}
+    if not selected_ids:
+        return {"ok": False, "error": "请至少选择一个总体目标、里程碑或后续计划。"}
+    edits = payload.get("edits") if isinstance(payload.get("edits"), dict) else {}
+    replace_existing = bool(payload.get("replace_existing", False))
+    available = {str(item.get("id")): item for item in analysis.get("items") or []}
+    unknown = selected_ids - set(available) - {"overall_goal"}
+    if unknown:
+        return {"ok": False, "error": "部分候选已失效，请重新运行计划分析。"}
+
+    if replace_existing:
+        if "overall_goal" in selected_ids:
+            project.plan.overall_goal = ""
+        project.plan.milestones = []
+        project.plan.next_actions = []
+
+    applied = {"overall_goal": 0, "milestones": 0, "next_actions": 0}
+    if "overall_goal" in selected_ids:
+        suggested = str((analysis.get("overall_goal") or {}).get("summary") or "").strip()
+        edited = " ".join(str(edits.get("overall_goal") or suggested).split())[:800]
+        if not edited:
+            return {"ok": False, "error": "总体目标不能为空。"}
+        project.plan.overall_goal = edited
+        applied["overall_goal"] = 1
+
+    milestone_titles = {item.title.casefold() for item in project.plan.milestones}
+    action_titles = {item.casefold() for item in project.plan.next_actions}
+    milestone_ids = {item.id for item in project.plan.milestones}
+    chosen_items = [available[item_id] for item_id in selected_ids if item_id in available]
+    for item in chosen_items:
+        item_id = str(item.get("id"))
+        title = " ".join(str(edits.get(item_id) or item.get("title") or "").split())[:500]
+        if not title:
+            return {"ok": False, "error": "计划标题不能为空。"}
+        if item.get("type") == "milestone" and title.casefold() not in milestone_titles:
+            base_id = re.sub(r"[^a-z0-9]+", "-", item_id.casefold()).strip("-") or "milestone"
+            milestone_id = base_id
+            counter = 2
+            while milestone_id in milestone_ids:
+                milestone_id = f"{base_id}-{counter}"
+                counter += 1
+            project.plan.milestones.append(Milestone(
+                id=milestone_id,
+                title=title,
+                status=str(item.get("declared_status") or "planned"),
+                description=str(item.get("summary") or ""),
+                deliverables=list(item.get("acceptance_criteria") or []),
+            ))
+            milestone_titles.add(title.casefold())
+            milestone_ids.add(milestone_id)
+            applied["milestones"] += 1
+        elif item.get("type") == "next_action" and title.casefold() not in action_titles:
+            project.plan.next_actions.append(title)
+            action_titles.add(title.casefold())
+            applied["next_actions"] += 1
+        for source in item.get("source_refs") or []:
+            source_path = str(source.get("path") or "")
+            if source_path and source_path not in project.plan.source_documents:
+                project.plan.source_documents.append(source_path)
+
+    for source in (analysis.get("overall_goal") or {}).get("source_refs") or []:
+        if "overall_goal" not in selected_ids:
+            break
+        source_path = str(source.get("path") or "")
+        if source_path and source_path not in project.plan.source_documents:
+            project.plan.source_documents.append(source_path)
+    project.plan.updated_at = time.strftime("%Y-%m-%d")
+    path = _project_registry().save(project)
+    saved = _project_registry().get(project.id)
+    if saved is None:
+        raise RuntimeError("项目计划已写入，但无法重新读取")
+    overview = monitor_project(saved, audit_root=PROJECT_ROOT / DEFAULT_PROGRESS_DIR, check_remote=False)
+    _write_project_cache(project.id, overview)
+    return {"ok": True, "path": str(path), "applied": applied, "project": overview}
+
+
+def generate_project_charter(payload: dict[str, Any]) -> dict[str, Any]:
+    """Generate and cache a PROJECT.md draft without writing into the project."""
+
+    project_id = str(payload.get("project_id") or "").strip()
+    project = _project_registry().get(project_id)
+    if project is None:
+        return {"ok": False, "reason": f"未找到已登记项目：{project_id}", "error": "project_not_found"}
+    context = discover_plan_documents(project)
+    charter = context.get("charter") or {}
+    if str(charter.get("path") or "").casefold() == "project.md":
+        return {"ok": False, "reason": "项目中已经存在 PROJECT.md，无需生成新草案。", "error": "project_charter_exists"}
+    model = _default_model_name("reasoning") or _default_model_name("cheap")
+    api_key = _default_api_key("reasoning") or _default_api_key("cheap")
+    if not model or not api_key:
+        return {
+            "ok": False,
+            "reason": "尚未配置可用的纲领生成模型，请先到“模型与环境”完成配置。",
+            "error": "missing_model_or_api_key",
+        }
+    result = run_model_probe({
+        "model": model,
+        "base_url": _default_base_url("reasoning") or _default_base_url("cheap"),
+        "api_key": api_key,
+        "prompt": charter_draft_prompt(project, context),
+        "temperature": 0.2,
+        "max_tokens": 5200,
+        "timeout": 120,
+    })
+    if not result.get("ok"):
+        return _plan_model_error(result, public_document_context(context), prefix="纲领草案生成失败")
+    content = str(result.get("content") or "").strip()
+    if content.startswith("```"):
+        parts = content.split("```")
+        content = parts[1] if len(parts) > 1 else content
+        if content.lstrip().startswith("markdown"):
+            content = content.lstrip()[8:].lstrip()
+        elif content.lstrip().startswith("md"):
+            content = content.lstrip()[2:].lstrip()
+    if not content.startswith("#") or len(content) < 120:
+        return {"ok": False, "reason": "模型没有返回可用的 PROJECT.md 草案，请稍后重试。", "error": content[:1200]}
+    generated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    draft = {
+        "project_id": project.id,
+        "path": "PROJECT.md",
+        "content": content,
+        "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "model": str(result.get("model") or model),
+        "generated_at": generated_at,
+        "source_hashes": {str(item.get("path")): str(item.get("sha256")) for item in context.get("documents") or []},
+    }
+    path = _write_charter_draft_cache(project.id, draft)
+    return {"ok": True, "draft": draft, "cache_path": str(path), "message": "草案尚未写入项目目录。"}
+
+
+def apply_project_charter(payload: dict[str, Any]) -> dict[str, Any]:
+    """Write a previously generated charter only after explicit confirmation."""
+
+    project_id = str(payload.get("project_id") or "").strip()
+    project = _project_registry().get(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    if payload.get("confirmed") is not True:
+        return {"ok": False, "error": "写入 PROJECT.md 前必须明确确认。"}
+    draft = _load_charter_draft_cache(project.id)
+    if draft is None:
+        return {"ok": False, "error": "纲领草案缓存不存在，请重新生成。"}
+    if str(payload.get("sha256") or "") != str(draft.get("sha256") or ""):
+        return {"ok": False, "error": "纲领草案已变化，请重新预览后确认。"}
+    root = Path(project.path).expanduser().resolve()
+    target = (root / "PROJECT.md").resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return {"ok": False, "error": "PROJECT.md 目标路径无效。"}
+    if target.exists() and not bool(payload.get("overwrite", False)):
+        return {"ok": False, "error": "PROJECT.md 已存在，未进行覆盖。"}
+    content = str(payload.get("content") or draft.get("content") or "").strip()
+    if hashlib.sha256(content.encode("utf-8")).hexdigest() != str(draft.get("sha256") or ""):
+        return {"ok": False, "error": "草案内容已被修改，请重新生成或按原草案确认。"}
+    target.write_text(content.rstrip() + "\n", encoding="utf-8")
+    if "PROJECT.md" not in project.document_files:
+        project.document_files.insert(0, "PROJECT.md")
+    project.metadata["charter"] = {
+        "path": "PROJECT.md",
+        "generated_by": str(draft.get("model") or ""),
+        "generated_at": str(draft.get("generated_at") or ""),
+        "approved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    config_path = _project_registry().save(project)
+    saved = _project_registry().get(project.id)
+    overview = monitor_project(saved, audit_root=PROJECT_ROOT / DEFAULT_PROGRESS_DIR, check_remote=False) if saved else {}
+    if saved:
+        _write_project_cache(project.id, overview)
+    return {"ok": True, "path": str(target), "config_path": str(config_path), "project": overview}
+
+
+def _plan_model_error(result: dict[str, Any], plan_context: dict[str, Any], *, prefix: str = "计划分析失败") -> dict[str, Any]:
+    detail = str(result.get("error") or "模型调用失败")
+    status = int(result.get("status") or 0)
+    if status == 429 or "429" in detail or "rate limit" in detail.casefold():
+        reason = "搜索或分析请求过于频繁，已被模型服务限流，建议稍后再试。"
+    elif "API key" in detail or "401" in detail or status == 401:
+        reason = "模型凭证无效或已失效，请到“模型与环境”检查 API Key。"
+    elif status >= 500:
+        reason = "模型服务暂时不可用，建议稍后重试或切换已配置的模型 URL。"
+    else:
+        reason = f"{prefix}，请检查模型配置和网络连接后重试。"
+    return {"ok": False, "reason": reason, "error": detail, "plan_context": plan_context}
+
+
+def _translate_plan_suggestions(suggestions: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Translate English plan candidates in one reviewable model request."""
+
+    pending = [
+        {"index": index, "title": str(item.get("title") or "")[:300]}
+        for index, item in enumerate(suggestions)
+        if item.get("title") and not re.search(r"[\u3400-\u9fff]", str(item.get("title")))
+    ][:40]
+    if not pending:
+        return suggestions, {"requested": True, "translated": 0, "error": ""}
+
+    prompt = """你是研究项目计划翻译助手。请把以下英文项目目标、里程碑或后续计划准确翻译成简体中文。
+要求：保留文件名、命令、模型名和技术缩写；不要补充原文没有的结论；使用适合作为项目计划条目的简洁表达。
+只返回 JSON 对象，结构为：{"translations":[{"index":0,"title":"中文"}]}。
+
+待翻译内容：
+""" + json.dumps(pending, ensure_ascii=False)
+    result = run_model_probe({
+        "model": _default_model_name("cheap") or _default_model_name("reasoning"),
+        "base_url": _default_base_url("cheap") or _default_base_url("reasoning"),
+        "api_key": _default_api_key("cheap") or _default_api_key("reasoning"),
+        "prompt": prompt,
+        "temperature": 0.0,
+        "max_tokens": 3200,
+        "timeout": 90,
+    })
+    if not result.get("ok"):
+        error = str(result.get("error") or "翻译模型不可用")
+        if "API key" in error:
+            error = "未配置可用的翻译模型凭证，候选已保留原文。"
+        return suggestions, {"requested": True, "translated": 0, "error": error}
+
+    try:
+        payload = _parse_json_object(str(result.get("content") or ""))
+    except ValueError as exc:
+        return suggestions, {"requested": True, "translated": 0, "error": str(exc)}
+    translations = payload.get("translations") or []
+    translated_count = 0
+    values = [dict(item) for item in suggestions]
+    for item in translations:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index"))
+        except (TypeError, ValueError):
+            continue
+        title = " ".join(str(item.get("title") or "").split())[:300]
+        if not (0 <= index < len(values)) or not title:
+            continue
+        original = str(values[index].get("title") or "")
+        values[index]["original_title"] = original
+        values[index]["title"] = title
+        translated_count += 1
+    return values, {"requested": True, "translated": translated_count, "error": ""}
+
+
+def update_registered_project_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    """Update editable project settings while preserving its plan and schedule."""
+
+    project_id = str(payload.get("project_id") or "").strip()
+    project = _project_registry().get(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+
+    name = str(payload.get("name") or "").strip()
+    path_value = str(payload.get("path") or "").strip()
+    if not name or not path_value:
+        return {"ok": False, "error": "项目名称和本地目录不能为空。"}
+    project.name = name
+    project.path = path_value
+    project.description = str(payload.get("description") or "").strip()
+    project.test_command = str(payload.get("test_command") or "").strip()
+    project.document_dirs = _split_lines(payload.get("document_dirs")) or ["docs"]
+    project.document_files = _split_lines(payload.get("document_files")) or ["README.md"]
+    project.result_dirs = _split_lines(payload.get("result_dirs")) or ["results", "artifacts", "experiments"]
+    project.report_dirs = _split_lines(payload.get("report_dirs")) or ["reports"]
+
+    config_path = _project_registry().save(project)
+    saved = _project_registry().get(project.id)
+    if saved is None:
+        raise RuntimeError("项目配置已写入，但无法重新读取")
+    overview = monitor_project(
+        saved,
+        audit_root=PROJECT_ROOT / DEFAULT_PROGRESS_DIR,
+        check_remote=False,
+    )
+    _write_project_cache(project.id, overview)
+    return {"ok": True, "path": str(config_path), "project": overview}
+
+
+def apply_project_plan_suggestions(payload: dict[str, Any]) -> dict[str, Any]:
+    project_id = str(payload.get("project_id") or "").strip()
+    project = _project_registry().get(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+
+    selections = payload.get("selections") or []
+    if not isinstance(selections, list) or not selections:
+        return {"ok": False, "error": "请至少选择一个计划候选。"}
+    if len(selections) > 40:
+        return {"ok": False, "error": "单次最多确认 40 个计划候选。"}
+
+    available = {
+        (str(item.get("source_path") or ""), int(item.get("line") or 0))
+        for item in extract_plan_suggestions(project)
+    }
+    normalized = []
+    for item in selections:
+        if not isinstance(item, dict):
+            continue
+        type_ = str(item.get("type") or "").strip()
+        title = " ".join(str(item.get("title") or "").split())[:500]
+        source_path = str(item.get("source_path") or "").strip()
+        try:
+            line = int(item.get("line") or 0)
+        except (TypeError, ValueError):
+            line = 0
+        if type_ not in {"overall_goal", "milestone", "next_action"}:
+            return {"ok": False, "error": f"不支持的候选类型：{type_}"}
+        if not title:
+            return {"ok": False, "error": "候选内容不能为空。"}
+        if (source_path, line) not in available:
+            return {"ok": False, "error": f"候选来源已变化，请重新提取：{source_path}:{line}"}
+        normalized.append((type_, title, source_path))
+
+    overall_goals = [title for type_, title, _ in normalized if type_ == "overall_goal"]
+    if len(overall_goals) > 1:
+        return {"ok": False, "error": "总体目标只能选择一项。"}
+
+    applied = {"overall_goal": 0, "milestones": 0, "next_actions": 0}
+    if overall_goals:
+        project.plan.overall_goal = overall_goals[0]
+        applied["overall_goal"] = 1
+
+    existing_milestones = {item.title.casefold() for item in project.plan.milestones}
+    existing_actions = {item.casefold() for item in project.plan.next_actions}
+    existing_ids = {item.id for item in project.plan.milestones}
+    for type_, title, _ in normalized:
+        if type_ == "milestone" and title.casefold() not in existing_milestones:
+            base_id = re.sub(r"[^a-z0-9]+", "-", title.casefold()).strip("-") or "milestone"
+            milestone_id = base_id
+            counter = 2
+            while milestone_id in existing_ids:
+                milestone_id = f"{base_id}-{counter}"
+                counter += 1
+            project.plan.milestones.append(Milestone(id=milestone_id, title=title, status="planned"))
+            existing_milestones.add(title.casefold())
+            existing_ids.add(milestone_id)
+            applied["milestones"] += 1
+        elif type_ == "next_action" and title.casefold() not in existing_actions:
+            project.plan.next_actions.append(title)
+            existing_actions.add(title.casefold())
+            applied["next_actions"] += 1
+
+    for _, _, source_path in normalized:
+        if source_path not in project.plan.source_documents:
+            project.plan.source_documents.append(source_path)
+    project.plan.updated_at = time.strftime("%Y-%m-%d")
+    path = _project_registry().save(project)
+    saved = _project_registry().get(project.id)
+    if saved is None:
+        raise RuntimeError("项目计划已写入，但无法重新读取")
+    overview = monitor_project(
+        saved,
+        audit_root=PROJECT_ROOT / DEFAULT_PROGRESS_DIR,
+        check_remote=False,
+    )
+    _write_project_cache(project.id, overview)
+    return {
+        "ok": True,
+        "path": str(path),
+        "applied": applied,
+        "project": overview,
+    }
+
+
+def _project_registry() -> ProjectRegistry:
+    return ProjectRegistry(PROJECT_ROOT / DEFAULT_PROJECTS_DIR, base_dir=PROJECT_ROOT)
+
+
+def _project_cache_path(project_id: str) -> Path:
+    safe_id = re.sub(r"[^a-z0-9-]", "", str(project_id).casefold())
+    if not safe_id:
+        raise ValueError("项目 ID 无效")
+    return PROJECT_ROOT / DEFAULT_PROJECT_CACHE_DIR / f"{safe_id}.json"
+
+
+def _load_project_cache(project_id: str) -> dict[str, Any] | None:
+    path = _project_cache_path(project_id)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _write_project_cache(project_id: str, payload: dict[str, Any]) -> Path:
+    path = _project_cache_path(project_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _project_analysis_dir(project_id: str) -> Path:
+    safe_id = re.sub(r"[^a-z0-9-]", "", str(project_id).casefold())
+    if not safe_id:
+        raise ValueError("项目 ID 无效")
+    return PROJECT_ROOT / DEFAULT_PROJECT_CACHE_DIR / safe_id
+
+
+def _write_plan_analysis_cache(project_id: str, payload: dict[str, Any]) -> Path:
+    path = _project_analysis_dir(project_id) / "plan_analysis.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _load_plan_analysis_cache(project_id: str) -> dict[str, Any] | None:
+    path = _project_analysis_dir(project_id) / "plan_analysis.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _write_charter_draft_cache(project_id: str, payload: dict[str, Any]) -> Path:
+    path = _project_analysis_dir(project_id) / "charter_draft.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _load_charter_draft_cache(project_id: str) -> dict[str, Any] | None:
+    path = _project_analysis_dir(project_id) / "charter_draft.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 class WorkbenchHandler(BaseHTTPRequestHandler):
     server_version = "ConfluxWorkbench/0.1"
 
@@ -1056,6 +1901,9 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/status":
             self._send_json(build_status())
             return
+        if parsed.path == "/api/projects":
+            self._send_json(build_projects_overview(), headers={"Cache-Control": "no-store"})
+            return
         if parsed.path == "/api/knowledge/stats":
             self._send_json(gather_knowledge_stats(PROJECT_ROOT))
             return
@@ -1065,6 +1913,14 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/file":
             params = urllib.parse.parse_qs(parsed.query)
             self._send_file(params.get("path", [""])[0])
+            return
+        if parsed.path == "/api/markdown":
+            params = urllib.parse.parse_qs(parsed.query)
+            rendered = render_markdown_preview(params.get("path", [""])[0])
+            if rendered is None:
+                self.send_error(404)
+            else:
+                self._send_text(rendered, "text/html; charset=utf-8")
             return
         if parsed.path == "/api/sessions":
             self._send_json(build_session_index())
@@ -1150,6 +2006,36 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/profile/optimize":
                 self._send_json(optimize_inline_profile(payload))
+                return
+            if parsed.path == "/api/progress/audit":
+                self._send_json(run_progress_audit(payload))
+                return
+            if parsed.path == "/api/projects/save":
+                self._send_json(save_registered_project(payload))
+                return
+            if parsed.path == "/api/projects/settings":
+                self._send_json(update_registered_project_settings(payload))
+                return
+            if parsed.path == "/api/projects/refresh":
+                self._send_json(refresh_projects(payload))
+                return
+            if parsed.path == "/api/projects/plan-suggestions":
+                self._send_json(suggest_project_plan(payload))
+                return
+            if parsed.path == "/api/projects/plan-suggestions/apply":
+                self._send_json(apply_project_plan_suggestions(payload))
+                return
+            if parsed.path == "/api/projects/plan-analysis":
+                self._send_json(analyze_project_plan(payload))
+                return
+            if parsed.path == "/api/projects/plan-analysis/apply":
+                self._send_json(apply_project_plan_analysis(payload))
+                return
+            if parsed.path == "/api/projects/charter/generate":
+                self._send_json(generate_project_charter(payload))
+                return
+            if parsed.path == "/api/projects/charter/apply":
+                self._send_json(apply_project_charter(payload))
                 return
             if parsed.path == "/api/query/run":
                 self._send_json(run_query(payload))
@@ -1461,14 +2347,17 @@ def _mark_papers_seen(papers: list, source: str) -> None:
 def _enrich_profile(entry: dict) -> dict:
     try:
         yaml_path = PROJECT_ROOT / entry["path"]
-        for line in yaml_path.read_text(encoding="utf-8").splitlines()[:20]:
-            line = line.strip()
-            if line.startswith("name:"):
-                entry["display"] = line[5:].strip().strip('"').strip("'")
-                return entry
+        profile = load_profile(yaml_path, validate=False)
+        entry["display"] = profile.name or Path(entry["path"]).stem
+        entry["profile_id"] = profile.id
+        entry["project_paths"] = [
+            str(path) for path in profile.normalized_project_paths(yaml_path.parent)
+        ]
+        return entry
     except Exception:
         pass
     entry["display"] = re.sub(r"[_-]+", " ", Path(entry["path"]).stem).strip() or entry["path"]
+    entry["project_paths"] = []
     return entry
 
 
@@ -1600,6 +2489,30 @@ def _temporary_env(updates: dict[str, str]):
             else:
                 os.environ[key] = value
         config._config = None  # type: ignore[attr-defined]
+
+
+def render_markdown_preview(requested_path: str) -> str | None:
+    """Render an allowed Markdown file into an isolated, readable HTML page."""
+
+    path = _safe_read_path(requested_path)
+    if path is None or not path.is_file() or path.suffix.casefold() not in {".md", ".markdown"}:
+        return None
+    try:
+        source = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    body = markdown.markdown(
+        html.escape(source),
+        extensions=["extra", "sane_lists", "tables", "fenced_code"],
+        output_format="html5",
+    )
+    title = html.escape(path.name)
+    return f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title><style>
+:root{{color-scheme:light}}*{{box-sizing:border-box}}body{{max-width:860px;margin:0 auto;padding:32px 36px 64px;color:#17201e;background:#fff;font:15px/1.75 Inter,system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}}
+h1,h2,h3,h4{{margin:1.6em 0 .55em;line-height:1.35;letter-spacing:0;color:#0c485e}}h1{{margin-top:0;font-size:28px}}h2{{padding-bottom:6px;border-bottom:1px solid #d5e0dc;font-size:21px}}h3{{font-size:17px}}p,ul,ol,blockquote,pre,table{{margin:.8em 0}}a{{color:#055a5b;text-underline-offset:3px}}code{{padding:2px 5px;border-radius:4px;background:#f3f7f5;font:13px/1.6 "Cascadia Code",Consolas,monospace}}pre{{overflow:auto;padding:14px;border:1px solid #d5e0dc;border-radius:6px;background:#f7f9f8}}pre code{{padding:0;background:transparent}}blockquote{{margin-inline:0;padding:10px 16px;border:1px solid #b8cbc4;border-radius:6px;background:#f3f7f5;color:#344d45}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px 10px;border:1px solid #d5e0dc;text-align:left;vertical-align:top}}th{{background:#f3f7f5}}img{{max-width:100%;height:auto}}hr{{border:0;border-top:1px solid #d5e0dc}}@media(max-width:640px){{body{{padding:22px 18px 48px;font-size:14px}}h1{{font-size:23px}}h2{{font-size:19px}}}}
+</style></head><body>{body}</body></html>"""
 
 
 def _safe_read_path(requested_path: str) -> Path | None:

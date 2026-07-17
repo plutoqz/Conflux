@@ -1,0 +1,64 @@
+version: 1
+id: conflux
+name: Conflux
+path: .
+description: 本地优先、证据可追溯的研究工作台。
+enabled: true
+documents:
+  directories:
+  - docs
+  root_files:
+  - README.md
+  - PRODUCT.md
+  - DESIGN.md
+artifacts:
+  result_dirs:
+  - results
+  - artifacts
+  - experiments
+  report_dirs:
+  - reports
+test:
+  command: python -m pytest -q
+  timeout_seconds: 600
+plan:
+  overall_goal: 把论文发现、知识沉淀、证据问答和项目进度审计连接成可持续使用的本地研究工作台。
+  milestones:
+  - id: r6-progress-audit
+    title: 单项目证据化进度审计
+    status: completed
+    description: 采集 Git、测试、研究产物和报告，并生成可追溯的基线对比。
+    deliverables:
+    - src/conflux/progress_audit/
+    - 工作台进度审计页面
+  - id: r6-project-monitoring
+    title: 多项目监控与计划基线
+    status: completed
+    description: 建立项目注册表、只读本地/远程版本监控和统一项目面板。
+    planned_start: '2026-07-17'
+    planned_end: '2026-07-17'
+    deliverables:
+    - src/conflux/project_registry/
+    - projects/conflux.yaml
+    - 工作台项目监控页面
+  - id: r7-model-collaboration
+    title: 模型注册表与多模型交叉分析
+    status: planned
+    description: 支持 OpenAI 兼容接口和 Claude 原生接口，并按角色组织交叉分析。
+  next_actions:
+  - 独立设计模型注册表，支持档位、角色、OpenAI 兼容 URL 和 Claude 原生接口。
+  - 实现多模型交叉分析会话、分歧记录与结论证据引用。
+  - 把论文变化与项目进度整合进可追溯的周期周报。
+  source_documents:
+  - docs/graduate_research_copilot_execution_plan.md
+  - PRODUCT.md
+  updated_at: '2026-07-17'
+refresh:
+  mode: manual
+  schedule_enabled: false
+  interval_minutes: null
+  timezone: Asia/Shanghai
+  last_refreshed_at: ''
+  next_refresh_at: ''
+metadata:
+  owner: local

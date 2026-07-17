@@ -37,6 +37,10 @@
           <button class="nav-item" type="button" data-target="query" data-title="研究查询" data-subtitle="协调本地知识、网络证据与模型推理">
             <i data-lucide="search" aria-hidden="true"></i><span>研究查询</span>
           </button>
+          <button class="nav-item" type="button" data-target="projects" data-title="项目监控" data-subtitle="统一查看项目版本、计划基线、实际证据和风险">
+            <i data-lucide="folders" aria-hidden="true"></i><span>项目监控</span>
+            <span class="nav-count" id="projectNavCount">0</span>
+          </button>
         </div>
         <div class="nav-group">
           <div class="nav-group-label">成果</div>
@@ -288,7 +292,7 @@
               <label>收件箱文件<input id="promoteInbox"></label>
               <label>知识文档目录<input id="promoteOut"></label>
               <label>PDF 缓存目录<input id="pdfDir" placeholder="可选，本地全文缓存位置"></label>
-              <label>强制收录的论文 ID<textarea id="pinIds" rows="2" placeholder="每行一个论文 ID"></textarea></label>
+              <label>强制收录的论文 ID<textarea id="pinIds" class="single-line-textarea" rows="1" placeholder="每行一个论文 ID"></textarea></label>
             </div>
             <div class="option-list">
               <label class="check-row"><input id="fullText" type="checkbox"><span><strong>提取全文</strong><small>从 PDF 中提取可检索文本。</small></span></label>
@@ -341,6 +345,246 @@
         </div>
       </section>
 
+      <section id="projects" class="view" aria-labelledby="pageTitle">
+        <div class="project-commandbar">
+          <div class="project-summary" aria-live="polite">
+            <span id="projectSummaryState" class="status-pill neutral">尚未加载</span>
+            <p id="projectSummaryText">等待读取项目注册表</p>
+          </div>
+          <div class="project-command-actions">
+            <button id="refreshProjects" class="button secondary" type="button"><i data-lucide="refresh-cw" aria-hidden="true"></i><span>检查全部</span></button>
+            <details id="projectRegisterPanel" class="project-register">
+              <summary class="button primary"><i data-lucide="folder-plus" aria-hidden="true"></i><span>登记项目</span></summary>
+            </details>
+          </div>
+        </div>
+
+        <section id="projectRegisterForm" class="surface project-register-form" aria-labelledby="projectRegisterTitle" hidden>
+          <div class="section-heading"><div><h2 id="projectRegisterTitle">登记本地项目</h2><p>项目配置写入 <code>projects/</code>，作为目标和计划的权威来源。</p></div><button id="closeProjectRegister" class="icon-button subtle" type="button" title="关闭登记表单" aria-label="关闭登记表单"><i data-lucide="x" aria-hidden="true"></i></button></div>
+          <input id="registeredProjectId" type="hidden">
+          <div class="field-grid two project-register-grid">
+            <label>项目名称<input id="registeredProjectName" autocomplete="off" placeholder="例如 KG + LLM 研究"></label>
+            <label>本地目录<input id="registeredProjectPath" autocomplete="off" placeholder="例如 E:\research\kg-llm"></label>
+            <label class="field-wide">项目说明<textarea id="registeredProjectDescription" rows="2" placeholder="一句话说明研究对象或项目边界"></textarea></label>
+            <label class="field-wide">总体目标<textarea id="registeredProjectGoal" rows="2" placeholder="可验证的总体目标"></textarea></label>
+            <label>当前阶段目标<input id="registeredProjectMilestone" autocomplete="off" placeholder="例如 完成基线与消融实验"></label>
+            <label>测试命令<input id="registeredProjectTest" autocomplete="off" placeholder="可留空，例如 python -m pytest -q"></label>
+            <label class="field-wide">后续计划<textarea id="registeredProjectNextActions" rows="3" placeholder="每行一项"></textarea></label>
+          </div>
+          <details class="advanced-settings project-source-settings">
+            <summary><span><i data-lucide="folders" aria-hidden="true"></i>采集目录</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary>
+            <div class="field-grid three">
+              <label>文档目录<input id="registeredDocumentDirs" value="docs" autocomplete="off"><small>多个目录用逗号或换行分隔。</small></label>
+              <label>实验产物目录<input id="registeredResultDirs" value="results, artifacts, experiments" autocomplete="off"></label>
+              <label>报告目录<input id="registeredReportDirs" value="reports" autocomplete="off"></label>
+            </div>
+          </details>
+          <div class="form-actions"><button id="saveRegisteredProject" class="button primary" type="button"><i data-lucide="save" aria-hidden="true"></i><span>保存项目</span></button></div>
+          <div id="projectRegisterError" class="inbox-error" role="alert" hidden><div class="inbox-error-summary"><span class="inbox-error-icon"><i data-lucide="circle-alert" aria-hidden="true"></i></span><div><strong>项目未保存</strong><p id="projectRegisterErrorMessage"></p></div></div></div>
+        </section>
+
+        <section class="surface project-workspace" aria-label="项目统一面板">
+          <div class="project-list-pane">
+            <div class="project-pane-heading"><div><h2>全部项目</h2><p id="projectRegistryPath">projects/</p></div><span id="projectCount" class="status-pill neutral">0</span></div>
+            <div id="projectList" class="project-list" role="listbox" aria-label="已登记项目"></div>
+            <div id="projectsEmpty" class="empty-state project-list-empty" hidden><i data-lucide="folder-plus" aria-hidden="true"></i><strong>还没有登记项目</strong><p>登记一个代码仓库、文档目录或实验目录。</p></div>
+            <details id="projectRegistryErrors" class="registry-errors" hidden>
+              <summary><span>查看注册表问题</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary>
+              <div id="projectRegistryErrorList"></div>
+            </details>
+          </div>
+
+          <div class="project-detail-pane" aria-live="polite">
+            <div id="projectDetailEmpty" class="empty-state"><i data-lucide="folder-search" aria-hidden="true"></i><strong>选择一个项目</strong><p>版本、目标、实际证据和提醒会集中显示在这里。</p></div>
+            <div id="projectDetail" hidden>
+              <header class="project-detail-header">
+                <div class="project-title-block"><div class="project-title-row"><h2 id="projectDetailName">-</h2><span id="projectHealth" class="status-pill neutral">未知</span></div><p id="projectDetailDescription"></p><code id="projectDetailPath">-</code></div>
+                <div class="project-detail-actions">
+                  <button id="refreshSelectedProject" class="button secondary compact" type="button"><i data-lucide="refresh-cw" aria-hidden="true"></i><span>检查状态</span></button>
+                  <button id="auditSelectedProject" class="button primary compact" type="button"><i data-lucide="scan-search" aria-hidden="true"></i><span>运行审计</span></button>
+                </div>
+              </header>
+
+              <div class="project-tabs" role="tablist" aria-label="项目视图">
+                <button class="project-tab active" type="button" role="tab" aria-selected="true" data-project-tab="overview">概览</button>
+                <button class="project-tab" type="button" role="tab" aria-selected="false" data-project-tab="plan">计划</button>
+                <button class="project-tab" type="button" role="tab" aria-selected="false" data-project-tab="evidence">证据</button>
+                <button class="project-tab" type="button" role="tab" aria-selected="false" data-project-tab="settings">设置</button>
+              </div>
+
+              <div class="project-tab-panel active" data-project-panel="overview" role="tabpanel">
+                <section class="project-detail-section repository-section" aria-labelledby="repositoryTitle">
+                  <div class="project-section-heading"><h3 id="repositoryTitle">仓库版本</h3><span id="projectRepoState" class="status-pill neutral">未检查</span></div>
+                  <dl class="repository-grid">
+                    <div><dt>分支</dt><dd id="projectRepoBranch">-</dd></div>
+                    <div><dt>本地版本</dt><dd><code id="projectLocalVersion">-</code></dd></div>
+                    <div><dt>远程版本</dt><dd><code id="projectRemoteVersion">-</code></dd></div>
+                    <div><dt>未提交变更</dt><dd id="projectDirtyFiles">-</dd></div>
+                  </dl>
+                  <div class="repository-comparison"><span id="projectLocalMarker">本地</span><span class="comparison-line" aria-hidden="true"></span><strong id="projectSyncDetail">等待检查</strong><span class="comparison-line" aria-hidden="true"></span><span id="projectRemoteMarker">远程</span></div>
+                  <details id="projectRemoteDetails" class="audit-details"><summary><span>远程地址与检查信息</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary><dl class="audit-paths"><div><dt>远程地址</dt><dd id="projectRemoteUrl">-</dd></div><div><dt>最近检查</dt><dd id="projectRefreshedAt">-</dd></div></dl></details>
+                </section>
+
+                <section class="project-detail-section project-alert-section" aria-labelledby="projectAlertsTitle">
+                  <div class="project-section-heading"><h3 id="projectAlertsTitle">需要关注</h3><span id="projectAlertCount" class="status-pill neutral">0</span></div>
+                  <div id="projectAlerts" class="project-alert-list"></div>
+                </section>
+              </div>
+
+              <div class="project-tab-panel" data-project-panel="plan" role="tabpanel" hidden>
+                <section class="project-detail-section project-plan-section" aria-labelledby="projectPlanTitle">
+                  <div class="project-section-heading">
+                    <div><h3 id="projectPlanTitle">计划基线</h3><p id="projectOverallGoal">尚未定义总体目标</p></div>
+                    <div class="project-section-actions"><span id="projectMilestoneSummary" class="status-pill neutral">0 个阶段</span><button id="analyzeProjectPlan" class="button secondary compact" type="button"><i data-lucide="scan-search" aria-hidden="true"></i><span>分析项目计划</span></button></div>
+                  </div>
+                  <div class="charter-status-band">
+                    <span class="charter-status-icon"><i data-lucide="file-key-2" aria-hidden="true"></i></span>
+                    <div><span>项目纲领</span><strong id="projectCharterPath">尚未发现</strong><small id="projectCharterMessage">缺少纲领时仍可监控，但智能分析依据不足。</small></div>
+                    <span id="projectCharterState" class="status-pill warn">依据不足</span>
+                    <button id="generateProjectCharter" class="button ghost compact" type="button"><i data-lucide="file-plus-2" aria-hidden="true"></i><span>生成草案</span></button>
+                  </div>
+                  <div class="plan-status-key"><span><i class="plan-key-dot configured" aria-hidden="true"></i>人工计划</span><span><i class="plan-key-dot verified" aria-hidden="true"></i>证据核验</span></div>
+                  <ol id="projectTimeline" class="plan-timeline"></ol>
+                  <div id="projectTimelineEmpty" class="inline-empty" hidden>尚未定义阶段目标。</div>
+                  <div class="plan-actual-band"><div><span>计划来源</span><strong id="projectPlanSources">项目配置</strong></div><div><span>证据核验</span><strong id="projectActualEvidence">尚未建立审计基线</strong></div></div>
+                  <div class="project-next-actions"><h3>后续计划</h3><div id="projectNextActions" class="audit-list"></div></div>
+                </section>
+
+                <section id="planAnalysisBand" class="project-detail-section plan-analysis" aria-labelledby="planAnalysisTitle" hidden>
+                  <div class="project-section-heading"><div><h3 id="planAnalysisTitle">智能计划分析</h3><p id="planAnalysisSummary">正在准备分析依据。</p></div><span id="planAnalysisCount" class="status-pill neutral">0 项</span></div>
+                  <div id="planAnalysisProgress" class="analysis-progress" role="status" aria-live="polite" hidden>
+                    <span data-analysis-step="documents"><i data-lucide="files" aria-hidden="true"></i>文档归纳</span>
+                    <span data-analysis-step="evidence"><i data-lucide="database-zap" aria-hidden="true"></i>证据采集</span>
+                    <span data-analysis-step="verification"><i data-lucide="shield-check" aria-hidden="true"></i>状态核验</span>
+                  </div>
+                  <div id="planAnalysisError" class="inbox-error plan-analysis-error" role="alert" hidden>
+                    <div class="inbox-error-summary"><span class="inbox-error-icon"><i data-lucide="circle-alert" aria-hidden="true"></i></span><div><strong>计划分析未完成</strong><p id="planAnalysisErrorMessage"></p></div></div>
+                    <details class="inbox-error-details"><summary><span>查看具体报错</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary><pre id="planAnalysisErrorDetail" class="error-output"></pre></details>
+                  </div>
+                  <div id="planAnalysisContent" hidden>
+                    <section class="analysis-group" aria-labelledby="analysisGoalTitle"><div class="analysis-group-heading"><h4 id="analysisGoalTitle">总体目标</h4><span>最多选择 1 项</span></div><div id="analysisOverallGoal" class="analysis-list"></div></section>
+                    <section class="analysis-group" aria-labelledby="analysisMilestonesTitle"><div class="analysis-group-heading"><h4 id="analysisMilestonesTitle">里程碑</h4><span id="analysisMilestoneCount">0 项</span></div><div id="analysisMilestones" class="analysis-list"></div></section>
+                    <section class="analysis-group" aria-labelledby="analysisActionsTitle"><div class="analysis-group-heading"><h4 id="analysisActionsTitle">后续计划</h4><span id="analysisActionCount">0 项</span></div><div id="analysisNextActions" class="analysis-list"></div></section>
+                    <details id="planAnalysisWarnings" class="audit-details" hidden><summary><span>分析警告</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary><div id="planAnalysisWarningList" class="analysis-warning-list"></div></details>
+                    <div class="plan-diff-band"><div><span>总体目标</span><strong id="planDiffGoal">无变化</strong></div><div><span>新增里程碑</span><strong id="planDiffMilestones">0 项</strong></div><div><span>新增后续计划</span><strong id="planDiffActions">0 项</strong></div></div>
+                    <div class="analysis-confirm-row"><label class="confirm-check"><input id="confirmPlanApply" type="checkbox"><span>我已审查所选内容及其证据，同意写入项目 YAML</span></label><button id="applyPlanAnalysis" class="button primary compact" type="button" disabled><i data-lucide="check" aria-hidden="true"></i><span>确认写入</span></button></div>
+                  </div>
+                </section>
+
+                <section id="charterDraftBand" class="project-detail-section charter-draft" aria-labelledby="charterDraftTitle" hidden>
+                  <div class="project-section-heading"><div><h3 id="charterDraftTitle">PROJECT.md 草案</h3><p>草案仅保存在工作台缓存中，确认前不会写入项目目录。</p></div><span id="charterDraftModel" class="status-pill neutral">模型草案</span></div>
+                  <pre id="charterDraftPreview" class="charter-preview"></pre>
+                  <div class="analysis-confirm-row"><label class="confirm-check"><input id="confirmCharterApply" type="checkbox"><span>我已审查草案，同意写入项目目录</span></label><button id="applyProjectCharter" class="button primary compact" type="button" disabled><i data-lucide="file-check-2" aria-hidden="true"></i><span>写入 PROJECT.md</span></button></div>
+                </section>
+              </div>
+
+              <div class="project-tab-panel" data-project-panel="evidence" role="tabpanel" hidden>
+                <section class="project-detail-section evidence-section" aria-labelledby="projectEvidenceTitle">
+                  <div class="project-section-heading"><div><h3 id="projectEvidenceTitle">实际证据</h3><p>文件数量只用于定位证据，不直接代表进度。</p></div><span id="projectAuditState" class="status-pill neutral">未审计</span></div>
+                  <dl class="evidence-metrics">
+                    <div><dt>文档</dt><dd id="projectDocumentCount">0</dd></div>
+                    <div><dt>实验产物</dt><dd id="projectResultCount">0</dd></div>
+                    <div><dt>可读报告</dt><dd id="projectReportCount">0</dd></div>
+                    <div><dt>测试</dt><dd id="projectTestState">未运行</dd></div>
+                  </dl>
+                  <div class="evidence-file-groups">
+                    <section><h3>最近文档</h3><div id="projectRecentDocuments" class="compact-file-list"></div></section>
+                    <section><h3>最近实验产物</h3><div id="projectRecentResults" class="compact-file-list"></div></section>
+                    <section><h3>最近报告</h3><div id="projectRecentReports" class="compact-file-list"></div></section>
+                  </div>
+                </section>
+
+                <section class="project-detail-section project-audit-summary" aria-labelledby="projectAuditSummaryTitle">
+                  <div class="project-section-heading"><div><h3 id="projectAuditSummaryTitle">最近审计</h3><p id="projectAuditPeriod">尚未建立审计基线</p></div></div>
+                  <div class="audit-summary-columns"><section><h3>真实进展</h3><div id="projectAuditProgressList" class="audit-list"></div></section><section><h3>风险</h3><div id="projectAuditRiskList" class="audit-list"></div></section></div>
+                  <details class="audit-details"><summary><span>弱信号与审计建议</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary><div class="audit-summary-columns"><section><h3>弱信号</h3><div id="projectAuditWeakList" class="audit-list"></div></section><section><h3>审计建议</h3><div id="projectAuditAdviceList" class="audit-list"></div></section></div></details>
+                </section>
+              </div>
+
+              <div class="project-tab-panel" data-project-panel="settings" role="tabpanel" hidden>
+                <section class="project-detail-section project-settings" aria-labelledby="projectSettingsTitle">
+                  <div class="project-section-heading"><div><h3 id="projectSettingsTitle">项目配置</h3><p>保存后写回该项目的 YAML；目标与计划仍在“计划”页单独确认。</p></div><span id="projectRefreshMode" class="status-pill neutral">手动检查</span></div>
+                  <div class="project-config-file"><span>配置文件</span><code id="projectConfigPath">-</code></div>
+                  <div class="project-settings-form field-grid two">
+                    <label>项目名称<input id="projectNameConfig" autocomplete="off"></label>
+                    <label>本地目录<input id="projectPathConfig" autocomplete="off"></label>
+                    <label class="field-wide">项目说明<textarea id="projectDescriptionConfig" rows="2"></textarea></label>
+                    <label class="field-wide">测试命令<input id="projectTestCommandConfig" autocomplete="off" placeholder="例如 python -m pytest -q"></label>
+                    <label>文档目录<textarea id="projectDocumentDirsConfig" class="settings-list-input" rows="3" placeholder="每行一个目录"></textarea></label>
+                    <label>根目录文档<textarea id="projectDocumentFilesConfig" class="settings-list-input" rows="3" placeholder="每行一个文件"></textarea></label>
+                    <label>实验产物目录<textarea id="projectResultDirsConfig" class="settings-list-input" rows="3" placeholder="每行一个目录"></textarea></label>
+                    <label>报告目录<textarea id="projectReportDirsConfig" class="settings-list-input" rows="3" placeholder="每行一个目录"></textarea></label>
+                  </div>
+                  <div class="form-actions project-settings-actions"><span id="projectSettingsMessage" class="form-message" role="status"></span><button id="saveProjectSettings" class="button primary" type="button"><i data-lucide="save" aria-hidden="true"></i><span>保存项目设置</span></button></div>
+                </section>
+              </div>
+            </div>
+          </div>
+        </section>
+        <div id="projectsError" class="inbox-error projects-error" role="alert" hidden><div class="inbox-error-summary"><span class="inbox-error-icon"><i data-lucide="circle-alert" aria-hidden="true"></i></span><div><strong>项目状态未加载</strong><p id="projectsErrorMessage"></p></div></div></div>
+      </section>
+
+      <section id="progress" class="view" aria-labelledby="pageTitle">
+        <div class="content-grid progress-layout">
+          <section class="surface progress-form" aria-labelledby="progressFormTitle">
+            <div class="section-heading"><div><h2 id="progressFormTitle">审计本地研究项目</h2><p>基于上一基线比较提交、测试、研究产物和报告变化。</p></div></div>
+            <div class="field-grid single">
+              <label>研究画像<select id="progressProfile"></select></label>
+              <label>本地项目路径<input id="progressProjectPath" autocomplete="off" placeholder="例如 E:\code\research-project"></label>
+            </div>
+            <details class="advanced-settings">
+              <summary><span><i data-lucide="sliders-horizontal" aria-hidden="true"></i>审计设置</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary>
+              <div class="field-grid single">
+                <label>测试命令<input id="progressTestCommand" value="python -m pytest -q" autocomplete="off"><small>留空则只采集 Git、产物和报告，不执行测试。</small></label>
+                <label>输出目录<input id="progressOut" value="reports/workbench/progress"></label>
+              </div>
+            </details>
+            <div class="form-actions">
+              <button id="runProgressAudit" class="button primary" type="button"><i data-lucide="scan-search" aria-hidden="true"></i><span>运行进度审计</span></button>
+            </div>
+            <div class="privacy-note"><i data-lucide="hard-drive" aria-hidden="true"></i><div><strong>只读取本地证据</strong><p>不会上传项目文件，也不会执行未明确填写的命令。</p></div></div>
+          </section>
+
+          <section class="surface progress-result" aria-labelledby="progressResultTitle">
+            <div class="section-heading"><div><h2 id="progressResultTitle">审计结果</h2><p id="progressPeriod">等待建立项目基线</p></div><span id="progressStatus" class="status-pill neutral">尚未运行</span></div>
+            <div id="progressEmpty" class="empty-state"><i data-lucide="git-branch" aria-hidden="true"></i><strong>还没有进度基线</strong><p>首次运行会记录当前状态；下一次运行开始判断周期内的真实进展。</p></div>
+            <div id="progressContent" hidden>
+              <dl class="audit-overview" aria-label="当前项目快照">
+                <div><dt>分支</dt><dd id="progressBranch">-</dd></div>
+                <div><dt>测试</dt><dd id="progressTestStatus">-</dd></div>
+                <div><dt>未提交</dt><dd id="progressDirtyCount">0</dd></div>
+                <div><dt>研究产物</dt><dd id="progressArtifactCount">0</dd></div>
+              </dl>
+              <section class="audit-section" aria-labelledby="realProgressTitle">
+                <div class="audit-section-heading"><h3 id="realProgressTitle">真实进展</h3><span id="realProgressCount" class="status-pill neutral">0</span></div>
+                <div id="realProgressList" class="audit-list"></div>
+              </section>
+              <section class="audit-section" aria-labelledby="progressRisksTitle">
+                <div class="audit-section-heading"><h3 id="progressRisksTitle">风险</h3><span id="progressRiskCount" class="status-pill neutral">0</span></div>
+                <div id="progressRiskList" class="audit-list"></div>
+              </section>
+              <section class="audit-section" aria-labelledby="weakSignalsTitle">
+                <div class="audit-section-heading"><h3 id="weakSignalsTitle">弱信号</h3></div>
+                <div id="weakSignalsList" class="audit-list"></div>
+              </section>
+              <section class="audit-section" aria-labelledby="nextActionsTitle">
+                <div class="audit-section-heading"><h3 id="nextActionsTitle">建议下一步</h3></div>
+                <div id="nextActionsList" class="audit-list"></div>
+              </section>
+              <details class="audit-details">
+                <summary><span>查看审计文件与测试输出</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary>
+                <dl class="audit-paths">
+                  <div><dt>Markdown</dt><dd id="progressMarkdownPath">-</dd></div>
+                  <div><dt>JSON</dt><dd id="progressJsonPath">-</dd></div>
+                </dl>
+                <pre id="progressTestOutput" class="audit-test-output"></pre>
+              </details>
+            </div>
+            <div id="progressError" class="inbox-error" role="alert" hidden><div class="inbox-error-summary"><span class="inbox-error-icon"><i data-lucide="circle-alert" aria-hidden="true"></i></span><div><strong>进度审计未完成</strong><p id="progressErrorMessage"></p></div></div></div>
+          </section>
+        </div>
+      </section>
+
       <section id="reports" class="view" aria-labelledby="pageTitle">
         <div class="report-workspace">
           <section class="surface report-browser" aria-labelledby="reportsTitle">
@@ -359,7 +603,7 @@
           <section class="surface preview-surface" id="previewBand" aria-labelledby="previewTitle">
             <div class="section-heading preview-heading"><div><h2 id="previewTitle">成果预览</h2><p id="previewPath">选择左侧文件后在这里阅读</p></div></div>
             <div id="previewEmpty" class="empty-state"><i data-lucide="panel-right-open" aria-hidden="true"></i><strong>选择一份成果</strong><p>内容会在当前工作台内打开，不会离开研究上下文。</p></div>
-            <iframe id="preview" title="HTML 报告预览" sandbox="allow-same-origin" hidden></iframe>
+            <iframe id="preview" title="成果文档预览" sandbox="allow-same-origin" hidden></iframe>
             <pre id="fileText" hidden></pre>
           </section>
         </div>
@@ -376,6 +620,14 @@
               <label>默认思考深度<select id="depthSelect"><option value="quick">快速 · 轻量检索</option><option value="standard" selected>标准 · 平衡质量与速度</option><option value="deep">深度 · 多轮研究</option></select></label>
               <label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.1" value="0.2"></label>
             </div>
+            <fieldset class="form-section settings-subsection">
+              <legend>网络搜索</legend>
+              <div class="field-grid two">
+                <label>搜索提供商<select id="webSearchProvider"><option value="duckduckgo">DuckDuckGo（无需密钥）</option><option value="serpapi">SerpAPI</option></select></label>
+                <label id="serpapiKeyField">SerpAPI Key<input id="serpapiApiKey" type="password" autocomplete="off" placeholder="使用已保存凭证，或输入新值"></label>
+              </div>
+              <p id="webSearchConfigHint" class="field-hint">DuckDuckGo 无需 API Key，可直接用于网络搜索。</p>
+            </fieldset>
             <label>连接测试提示词<textarea id="probePrompt" rows="3">请用中文简短回复：Conflux 研究系统已就绪。</textarea></label>
             <div class="form-actions"><button id="testModel" class="button secondary" type="button"><i data-lucide="plug-zap" aria-hidden="true"></i><span>测试连接</span></button><button id="saveModel" class="button primary" type="button"><i data-lucide="save" aria-hidden="true"></i><span>保存配置</span></button></div>
           </section>
