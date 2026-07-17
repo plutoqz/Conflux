@@ -617,3 +617,158 @@ def test_existing_profile_semantic_scholar_uses_online_discovery(tmp_path, monke
     assert result["ok"] is True
     assert captured == {"profile": profile, "source": "semantic_scholar", "max_results": 10}
     assert result["papers"][0]["id"] == "s2-paper"
+
+
+def test_semantic_scholar_normalizes_publication_dates(monkeypatch):
+    from conflux.workbench import server
+
+    payload = {
+        "data": [
+            {
+                "paperId": "dated-paper",
+                "title": "Knowledge Graphs and Large Language Models",
+                "abstract": "A survey of integrated methods.",
+                "publicationDate": "2025-06-12",
+                "year": 2025,
+                "authors": [{"name": "Test Author"}],
+                "externalIds": {},
+                "url": "https://www.semanticscholar.org/paper/dated-paper",
+                "openAccessPdf": None,
+            },
+            {
+                "paperId": "year-only-paper",
+                "title": "LLM Grounding with Knowledge Graphs",
+                "abstract": "A year-only publication record.",
+                "publicationDate": None,
+                "year": 2024,
+                "authors": [],
+                "externalIds": {},
+                "url": "https://www.semanticscholar.org/paper/year-only-paper",
+                "openAccessPdf": None,
+            },
+        ]
+    }
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(payload).encode("utf-8")
+
+    monkeypatch.setattr(server, "_wait_for_semantic_scholar_slot", lambda: None)
+    monkeypatch.setattr(server.urllib.request, "urlopen", lambda request, timeout: FakeResponse())
+
+    papers = server._search_semantic_scholar("knowledge graph LLM", max_results=2)
+
+    assert papers[0].published_at.isoformat() == "2025-06-12T00:00:00"
+    assert papers[1].published_at.isoformat() == "2024-01-01T00:00:00"
+    assert papers[0].to_dict()["published_at"] == "2025-06-12T00:00:00"
+
+
+def test_semantic_scholar_retries_rate_limits_and_sends_api_key(monkeypatch):
+    from conflux.workbench import server
+
+    response_payload = {
+        "data": [{
+            "paperId": "recovered-paper",
+            "title": "Recovered after rate limiting",
+            "publicationDate": "2025-01-02",
+            "externalIds": {},
+        }]
+    }
+    requests = []
+    sleeps = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(response_payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        if len(requests) < 3:
+            raise server.urllib.error.HTTPError(
+                request.full_url,
+                429,
+                "Too Many Requests",
+                {},
+                BytesIO(),
+            )
+        return FakeResponse()
+
+    monkeypatch.setenv("SEMANTIC_SCHOLAR_API_KEY", "test-s2-key")
+    monkeypatch.setattr(server, "_wait_for_semantic_scholar_slot", lambda: None)
+    monkeypatch.setattr(server.random, "uniform", lambda start, end: 0.0)
+    monkeypatch.setattr(server.time, "sleep", sleeps.append)
+    monkeypatch.setattr(server.urllib.request, "urlopen", fake_urlopen)
+
+    papers = server._search_semantic_scholar("knowledge graph LLM", max_results=1)
+
+    assert [paper.id for paper in papers] == ["recovered-paper"]
+    assert sleeps == [2.0, 4.0]
+    assert len(requests) == 3
+    assert any(
+        key.lower() == "x-api-key" and value == "test-s2-key"
+        for key, value in requests[0].header_items()
+    )
+
+
+def test_semantic_scholar_final_rate_limit_is_returned_as_raw_api_error(tmp_path, monkeypatch):
+    from conflux.research_profile import ResearchProfile
+    from conflux.workbench import server
+
+    profile = ResearchProfile(
+        id="rate-limit-profile",
+        name="Rate limit profile",
+        fields=["cs.AI"],
+        research_questions=["How are knowledge graphs combined with LLMs?"],
+        keywords=["knowledge graph", "large language model"],
+    )
+    error = server.urllib.error.HTTPError(
+        "https://api.semanticscholar.org/graph/v1/paper/search",
+        429,
+        "Too Many Requests",
+        {},
+        BytesIO(),
+    )
+
+    monkeypatch.setattr(server, "load_profile", lambda path: profile)
+    monkeypatch.setattr(
+        server,
+        "_discover_unseen_papers",
+        lambda actual_profile, source, max_results: (_ for _ in ()).throw(error),
+    )
+
+    result = server.run_paper_inbox({
+        "profile_mode": "file",
+        "profile": "profiles/kg_llm_integration.yaml",
+        "source": "semantic_scholar",
+        "max_results": 10,
+        "out_dir": str(tmp_path),
+    })
+
+    assert result == {
+        "ok": False,
+        "error": "semantic_scholar 搜索失败：HTTP Error 429: Too Many Requests",
+    }
+
+
+def test_paper_search_error_uses_summary_and_collapsible_raw_details():
+    html = Path("src/conflux/workbench/static/index.html").read_text(encoding="utf-8")
+    app = Path("src/conflux/workbench/static/app.js").read_text(encoding="utf-8")
+
+    assert 'id="inboxError"' in html
+    assert 'role="alert"' in html
+    assert '<details id="inboxErrorDetails"' in html
+    assert "查看具体报错" in html
+    assert "搜索过于频繁，已被限流，建议稍后再试。" in app
+    assert "JSON.stringify(data, null, 2)" in app

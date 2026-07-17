@@ -266,7 +266,16 @@
             <div class="section-heading"><div><h2 id="inboxResultTitle">筛选结果</h2><p>按相关性和阅读优先级排序。</p></div><span id="inboxStats" class="status-pill neutral"></span></div>
             <div id="inboxEmpty" class="empty-state"><i data-lucide="inbox" aria-hidden="true"></i><strong>还没有论文结果</strong><p>完成左侧设置并开始发现，结果会在这里出现。</p></div>
             <div class="table-wrap"><table id="papersTable"></table></div>
-            <pre id="inboxOutput" class="error-output" hidden></pre>
+            <div id="inboxError" class="inbox-error" role="alert" aria-live="assertive" aria-atomic="true" hidden>
+              <div class="inbox-error-summary">
+                <span class="inbox-error-icon"><i data-lucide="circle-alert" aria-hidden="true"></i></span>
+                <div><strong>未能完成论文发现</strong><p id="inboxErrorMessage"></p></div>
+              </div>
+              <details id="inboxErrorDetails" class="inbox-error-details">
+                <summary><span>查看具体报错</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary>
+                <pre id="inboxOutput" class="error-output"></pre>
+              </details>
+            </div>
           </section>
         </div>
       </section>

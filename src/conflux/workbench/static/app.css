@@ -445,6 +445,48 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
 .empty-state strong { color: var(--ink-soft); font-size: 13px; }
 .empty-state p { max-width: 46ch; margin-top: 5px; font-size: 11px; }
 .inline-empty { padding: 22px 12px; color: var(--muted); font-size: 11px; text-align: center; }
+.inbox-error {
+  margin-top: 18px;
+  padding: 14px 15px 0;
+  border: 1px solid #e5baba;
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: #7f2424;
+}
+.inbox-error-summary { display: flex; align-items: flex-start; gap: 11px; padding-bottom: 13px; }
+.inbox-error-summary > div { min-width: 0; }
+.inbox-error-summary strong { display: block; color: #7f2424; font-size: 12px; }
+.inbox-error-summary p { max-width: 65ch; margin-top: 3px; color: #6f2929; font-size: 11px; overflow-wrap: anywhere; }
+.inbox-error-icon {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 50%;
+  background: #fff7f7;
+  color: var(--danger);
+}
+.inbox-error-icon svg { width: 15px; height: 15px; }
+.inbox-error-details { border-top: 1px solid #e6c4c4; }
+.inbox-error-details summary {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #742525;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+  list-style: none;
+}
+.inbox-error-details summary::-webkit-details-marker { display: none; }
+.inbox-error-details summary:hover { color: #531919; }
+.inbox-error-details summary:focus-visible { outline: 2px solid var(--danger); outline-offset: 3px; border-radius: 2px; }
+.inbox-error-details summary svg { width: 14px; height: 14px; transition: transform 160ms var(--ease); }
+.inbox-error-details[open] summary svg { transform: rotate(180deg); }
+.inbox-error-details .error-output { min-height: 96px; max-height: 320px; margin: 0 0 14px; }
 .table-wrap { position: relative; margin-top: 14px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-sm); }
 .table-wrap:has(table:empty) { display: none; }
 table { width: 100%; border-collapse: collapse; background: var(--surface); font-size: 12px; }

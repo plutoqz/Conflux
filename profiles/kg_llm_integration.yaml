@@ -1,0 +1,48 @@
+id: kg-llm-integration-research
+name: 知识图谱与大语言模型融合研究
+fields:
+  - cs.AI
+  - cs.CL
+  - cs.IR
+research_questions:
+  - 知识图谱如何为大语言模型提供可验证、可追溯且可更新的外部知识？
+  - 大语言模型如何支持知识图谱的自动构建、补全、对齐与质量控制？
+  - 图检索增强生成如何结合结构化图谱检索与文本检索，提升复杂问答和多跳推理能力？
+  - 知识图谱与大语言模型的融合能否降低事实幻觉，并改善回答的可解释性与引用可靠性？
+  - 面向智能体系统，如何利用知识图谱支持长期记忆、规划和工具调用？
+keywords:
+  - knowledge graph
+  - large language model
+  - graph retrieval augmented generation
+  - knowledge graph question answering
+  - knowledge graph construction
+  - knowledge graph reasoning
+  - ontology grounding
+  - hallucination mitigation
+  - agentic reasoning
+  - neuro-symbolic AI
+negative_keywords:
+  - traffic flow prediction
+  - molecular property prediction
+  - protein interaction network
+  - stock price prediction
+target_venues:
+  - ISWC
+  - ESWC
+  - WWW
+  - ACL
+  - EMNLP
+  - NeurIPS
+tracked_scholars: []
+project_paths:
+  - ..
+document_paths:
+  - ../data/documents
+paper_sources:
+  - arxiv
+  - semantic_scholar
+report_cadence: weekly
+metadata:
+  owner_type: graduate_student
+  demo_domain: kg_llm_integration
+  language: zh-CN

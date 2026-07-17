@@ -596,6 +596,37 @@ async function saveModel() {
   }
 }
 
+function paperSearchFailureMessage(data) {
+  const detail = String(data && data.error ? data.error : '');
+  if (/\b429\b|rate[ -]?limit|too many requests/i.test(detail)) {
+    return '搜索过于频繁，已被限流，建议稍后再试。';
+  }
+  if (/\b401\b|\b403\b|unauthorized|forbidden/i.test(detail)) {
+    return '数据源拒绝了访问，请检查对应的 API 密钥或访问权限。';
+  }
+  if (/timeout|timed out|超时/i.test(detail)) {
+    return '数据源响应超时，请检查网络后重试。';
+  }
+  if (/没有新的论文|没有结果/.test(detail)) return detail;
+  return detail || '论文发现失败，请检查数据源和研究画像后重试。';
+}
+
+function hideInboxError() {
+  $('inboxError').hidden = true;
+  $('inboxErrorDetails').open = false;
+  $('inboxOutput').textContent = '';
+}
+
+function showInboxError(data) {
+  const message = paperSearchFailureMessage(data);
+  $('inboxErrorMessage').textContent = message;
+  $('inboxOutput').textContent = JSON.stringify(data, null, 2);
+  $('inboxError').hidden = false;
+  $('inboxStats').textContent = '发现失败';
+  $('inboxStats').className = 'status-pill error';
+  toast(message, 'err');
+}
+
 async function runInbox() {
   const button = $('runInbox');
   const mode = document.querySelector('input[name="profileMode"]:checked').value;
@@ -604,8 +635,11 @@ async function runInbox() {
     return;
   }
   enterBusy(button, '发现论文');
-  $('inboxOutput').hidden = true;
+  hideInboxError();
   $('inboxEmpty').hidden = true;
+  $('papersTable').innerHTML = '';
+  $('inboxStats').textContent = '';
+  $('inboxStats').className = 'status-pill neutral';
   try {
     const payload = {
       profile_mode: mode,
@@ -625,6 +659,7 @@ async function runInbox() {
     });
     const data = await api('/api/papers/inbox', payload);
     if (data.ok) {
+      hideInboxError();
       const seenText = Number(data.stats.previously_seen || 0) ? ' · 排除重复 ' + Number(data.stats.previously_seen) : '';
       $('inboxStats').textContent = '精读 ' + data.stats.deep + ' · 浏览 ' + data.stats.skim + ' · 跳过 ' + data.stats.skip + seenText;
       $('inboxStats').className = 'status-pill ok';
@@ -633,14 +668,10 @@ async function runInbox() {
       await Promise.all([refreshStatus(), renderDashboard()]);
       toast('论文收件箱已更新，共 ' + (data.papers || []).length + ' 篇', 'ok');
     } else {
-      $('inboxOutput').hidden = false;
-      $('inboxOutput').textContent = JSON.stringify(data, null, 2);
-      toast(data.error || '论文发现失败，请检查数据源和画像', 'err');
+      showInboxError(data);
     }
   } catch (error) {
-    $('inboxOutput').hidden = false;
-    $('inboxOutput').textContent = error.message;
-    toast('论文发现失败：' + error.message, 'err');
+    showInboxError({ ok: false, error: error.message });
   } finally {
     leaveBusy(button);
   }

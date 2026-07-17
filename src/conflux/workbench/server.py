@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import email.utils
 import hashlib
 import hmac
 import io
 import json
 import mimetypes
 import os
+import random
 import re
 import socket
 import subprocess
@@ -63,6 +65,24 @@ CSP_HEADER = (
 )
 
 _reload_env()
+
+
+def _nonnegative_env_float(name: str, default: float) -> float:
+    try:
+        return max(0.0, float(os.environ.get(name) or default))
+    except ValueError:
+        return default
+
+
+SEMANTIC_SCHOLAR_MIN_INTERVAL_SECONDS = _nonnegative_env_float(
+    "SEMANTIC_SCHOLAR_MIN_INTERVAL_SECONDS",
+    1.1,
+)
+SEMANTIC_SCHOLAR_MAX_ATTEMPTS = 3
+SEMANTIC_SCHOLAR_MAX_QUERIES = 3
+SEMANTIC_SCHOLAR_MAX_PAGES = 3
+_SEMANTIC_SCHOLAR_RATE_LOCK = threading.Lock()
+_SEMANTIC_SCHOLAR_LAST_REQUEST_AT = 0.0
 
 # Security: access token for non-loopback binds (empty = loopback-only)
 # Must be read AFTER _reload_env so .env.workbench values are visible.
@@ -433,12 +453,9 @@ def _search_semantic_scholar(query: str, max_results: int = 10, offset: int = 0)
         "fields": "title,abstract,year,authors,externalIds,url,openAccessPdf,publicationDate",
     })
     url = f"https://api.semanticscholar.org/graph/v1/paper/search?{params}"
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "ConfluxWorkbench/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            items = json.loads(resp.read().decode("utf-8")).get("data") or []
-    except Exception:
-        return []
+    items = _request_semantic_scholar(url).get("data") or []
+
+    from conflux.paper_ingestion.models import PaperRecord, parse_datetime
 
     results = []
     for item in items:
@@ -459,14 +476,15 @@ def _search_semantic_scholar(query: str, max_results: int = 10, offset: int = 0)
         for author in (item.get("authors") or []):
             if isinstance(author, dict):
                 authors.append(_s2_str(author, "name"))
-        pub_date = _s2_str(item, "publicationDate") or str(item.get("year") or "")
-        from conflux.paper_ingestion.models import PaperRecord
+        pub_date = _s2_str(item, "publicationDate")
+        if not pub_date and item.get("year"):
+            pub_date = f"{item['year']}-01-01"
         results.append(PaperRecord(
             id=paper_id,
             title=title,
             abstract=abstract,
             authors=authors,
-            published_at=pub_date if pub_date else None,
+            published_at=parse_datetime(pub_date),
             source="semantic_scholar",
             url=_s2_str(item, "url"),
             pdf_url=pdf_url,
@@ -474,6 +492,54 @@ def _search_semantic_scholar(query: str, max_results: int = 10, offset: int = 0)
             categories=[],
         ))
     return results
+
+
+def _request_semantic_scholar(url: str) -> dict:
+    headers = {"User-Agent": "ConfluxWorkbench/1.0"}
+    api_key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
+    if api_key:
+        headers["x-api-key"] = api_key
+
+    for attempt in range(SEMANTIC_SCHOLAR_MAX_ATTEMPTS):
+        _wait_for_semantic_scholar_slot()
+        try:
+            request = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(request, timeout=15) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429 or attempt == SEMANTIC_SCHOLAR_MAX_ATTEMPTS - 1:
+                raise
+            delay = _semantic_scholar_retry_delay(exc, attempt)
+            time.sleep(delay)
+
+    return {}
+
+
+def _wait_for_semantic_scholar_slot() -> None:
+    global _SEMANTIC_SCHOLAR_LAST_REQUEST_AT
+
+    with _SEMANTIC_SCHOLAR_RATE_LOCK:
+        now = time.monotonic()
+        remaining = SEMANTIC_SCHOLAR_MIN_INTERVAL_SECONDS - (
+            now - _SEMANTIC_SCHOLAR_LAST_REQUEST_AT
+        )
+        if remaining > 0:
+            time.sleep(remaining)
+        _SEMANTIC_SCHOLAR_LAST_REQUEST_AT = time.monotonic()
+
+
+def _semantic_scholar_retry_delay(exc: urllib.error.HTTPError, attempt: int) -> float:
+    retry_after = (exc.headers or {}).get("Retry-After")
+    if retry_after:
+        try:
+            return max(0.0, float(retry_after))
+        except ValueError:
+            retry_at = email.utils.parsedate_to_datetime(retry_after)
+            if retry_at is not None:
+                return max(0.0, retry_at.timestamp() - time.time())
+
+    base_delay = 2.0 * (2 ** attempt)
+    return base_delay + random.uniform(0.0, base_delay * 0.25)
 
 
 def _s2_str(obj: dict, key: str) -> str:
@@ -543,12 +609,15 @@ def _discover_unseen_papers(
     elif source == "semantic_scholar":
         from conflux.paper_ingestion.arxiv_source import profile_keyword_groups
 
-        queries = [" ".join(group) for group in profile_keyword_groups(profile)][:max_results]
+        queries = [
+            " ".join(group)
+            for group in profile_keyword_groups(profile, max_queries=SEMANTIC_SCHOLAR_MAX_QUERIES)
+        ][:max_results]
         if not queries:
             queries = ["research"]
         page_size = max(1, min(20, (max_results + len(queries) - 1) // len(queries)))
         active = [True] * len(queries)
-        for page in range(5):
+        for page in range(SEMANTIC_SCHOLAR_MAX_PAGES):
             for index, query in enumerate(queries):
                 if not active[index]:
                     continue
