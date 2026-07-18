@@ -112,6 +112,9 @@ def test_multi_agent_graph_compiles_and_factcheck_updates_final_answer():
     assert result["rag_result"]
     assert result["web_result"]
     assert result["model_result"]
+    assert {"builtin.rag", "builtin.web", "builtin.model"}.issubset(result["source_results"])
+    evidence_sources = set(__import__("json").loads(result["_evidence_json"])["source_statuses"])
+    assert "RAG" in evidence_sources and "builtin.rag" in evidence_sources
     assert result["_arbitration"]
     assert result["_evidence_json"]
     assert result["_factcheck_status"] == "needs_review"
@@ -123,6 +126,30 @@ def test_multi_agent_graph_compiles_and_factcheck_updates_final_answer():
     assert len(reasoning.calls) == 2  # Model Analyst once, then final synthesis once.
     assert result["_run_summary"]["slo_status"] == "pass"
     assert "deep_research" in result["_run_summary"]["stages"]
+
+
+def test_evidence_merge_preserves_sources_when_arbitration_times_out():
+    from conflux.graph_v2 import evidence_merge
+    from conflux.source_status import SourceResult
+
+    class TimeoutModel:
+        def invoke(self, messages):
+            raise TimeoutError("Request timed out")
+
+    state = {
+        "query": "示例问题",
+        "rag_result": SourceResult(source="RAG", status="success", content="本地证据").to_tool_text(),
+        "web_result": SourceResult(source="Web", status="success", content="网页证据").to_tool_text(),
+        "model_result": SourceResult(source="Model", status="success", content="模型推断").to_tool_text(),
+        "source_results": {},
+        "_run_summary": {},
+    }
+
+    result = evidence_merge(state, arbitrator_model=TimeoutModel())
+
+    assert "本地证据" in result["_merged"]
+    assert "ARBITRATION_UNREVIEWED" in result["_arbitration"]
+    assert result["_pipeline_stage"] == "evidence_merged"
 
 
 def test_report_artifacts_include_markdown_and_html(tmp_path):

@@ -24,35 +24,44 @@ test:
 plan:
   overall_goal: 把论文发现、知识沉淀、证据问答和项目进度审计连接成可持续使用的本地研究工作台。
   milestones:
-  - id: r6-progress-audit
-    title: 单项目证据化进度审计
+  - id: m0-baseline
+    title: M0 基线与实施准备
     status: completed
-    description: 采集 Git、测试、研究产物和报告，并生成可追溯的基线对比。
+    description: 固定离线测试、检索和报告评测基线，建立架构夹具和问题登记约定。
     deliverables:
-    - src/conflux/progress_audit/
-    - 工作台进度审计页面
-  - id: r6-project-monitoring
-    title: 多项目监控与计划基线
+    - docs/m0_baseline_report.md
+    - tests/fixtures/architecture/
+  - id: m1-extension-protocol
+    title: M1 扩展协议最小闭环
     status: completed
-    description: 建立项目注册表、只读本地/远程版本监控和统一项目面板。
-    planned_start: '2026-07-17'
-    planned_end: '2026-07-17'
+    description: 建立 SDK、Manifest、Registry、权限校验、统一 StepResult 和 YAML 工作流协议。
     deliverables:
-    - src/conflux/project_registry/
-    - projects/conflux.yaml
-    - 工作台项目监控页面
-  - id: r7-model-collaboration
-    title: 模型注册表与多模型交叉分析
+    - src/conflux/sdk/
+    - src/conflux/core/
+    - src/conflux/adapters/plugin_loader.py
+  - id: m2-first-party-capabilities
+    title: M2 第一方能力与 YAML 工作流
+    status: completed
+    description: 通过统一协议接入文本、RAG、Web、研究和论文能力，并保留 LLM 语义评审状态。
+    deliverables:
+    - src/conflux/builtin/
+    - tests/fixtures/architecture/workflows/
+    - M2 集成测试
+  - id: m3-persistent-runs
+    title: M3 持久运行与初始化迁移
     status: planned
-    description: 支持 OpenAI 兼容接口和 Claude 原生接口，并按角色组织交叉分析。
+    description: 在确认存储迁移边界后引入 SQLite Run Store、事件和审批持久化。
+    deliverables: []
   next_actions:
-  - 独立设计模型注册表，支持档位、角色、OpenAI 兼容 URL 和 Claude 原生接口。
-  - 实现多模型交叉分析会话、分歧记录与结论证据引用。
-  - 把论文变化与项目进度整合进可追溯的周期周报。
+  - 用离线夹具和真实 API 各复测 M0-M2，记录质量、延迟、成本和失败降级。
+  - 修复画像优化、项目文档发现和研究查询超时等已知体验问题。
+  - 在 M3 启动前单独确认 SQLite Run Store、初始化和迁移方案。
   source_documents:
-  - docs/graduate_research_copilot_execution_plan.md
+  - docs/execution_plan_v1.md
+  - docs/architecture.md
+  - docs/m0_baseline_report.md
   - PRODUCT.md
-  updated_at: '2026-07-17'
+  updated_at: '2026-07-18'
 refresh:
   mode: manual
   schedule_enabled: false

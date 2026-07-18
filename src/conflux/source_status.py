@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Iterator, Literal
 
 
-SourceName = Literal["RAG", "Web", "Model", "FactCheck", "Synthesize"]
+SourceName = str
 SourceStatus = Literal["success", "low_relevance", "no_evidence", "failed", "fallback"]
 EvidenceClass = Literal[
     "peer_reviewed",

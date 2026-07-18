@@ -1,0 +1,23 @@
+api_version: conflux.dev/v1alpha1
+kind: Workflow
+id: research.external_v2
+version: 0.1.0
+description: Public web evidence followed by semantic review
+inputs:
+  query:
+    type: string
+    required: true
+steps:
+  - id: web_search
+    uses: builtin.web.search
+    mode: deterministic
+    config:
+      query: "{{query}}"
+  - id: semantic_review
+    uses: builtin.research.evidence_review
+    mode: agentic
+    inputs:
+      query: "{{query}}"
+      candidates: "{{web_search.citations}}"
+policies:
+  budget_token_limit: 5000

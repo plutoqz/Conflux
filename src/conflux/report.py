@@ -339,13 +339,12 @@ def _source_status_markdown(statuses: dict[str, Any]) -> str:
         "| \u6765\u6e90 | \u72b6\u6001 | \u8be6\u60c5 | \u9519\u8bef/\u8bf4\u660e |",
         "|---|---|---|---|",
     ]
-    for source in ("RAG", "Web", "Model"):
-        payload = statuses.get(source) or {}
+    for source, payload in _iter_source_statuses(statuses):
         status = payload.get("status", "unknown")
         detail = str(payload.get("detail") or "")
         error = str(payload.get("error") or "")
         note = error or str(payload.get("content") or "")[:90].replace("\n", " ")
-        lines.append(f"| {source} | {status} | {detail} | {note} |")
+        lines.append(f"| {_source_label(source)} | {status} | {detail} | {note} |")
     lines.append("")
     lines.append("Rule: `success` sources support factual evidence; `low_relevance` sources are weak contextual evidence; `no_evidence` / `failed` / `fallback` sources are excluded.")
     return "\n".join(lines)
@@ -387,7 +386,7 @@ def _evidence_summary_markdown(evidence_json: str) -> str:
 
 
 def _rag_citation_appendix(statuses: dict[str, Any]) -> str:
-    rag_payload = statuses.get("RAG") or {}
+    rag_payload = statuses.get("builtin.rag") or statuses.get("RAG") or {}
     citations = (rag_payload.get("metadata") or {}).get("citations") or []
     if not citations:
         return ""
@@ -406,6 +405,34 @@ def _rag_citation_appendix(statuses: dict[str, Any]) -> str:
         excerpt = str(item.get("text") or "").replace("|", "\\|").replace("\n", " ")[:220]
         lines.append(f"| {ref} | {source} | {chunk_id} | {parent_id} | {range_text} | {excerpt} |")
     return "\n".join(lines)
+
+
+def _iter_source_statuses(statuses: dict[str, Any]):
+    """Prefer namespaced statuses and skip their legacy aliases in reports."""
+
+    aliases = {"RAG": "builtin.rag", "Web": "builtin.web", "Model": "builtin.model"}
+    seen: set[str] = set()
+    preferred = [key for key in ("builtin.rag", "builtin.web", "builtin.model") if key in statuses]
+    preferred.extend(
+        legacy for legacy, namespaced in aliases.items()
+        if namespaced not in statuses and legacy in statuses
+    )
+    preferred.extend(
+        key for key in statuses if key not in preferred and key not in aliases
+    )
+    for source in preferred:
+        if source in seen:
+            continue
+        seen.add(source)
+        yield source, statuses.get(source) or {}
+
+
+def _source_label(source: str) -> str:
+    return {
+        "builtin.rag": "RAG",
+        "builtin.web": "Web",
+        "builtin.model": "Model",
+    }.get(source, source)
 
 
 def _quality_report_markdown(report: dict[str, Any]) -> str:

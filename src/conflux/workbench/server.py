@@ -130,8 +130,12 @@ def build_status() -> dict[str, Any]:
     embedding = dict(raw.get("embedding") or {})
     web_search = dict(raw.get("web_search") or {})
     web_provider = str(web_search.get("provider") or "duckduckgo").strip().lower()
-    web_requires_key = web_provider == "serpapi"
-    web_ready = not web_requires_key or _has_env("SERPAPI_API_KEY")
+    web_requires_key = web_provider in {"serpapi", "bing", "google"}
+    web_ready = {
+        "serpapi": _has_env("SERPAPI_API_KEY"),
+        "bing": _has_env("BING_SEARCH_API_KEY"),
+        "google": _has_env("GOOGLE_API_KEY") and (_has_env("GOOGLE_CSE_ID") or _has_env("GOOGLE_CX")),
+    }.get(web_provider, True)
 
     return {
         "project_root": str(PROJECT_ROOT),
@@ -162,6 +166,9 @@ def build_status() -> dict[str, Any]:
             "cheap_api_key": _has_env("CONFLUX_MODELS__CHEAP__API_KEY"),
             "embedding_api_key": _has_env("CONFLUX_EMBEDDING__API_KEY"),
             "serpapi_api_key": _has_env("SERPAPI_API_KEY"),
+            "bing_api_key": _has_env("BING_SEARCH_API_KEY"),
+            "google_api_key": _has_env("GOOGLE_API_KEY"),
+            "google_cse_id": _has_env("GOOGLE_CSE_ID") or _has_env("GOOGLE_CX"),
         },
     }
 
@@ -240,6 +247,22 @@ def _clean_profile_items(value: Any, *, limit: int, item_limit: int = 120) -> li
     return clean
 
 
+def _profile_output_needs_revision(source: dict[str, Any], optimized: dict[str, Any]) -> bool:
+    """Detect a model response that merely echoes the draft."""
+
+    normalize = lambda value: " ".join(str(value or "").split()).casefold().strip()
+    source_description = normalize(source.get("description"))
+    optimized_description = normalize(optimized.get("description"))
+    source_keywords = {normalize(item) for item in _split_lines(source.get("keywords")) if normalize(item)}
+    optimized_keywords = {normalize(item) for item in _split_lines(optimized.get("keywords")) if normalize(item)}
+    source_negative = {normalize(item) for item in _split_lines(source.get("negative_keywords")) if normalize(item)}
+    optimized_negative = {normalize(item) for item in _split_lines(optimized.get("negative_keywords")) if normalize(item)}
+    description_same = bool(source_description) and source_description == optimized_description
+    novel_keywords = optimized_keywords - source_keywords
+    novel_negative = optimized_negative - source_negative
+    return description_same and len(novel_keywords) < 2 and not novel_negative
+
+
 def optimize_inline_profile(payload: dict[str, Any]) -> dict[str, Any]:
     """Generate a reviewable research-profile suggestion without persisting it."""
 
@@ -250,7 +273,7 @@ def optimize_inline_profile(payload: dict[str, Any]) -> dict[str, Any]:
     if not keywords and not description:
         return {"ok": False, "error": "请至少填写关键词或研究描述，再进行 AI 优化。"}
 
-    prompt = """你是一位研究生论文检索策略专家。请把用户草拟的研究画像优化为高质量、可审查的论文检索画像。
+    prompt = """你是一位研究生论文检索策略专家。请把用户草拟的研究画像重写为高质量、可审查的论文检索画像。
 
 目标：提高 arXiv 和 Semantic Scholar 的检索精度与召回平衡，避免宽泛关键词独占结果。
 要求：
@@ -259,7 +282,9 @@ def optimize_inline_profile(payload: dict[str, Any]) -> dict[str, Any]:
 3. description 改写为一个边界清楚的中文研究问题，说明研究对象、核心方法、应用场景和关注的证据。
 4. negative_keywords 给出 4-12 个英文排除词，用于过滤同名概念和明显无关领域；不要排除可能相关的交叉学科。
 5. optimization_notes 用 2-4 条中文短句解释主要改动，便于用户审查。
-6. 不要改变用户研究主题，不要添加用户未表达的具体实验结论。
+6. 必须真正重写研究问题：不能逐字复述用户 description，至少补充研究对象、方法、场景和边界中的两个缺失维度。
+7. keywords 至少新增两个相对用户草稿的英文检索短语；不要只做大小写、单复数或词序变化。
+8. 不要改变用户研究主题，不要添加用户未表达的具体实验结论。
 
 只返回 JSON 对象，不要 Markdown。结构必须为：
 {"fields": ["..."], "keywords": ["..."], "description": "...", "negative_keywords": ["..."], "optimization_notes": ["..."]}
@@ -290,8 +315,8 @@ def optimize_inline_profile(payload: dict[str, Any]) -> dict[str, Any]:
             error = "画像优化需要可用的模型 API Key，请先在“模型与环境”中完成配置。"
         return {"ok": False, "error": error}
 
-    try:
-        suggestion = _parse_json_object(str(result.get("content") or ""))
+    def parse_suggestion(content: str) -> tuple[dict[str, Any], list[str]]:
+        suggestion = _parse_json_object(content)
         optimized = {
             "fields": _clean_profile_items(suggestion.get("fields"), limit=5),
             "keywords": _clean_profile_items(suggestion.get("keywords"), limit=16),
@@ -299,8 +324,37 @@ def optimize_inline_profile(payload: dict[str, Any]) -> dict[str, Any]:
             "negative_keywords": _clean_profile_items(suggestion.get("negative_keywords"), limit=12),
         }
         notes = _clean_profile_items(suggestion.get("optimization_notes"), limit=4, item_limit=180)
+        return optimized, notes
+
+    try:
+        optimized, notes = parse_suggestion(str(result.get("content") or ""))
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
+
+    source_profile = {"description": description, "keywords": keywords, "negative_keywords": negative_keywords}
+    if _profile_output_needs_revision(source_profile, optimized):
+        retry_prompt = prompt + """
+
+上一次建议与用户草稿过于接近，未达到优化目标。请重新生成：研究问题必须换一种明确表述，并至少加入两个新的检索短语（对象、方法、场景或评价维度），同时保留主题边界。只返回完整 JSON。"""
+        retry = run_model_probe({
+            "model": model,
+            "base_url": base_url,
+            "api_key": api_key,
+            "prompt": retry_prompt,
+            "temperature": 0.35,
+            "max_tokens": 1800,
+            "timeout": 90,
+        })
+        if not retry.get("ok"):
+            return {"ok": False, "error": "模型优化幅度不足，强化重写请求未完成，请稍后重试。"}
+        try:
+            optimized, retry_notes = parse_suggestion(str(retry.get("content") or ""))
+            notes = retry_notes or notes
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    if _profile_output_needs_revision(source_profile, optimized):
+        return {"ok": False, "error": "模型返回的优化稿仍与原始画像过于接近，请重试或补充研究边界。"}
 
     if not optimized["keywords"] or not optimized["description"]:
         return {"ok": False, "error": "模型返回的建议缺少关键词或研究问题，请重试。"}
@@ -315,6 +369,9 @@ def optimize_inline_profile(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Deprecated compatibility helper retained for older integrations. Current inbox
+# execution uses ``builtin.paper.review`` so deterministic scores never become
+# the final semantic judgment.
 def _llm_rerank_papers(
     papers: list,
     profile,
@@ -414,6 +471,91 @@ def _llm_rerank_papers(
         else:
             result.append((paper, None, ""))
     return result
+
+
+def _apply_llm_reviews_to_inbox(result, reviews: dict[str, dict[str, Any]]) -> None:
+    """Apply semantic categories without discarding deterministic candidates on failure."""
+
+    relevance_weight = {"relevant": 0.9, "partially_relevant": 0.6, "irrelevant": 0.1}
+    applied = 0
+    unreviewed = 0
+    deep_review_failures = 0
+    changed = False
+    for paper, analysis in result.analyzed:
+        deterministic_score = float(analysis.relevance_score)
+        review = reviews.get(paper.id)
+        if not review or review.get("relevance") == "unreviewed":
+            unreviewed += 1
+            analysis.metadata["deterministic_score"] = deterministic_score
+            analysis.metadata["semantic_score"] = None
+            analysis.metadata["review_status"] = "unreviewed"
+            analysis.metadata["candidate_status"] = str(
+                (review or {}).get("candidate_status") or "provisional"
+            )
+            analysis.metadata["review_error_code"] = str(
+                (review or {}).get("error_code") or "llm_unavailable"
+            )
+            analysis.metadata["review_error"] = str(
+                (review or {}).get("error_detail")
+                or "LLM semantic review was not completed."
+            )
+            analysis.metadata["review_next_action"] = str(
+                (review or {}).get("next_action")
+                or "Configure a working review model and retry this candidate."
+            )
+            changed = True
+            continue
+        relevance = str(review.get("relevance") or "irrelevant")
+        confidence = max(0.0, min(1.0, float(review.get("confidence") or 0.0)))
+        semantic_score = round(relevance_weight.get(relevance, 0.0) * confidence, 4)
+        review["semantic_score"] = semantic_score
+        review["semantic_score_percent"] = round(semantic_score * 100, 1)
+        if relevance == "relevant" and confidence >= 0.75:
+            reading_level = "deep"
+        elif relevance in {"relevant", "partially_relevant"}:
+            reading_level = "skim"
+        else:
+            reading_level = "skip"
+
+        analysis.metadata["deterministic_score"] = deterministic_score
+        analysis.metadata["llm_review"] = dict(review)
+        analysis.metadata["semantic_score"] = semantic_score
+        analysis.metadata["llm_score"] = round(semantic_score * 100, 1)
+        analysis.metadata["llm_reason"] = str(review.get("reasoning") or "")
+        analysis.metadata["review_status"] = str(review.get("review_status") or "reviewed")
+        analysis.metadata["candidate_status"] = str(review.get("candidate_status") or "reviewed")
+        if review.get("deep_review_status") == "unreviewed":
+            deep_review_failures += 1
+            analysis.metadata["deep_review_error_code"] = str(review.get("deep_error_code") or "")
+            analysis.metadata["deep_review_error"] = str(review.get("deep_error_detail") or "")
+        analysis.relevance_score = semantic_score
+        analysis.reading_level = reading_level  # type: ignore[assignment]
+        analysis.citation_value = (
+            "high" if reading_level == "deep" else "medium" if reading_level == "skim" else "low"
+        )  # type: ignore[assignment]
+        applied += 1
+        changed = True
+
+    if not changed:
+        return
+    if applied:
+        result.analyzed.sort(key=lambda item: item[1].relevance_score, reverse=True)
+    result.stats.update({
+        "deep": sum(1 for _, analysis in result.analyzed if analysis.reading_level == "deep"),
+        "skim": sum(1 for _, analysis in result.analyzed if analysis.reading_level == "skim"),
+        "skip": sum(1 for _, analysis in result.analyzed if analysis.reading_level == "skip"),
+        "llm_scored": applied,
+        "llm_reviewed": applied,
+        "llm_unreviewed": unreviewed,
+        "deep_review_failures": deep_review_failures,
+    })
+    if result.artifacts:
+        result.artifacts = write_inbox_artifacts(
+            result.profile,
+            result.analyzed,
+            out_dir=result.artifacts.json_path.parent,
+            stats=result.stats,
+        )
 
 
 def _apply_llm_scores_to_inbox(result, llm_scores: dict[str, dict[str, Any]]) -> None:
@@ -725,30 +867,48 @@ def run_paper_inbox(payload: dict[str, Any]) -> dict[str, Any]:
     else:
         return {"ok": False, "error": f"不支持的论文来源：{source}"}
 
-    # Optional LLM reranking, blended back into final reading levels and artifacts.
-    llm_scores = {}
+    # Optional semantic review through the same first-party plugin used by workflows.
+    llm_reviews: dict[str, dict[str, Any]] = {}
+    review_status = "not_requested"
+    review_error = ""
+    review_next_action = ""
     if use_llm:
         try:
-            raw_cfg = config.load()
-            mcfg = (raw_cfg.get("models") or {}).get("cheap") or (raw_cfg.get("models") or {}).get("reasoning") or {}
-            ak = mcfg.get("api_key") or _default_api_key("cheap") or _default_api_key("reasoning")
-            bu = mcfg.get("base_url") or ""
-            md = mcfg.get("model") or ""
-            raw_papers = [pa[0] for pa in result.analyzed]
-            ranked = _llm_rerank_papers(raw_papers, result.profile, base_url=bu, api_key=ak, model=md)
-            for paper, llm_score, reason in ranked:
-                if llm_score is not None:
-                    llm_scores[paper.id] = {"score": llm_score, "reason": reason}
-        except Exception:
-            pass
+            from conflux.builtin.paper.plugin import paper_review
+            from conflux.sdk.testing import make_plugin_context
 
-    if llm_scores:
-        _apply_llm_scores_to_inbox(result, llm_scores)
+            profile_version = hashlib.sha256(
+                json.dumps(result.profile.to_dict(), ensure_ascii=False, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:16]
+            ctx = make_plugin_context(config={"model_preset": "cheap"})
+            review_result = paper_review(
+                ctx,
+                papers=[paper.to_dict() for paper, _ in result.analyzed],
+                profile_id=result.profile.id,
+                profile_version=profile_version,
+                profile_keywords=result.profile.keywords,
+                profile_questions=result.profile.research_questions,
+                profile_fields=result.profile.fields,
+            )
+            review_status = review_result.status.value
+            review_error = review_result.error
+            review_next_action = str(review_result.output.get("next_action") or "")
+            for review in review_result.output.get("reviews") or []:
+                paper_id = str(review.get("paper_id") or "")
+                if paper_id:
+                    llm_reviews[paper_id] = review
+        except Exception as exc:
+            review_status = "unreviewed"
+            review_error = f"LLM review unavailable: {type(exc).__name__}: {exc}"
+            review_next_action = "Configure a working review model and retry unreviewed papers."
+
+    if llm_reviews:
+        _apply_llm_reviews_to_inbox(result, llm_reviews)
 
     artifacts = result.artifacts
     papers_out = []
     for paper, analysis in result.analyzed:
-        llm = llm_scores.get(paper.id) or {}
+        llm = llm_reviews.get(paper.id) or {}
         deterministic_score = analysis.metadata.get("deterministic_score", analysis.relevance_score)
         entry = {
             "id": paper.id,
@@ -761,9 +921,16 @@ def run_paper_inbox(payload: dict[str, Any]) -> dict[str, Any]:
             "citation_value": analysis.citation_value,
             "reasons": analysis.metadata.get("score_reasons") or [],
         }
-        if llm.get("score") is not None:
-            entry["llm_score"] = llm["score"]
-            entry["llm_reason"] = llm.get("reason", "")
+        if llm:
+            entry["llm_score"] = llm.get("semantic_score_percent", llm.get("semantic_score"))
+            entry["llm_reason"] = llm.get("reasoning", "")
+            entry["review_status"] = llm.get("review_status") or llm.get("relevance", "unreviewed")
+            entry["relevance"] = llm.get("relevance", "unreviewed")
+            entry["candidate_status"] = llm.get("candidate_status", "provisional")
+            entry["review_error_code"] = llm.get("error_code", "")
+            entry["review_error"] = llm.get("error_detail", "")
+            entry["deep_review_status"] = llm.get("deep_review_status", "not_requested")
+            entry["review_next_action"] = llm.get("next_action", "")
         papers_out.append(entry)
     papers = papers_out
     return {
@@ -771,6 +938,9 @@ def run_paper_inbox(payload: dict[str, Any]) -> dict[str, Any]:
         "profile_id": result.profile.id,
         "stats": result.stats,
         "papers": papers,
+        "review_status": review_status,
+        "review_error": review_error,
+        "review_next_action": review_next_action,
         "markdown_path": _rel(artifacts.markdown_path) if artifacts else "",
         "json_path": _rel(artifacts.json_path) if artifacts else "",
     }
@@ -787,6 +957,9 @@ def save_model_config(payload: dict[str, Any]) -> dict[str, Any]:
             embedding_model=str(payload.get("embedding_model") or "").strip(),
             web_search_provider=str(payload.get("web_search_provider") or "").strip(),
             serpapi_api_key=str(payload.get("serpapi_api_key") or "").strip(),
+            bing_api_key=str(payload.get("bing_api_key") or "").strip(),
+            google_api_key=str(payload.get("google_api_key") or "").strip(),
+            google_cse_id=str(payload.get("google_cse_id") or "").strip(),
             depth=str(payload.get("depth") or "standard").strip(),
         )
         return {"ok": True, "saved": count}
@@ -1175,8 +1348,22 @@ def build_projects_overview() -> dict[str, Any]:
         cached = _load_project_cache(project.id)
         if cached and (cached.get("project") or {}).get("path") == project.path:
             cached["project"] = project.to_dict()
-            if not cached.get("plan_context"):
-                cached["plan_context"] = public_document_context(discover_plan_documents(project, max_files=1))
+            # Repository/audit snapshots may be cached, but document
+            # discovery must be fresh because users edit local Markdown.
+            cached["plan_context"] = public_document_context(discover_plan_documents(project, max_files=24))
+            # Keep the cached alert list consistent with the fresh charter
+            # result; otherwise an old "缺少项目纲领" warning survives after
+            # the user adds or registers a local blueprint.
+            cached["alerts"] = [
+                alert for alert in (cached.get("alerts") or [])
+                if str((alert or {}).get("title") or "") != "缺少项目纲领"
+            ]
+            if (cached["plan_context"].get("charter") or {}).get("status") == "missing":
+                cached["alerts"].append({
+                    "severity": "warning",
+                    "title": "缺少项目纲领",
+                    "detail": "只读监控仍可使用，但智能计划分析的依据不足。可生成 PROJECT.md 草案后人工确认。",
+                })
             projects.append(cached)
         else:
             projects.append(monitor_project(

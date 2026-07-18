@@ -1,0 +1,38 @@
+# Conflux Research Profile: 地理处理自动化
+id: profile_84365275
+name: 地理处理自动化
+fields:
+- cs.AI
+- cs.CY
+- cs.SE
+research_questions:
+- 本研究聚焦于利用大语言模型（LLM）实现地理处理任务的自动化，核心方法包括任务分解、工作流生成与LLM驱动的空间推理，应用场景为减少或消除人工干预的GIS自动化流程。关注的证据包括自动化流程的时效性（如任务完成时间）与准确性（如结果与专家操作的一致性），并探索LLM在复杂地理空间任务中的边界与可靠性。
+keywords:
+- geographic information system
+- geoprocessing automation
+- large language model
+- LLM-based workflow
+- automatic geospatial analysis
+- human-in-the-loop
+- task decomposition
+- spatial reasoning
+- geospatial knowledge graph
+- prompt engineering for GIS
+- workflow generation
+- geoprocessing pipeline
+negative_keywords:
+- remote sensing image classification
+- computer vision
+- autonomous driving
+- robot navigation
+- climate modeling
+- hydrological simulation
+- geographic education
+- cartographic generalization
+target_venues: []
+tracked_scholars: []
+project_paths: []
+document_paths: []
+paper_sources:
+- arxiv
+report_cadence: weekly

@@ -125,6 +125,9 @@ def save_workbench_env(
     embedding_model: str = "",
     web_search_provider: str = "",
     serpapi_api_key: str = "",
+    bing_api_key: str = "",
+    google_api_key: str = "",
+    google_cse_id: str = "",
     depth: str = "",
     clear_keys: list[str] | None = None,
 ) -> int:
@@ -173,6 +176,12 @@ def save_workbench_env(
         existing["CONFLUX_WEB_SEARCH__PROVIDER"] = web_search_provider
     if serpapi_api_key:
         existing["SERPAPI_API_KEY"] = serpapi_api_key
+    if bing_api_key:
+        existing["BING_SEARCH_API_KEY"] = bing_api_key
+    if google_api_key:
+        existing["GOOGLE_API_KEY"] = google_api_key
+    if google_cse_id:
+        existing["GOOGLE_CSE_ID"] = google_cse_id
 
     # ── Apply explicit key removals ──
     for k in clear_keys:

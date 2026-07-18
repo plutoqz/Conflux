@@ -9,7 +9,7 @@ Graph 结构：
 import json
 import re
 import time
-from typing import TypedDict
+from typing import Annotated, TypedDict
 
 from langgraph.graph import END, StateGraph
 from langgraph.types import Send
@@ -32,16 +32,20 @@ from .source_status import (
 )
 from .quality import evaluate_run_quality
 from .trace import new_run_id
+from .core.dynamic_source import merge_source_results_reducer, namespace_source_result
 
 
 # ── State ──────────────────────────────────────────────────
 
 class MultiAgentState(TypedDict):
     query: str
-    # 三个子 Agent 各自的输出
+    # 三个子 Agent 各自的输出（保留兼容，M3+ 废弃）
     rag_result: str
     web_result: str
     model_result: str
+    # 动态来源结果集合（M2+）：{namespaced_id: SourceResult.to_dict()}
+    # 例如 {"builtin.rag": {...}, "plugin.arxiv.search": {...}}
+    source_results: Annotated[dict[str, dict], merge_source_results_reducer]
     # 内部合并结果
     _merged: str
     # 仲裁摘要
@@ -170,7 +174,7 @@ def _run_exclusive_tool(agent: ResearchAgent, query: str) -> str | None:
 def _source_result_from_agent_text(source: str, text: str) -> SourceResult:
     """Parse the last tool payload for a source; agent-only text becomes fallback."""
 
-    parsed = [result for result in parse_source_results(text) if result.source == source]
+    parsed = [result for result in parse_source_results(text) if _source_matches(result.source, source)]
     if parsed:
         result = parsed[-1]
         cleaned = strip_source_markers(text)
@@ -182,6 +186,57 @@ def _source_result_from_agent_text(source: str, text: str) -> SourceResult:
         "未检测到该 Agent 的结构化工具成功结果；仅可作为模型补写或失败后的推断。",
         strip_source_markers(text),
     )
+
+
+def _source_matches(actual: str, expected: str) -> bool:
+    return actual == expected or actual.rsplit(".", 1)[-1].casefold() == expected.casefold()
+
+
+def _source_results_from_state(state: MultiAgentState) -> dict[str, SourceResult]:
+    """Read the dynamic collection first, then adapt legacy state fields."""
+
+    results: dict[str, SourceResult] = {}
+    for source_id, payload in (state.get("source_results") or {}).items():
+        try:
+            results[source_id] = namespace_source_result(
+                source_id, SourceResult.from_dict(payload)
+            )
+        except Exception:
+            continue
+    for source_id, legacy_source, field in (
+        ("builtin.rag", "RAG", "rag_result"),
+        ("builtin.web", "Web", "web_result"),
+        ("builtin.model", "Model", "model_result"),
+    ):
+        if source_id not in results:
+            results[source_id] = namespace_source_result(
+                source_id, _source_result_from_agent_text(legacy_source, state.get(field, ""))
+            )
+    return results
+
+
+def _legacy_source_statuses(results: dict[str, SourceResult]) -> dict[str, dict]:
+    """Expose old keys while keeping namespaced results as the source of truth."""
+
+    statuses = {source: result.to_dict() for source, result in results.items()}
+    for namespaced, legacy in {
+        "builtin.rag": "RAG",
+        "builtin.web": "Web",
+        "builtin.model": "Model",
+    }.items():
+        if namespaced in statuses:
+            payload = dict(statuses[namespaced])
+            payload["source"] = legacy
+            statuses[legacy] = payload
+    return statuses
+
+
+def _source_display_name(source: str) -> str:
+    return {
+        "builtin.rag": "本地知识库 (RAG) 结果",
+        "builtin.web": "互联网搜索 (Web) 结果",
+        "builtin.model": "模型世界知识 (Model) 结果",
+    }.get(source, f"来源 {source}")
 
 
 def _format_source_section(title: str, result: SourceResult) -> str:
@@ -253,7 +308,13 @@ def rag_agent_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
     result = _run_exclusive_tool(agent, state["query"])
     if result is None:
         result = fallback_result("RAG", "RAG Agent 未配置唯一检索工具。").to_tool_text()
-    return {"rag_result": result}
+    parsed = _source_result_from_agent_text("RAG", result)
+    return {
+        "rag_result": result,
+        "source_results": {
+            "builtin.rag": namespace_source_result("builtin.rag", parsed).to_dict()
+        },
+    }
 
 
 def web_agent_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
@@ -261,15 +322,22 @@ def web_agent_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
     result = _run_exclusive_tool(agent, state["query"])
     if result is None:
         result = fallback_result("Web", "Web Agent 未配置唯一检索工具。").to_tool_text()
-    return {"web_result": result}
+    parsed = _source_result_from_agent_text("Web", result)
+    return {
+        "web_result": result,
+        "source_results": {
+            "builtin.web": namespace_source_result("builtin.web", parsed).to_dict()
+        },
+    }
 
 
 def model_agent_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
     """Run one post-retrieval Model Analyst call over structured external evidence."""
 
     external_results = {
-        "RAG": _source_result_from_agent_text("RAG", state.get("rag_result", "")),
-        "Web": _source_result_from_agent_text("Web", state.get("web_result", "")),
+        source: result
+        for source, result in _source_results_from_state(state).items()
+        if source != "builtin.model" and result.evidence_class != "model_inference"
     }
     external_graph = build_evidence_graph_from_results(external_results)
     evidence_table = _analyst_evidence_table(external_graph)
@@ -305,8 +373,10 @@ def model_agent_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
         claims=claims,
         metadata={"evidence_ids": [item["id"] for item in evidence_table], "identified_gaps": gaps},
     )
+    model_payload = namespace_source_result("builtin.model", result).to_dict()
     return {
         "model_result": result.to_tool_text(),
+        "source_results": {"builtin.model": model_payload},
         "_run_summary": _append_stage(state, "model_analysis"),
         "_pipeline_stage": "model_analyzed",
     }
@@ -326,7 +396,7 @@ def _analyst_evidence_table(graph: EvidenceGraph) -> list[dict]:
             "limitations": node.limitations,
         }
         for node in graph.nodes.values()
-        if node.source in {"RAG", "Web"}
+        if node.evidence_class in EXTERNAL_EVIDENCE_CLASSES
     ]
 
 
@@ -371,21 +441,17 @@ def evidence_merge(state: MultiAgentState, *, arbitrator_model=None) -> dict:
     2. 构建 EvidenceGraph（声明提取 + 去重 + 矛盾检测）
     3. 用 cheap 模型生成仲裁摘要
     """
-    source_results = {
-        "RAG": _source_result_from_agent_text("RAG", state.get("rag_result", "")),
-        "Web": _source_result_from_agent_text("Web", state.get("web_result", "")),
-        "Model": _source_result_from_agent_text("Model", state.get("model_result", "")),
-    }
+    source_results = _source_results_from_state(state)
 
-    merged = "\n\n---\n\n".join([
-        _format_source_section("本地知识库 (RAG) 结果", source_results["RAG"]),
-        _format_source_section("互联网搜索 (Web) 结果", source_results["Web"]),
-        _format_source_section("模型世界知识 (Model) 结果", source_results["Model"]),
-    ])
+    merged = "\n\n---\n\n".join(
+        _format_source_section(_source_display_name(source), result)
+        for source, result in source_results.items()
+    )
 
     graph = build_evidence_graph_from_results(source_results)
+    graph.source_statuses = _legacy_source_statuses(source_results)
     evidence_json = graph.to_json()
-    source_statuses = {source: result.to_dict() for source, result in source_results.items()}
+    source_statuses = _legacy_source_statuses(source_results)
 
     arbitration = ""
     if arbitrator_model and merged:
@@ -479,7 +545,18 @@ success 正常加权；low_relevance 降权；model_inference、no_evidence/fail
         SystemMessage(content="你是一个信息仲裁分析器。请精简、结构化地按五级协议输出。"),
         HumanMessage(content=prompt),
     ]
-    response = model.invoke(messages)
+    try:
+        response = model.invoke(messages)
+    except Exception as exc:
+        # Arbitration is a quality enhancement, not a reason to discard
+        # successfully retrieved evidence. Preserve an explicit review gap
+        # so synthesis and the UI can surface it without pretending that a
+        # deterministic fallback is an LLM judgment.
+        return (
+            "[ARBITRATION_UNREVIEWED] 仲裁模型调用未完成。"
+            f"原因：{type(exc).__name__}: {exc}。"
+            "已保留原始来源和证据图，结论需要人工复核。"
+        )
     return str(response.content)
 
 
@@ -496,7 +573,7 @@ def synthesize_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
         arb_section = f"\n\n## 仲裁分析（供参考）\n{arbitration}"
 
     messages = [
-        SystemMessage(content="""你是 Conflux 的调研报告综合编辑。你必须输出简洁 Markdown 主报告。
+        SystemMessage(content="""你是 Conflux 的调研报告综合编辑。你必须输出以问题答案为中心的 Markdown 主报告。
 硬性要求：
 - 不得把 no_evidence/failed/fallback 来源当作真实来源；
 - low_relevance 只能作为弱相关上下文，必须标注低置信；
@@ -506,6 +583,7 @@ def synthesize_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
 - 模型分析只能标注 [Model]，并明确写“模型推断”；
 - 分层输出：多源 success 为高置信；单源 success 为中低置信；low_relevance 为低置信；仅 Model 可用时允许回答但必须标注“模型推断，缺少外部证据支持”；三源均无内容时才拒答；
 - 对单源声明、弱相关证据和工具无证据/失败后的推断明确降低置信度；
+- 先尽可能完整地回答用户问题，再说明证据强弱、可信度和缺口；不要用免责声明或工具失败状态开头，也不要因证据不足直接拒答；
 - 主报告保持简洁（目标1200–2500字），证据图、原始三源输出由系统附录提供，不要大段复制。"""),
         HumanMessage(content=f"""用户问题：{state['query']}
 
@@ -516,22 +594,25 @@ def synthesize_node(state: MultiAgentState, *, agent: ResearchAgent) -> dict:
 
 {merged}{arb_section}
 
-请输出以下小节（总字数控制在1200–2500字）：
-## 最终结论
-用 3-6 条给出核心结论，逐条标注来源和置信度。
+请按以下顺序输出小节（总字数控制在1200–2500字）：
+## 核心回答
+### 最终结论
+先用 3-6 条直接回答问题，给出必要的分类、原因、条件和工程判断。每条外部事实逐条标注精确来源；只有模型支持的内容标注“模型推断 [Model]”。
 
-## 信息来源
-简述 RAG/Web/Model 的状态、可用证据和失败/降级情况。
+## 分析
+解释结论的推理链、差异、限制条件和对用户问题的具体含义。
 
-## 不确定性
-说明单源声明、时间敏感信息、工具失败、模型推断带来的不确定性。
+## 证据支撑
+说明哪些结论由 RAG/Web/Model 支持，引用可用证据；不得把失败或无证据状态当作来源。
 
-## 证据摘要
-简述哪些结论来自多源共识、哪些是单源声明、哪些存在冲突。
+## 可信度评估与不确定性
+按关键声明评估可信度，说明单源、弱相关、时效性、模型推断和工具失败造成的限制。不要重复大段免责声明。
+
+## 需要进一步核验
+列出最值得补充的来源、数据或实验，以及当前知识缺口。
 
 ## 工程落地建议
-给出面向多智能体调研系统或用户问题的可执行建议。
-"""),
+给出面向多智能体调研系统或用户问题的可执行建议。"""),
     ]
 
     response = agent.raw_model.invoke(messages)
@@ -565,33 +646,37 @@ def _ensure_model_fallback_report(
         for source in ("RAG", "Web")
         if status_is_evidence(str((source_statuses.get(source) or {}).get("status") or ""))
     ]
-    model_available = model_status == "success" and len(model_content.strip()) >= 80
+    model_available = model_status == "success" and len(model_content.strip()) >= 40
     if external_evidence or not model_available or not _looks_like_short_refusal(report):
         return report
 
-    return f"""## 最终结论
-- 当前 RAG/Web 没有提供可用外部证据；以下内容仅基于 Model 来源的模型推断，置信度较低。[Model]
-- 针对“{query}”，可先给出概念性脉络或工程判断，但不应把它表述为已被本地知识库或 Web 验证的结论。[Model]
+    return f"""## 核心回答
+### 最终结论
+{model_content.strip()[:2200]}
 
-## 信息来源
-- RAG/Web：未形成可引用外部证据，状态见来源表。
-- Model：有可用推断内容，但属于模型世界知识，不是检索证据。
+以上内容是在当前证据条件下对“{query}”的可用回答，属于模型推断 [Model]，不应误写成已被本地知识库或 Web 验证的事实。
 
-## 不确定性
-- 该回答缺少 RAG/Web 证据支撑，事实细节、时间线、引用来源和具体案例都需要后续检索验证。
-- 若问题涉及标准、产品版本、论文结论或政策日期，应优先补充权威 Web 或本地文档证据。
+## 分析
+基于现有模型知识，可以先从概念脉络、主要机制、适用条件和工程取舍展开分析。具体事实、时间线和案例应在补充来源后再确认；当前回答仍然优先保留对问题本身有帮助的解释，而不是因检索缺口停止回答。
 
-## 证据摘要
-- 多源共识：暂无。
-- 单源内容：仅 Model 给出低置信推断。
-- 检索缺口：RAG/Web 未返回足够相关证据，不能参与事实投票。
+## 证据支撑
+- Model：提供了上述临时分析，但属于模型推断，不是外部检索证据。
+- RAG/Web：本轮未形成足够相关、可引用的外部证据，状态和失败原因见审计附录。
+- 多源共识：暂无，不能据此提升模型推断的可信度。
+
+## 可信度评估与不确定性
+- 核心概念和一般性分析：可作为中低置信的研究起点。
+- 具体数字、论文结论、标准版本、政策日期和案例：当前缺少可追溯证据，可信度不足，需逐条核验。
+- “模型推断”标签只说明内容来源，不代表事实已经验证。
+
+## 需要进一步核验
+- 用中英文改写查询补充本地知识库召回；
+- 使用权威论文、标准或官方文档核对关键事实；
+- 对影响决策的结论建立逐条引用和交叉验证记录。
 
 ## 工程落地建议
-- 将本轮输出作为“待验证草案”，下一轮优先使用 query planner 的英文/中文子查询补充 RAG/Web 证据。
-- 对关键事实建立最小引用清单；没有引用的内容继续保持 Model-only 低置信标注。
-
-### Model 推断草案
-{model_content.strip()[:2200]}
+- 将本轮回答作为可审查草案保存，先标记待核验声明，再补充检索结果，而不是丢弃已有分析。
+- 对关键事实建立最小引用清单；一旦获得 success 证据，再更新对应声明的可信度和来源。
 """
 
 
@@ -1021,7 +1106,7 @@ def deeper_research_node(
             payload = _run_exclusive_tool(source_agent, combined_deep_query)
             if payload:
                 payloads.extend(
-                    result for result in parse_source_results(payload) if result.source == source
+                    result for result in parse_source_results(payload) if _source_matches(result.source, source)
                 )
         existing_payload = (state.get("_source_statuses") or {}).get(source)
         if existing_payload:

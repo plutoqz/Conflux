@@ -1,0 +1,9 @@
+api_version: conflux.dev/v1alpha1
+kind: Workflow
+id: test.bad_workflow
+version: 0.1.0
+inputs: {}
+steps:
+  - id: bad_step
+    uses: nonexistent.plugin.cap
+    mode: deterministic

@@ -16,10 +16,17 @@ from .config import load as load_config
 from .graph import create_graph
 from .graph_v2 import create_multi_agent_graph
 from .model_factory import create_chat_model, validate_embedding_credentials, validate_runtime_credentials
+from .query_planner import QueryRewriteProvider
 from .rag import HybridRetriever, chunk_documents, clear_index, create_vector_store, index_documents
 from .report import write_report_artifacts
 from .tools import ask_model, create_rag_tool, search_web, set_model
-from .trace import event_from_state_key, new_run_id, write_run_summary, write_trace_jsonl
+from .trace import (
+    event_from_state_key,
+    events_from_source_results,
+    new_run_id,
+    write_run_summary,
+    write_trace_jsonl,
+)
 
 
 def _clean_text(text: str) -> str:
@@ -119,6 +126,7 @@ def _empty_multi_agent_state(
         "rag_result": "",
         "web_result": "",
         "model_result": "",
+        "source_results": {},
         "_merged": "",
         "_arbitration": "",
         "_evidence_json": "",
@@ -169,7 +177,7 @@ def query_command(
 
     vector_store = create_vector_store()
     retriever = HybridRetriever(vector_store)
-    rag_tool = create_rag_tool(retriever)
+    rag_tool = create_rag_tool(retriever, QueryRewriteProvider(cheap_model))
 
     run_id = run_id or new_run_id()
     effective_thread_id = resume or thread_id or run_id
@@ -314,6 +322,7 @@ def _run_phase2_graph(
     config = graph_config(thread_id)
     for event in graph.stream(initial_state, config=config, stream_mode="values"):
         for key, label in [
+            ("source_results", "Dynamic sources"),
             ("rag_result", "RAG Agent"),
             ("web_result", "Web Agent"),
             ("model_result", "Model Agent"),
@@ -326,12 +335,22 @@ def _run_phase2_graph(
             value = event.get(key)
             if value and key not in seen:
                 seen.add(key)
+                if key == "source_results":
+                    dynamic_events = events_from_source_results(
+                        value,
+                        run_id=run_id,
+                        thread_id=thread_id,
+                        started_at=started_at,
+                    )
+                    events.extend(dynamic_events)
+                    for dynamic_event in dynamic_events:
+                        if stream_events:
+                            print(json.dumps(dynamic_event.to_dict(), ensure_ascii=False))
+                    if not stream_events and dynamic_events:
+                        print(f"[done] {label} ({len(dynamic_events)} sources)")
+                    continue
                 trace_event = event_from_state_key(
-                    key,
-                    value,
-                    run_id=run_id,
-                    thread_id=thread_id,
-                    started_at=started_at,
+                    key, value, run_id=run_id, thread_id=thread_id, started_at=started_at
                 )
                 if trace_event:
                     events.append(trace_event)
@@ -344,10 +363,197 @@ def _run_phase2_graph(
     return event, events
 
 
+# ── plugin CLI ──────────────────────────────────────────────────────
+
+def _plugin_command(args: argparse.Namespace) -> None:
+    """Handle ``conflux plugin <action>``."""
+    import os
+    from .core.registry import get_registry, reset_registry
+    from .adapters.plugin_loader import load_builtin_plugins, load_plugins_from_dirs
+    from .sdk.manifest import load_manifest, validate_manifest
+
+    registry = get_registry()
+    load_builtin_plugins(registry)
+
+    # Load user plugin dirs from --plugin-dir and CONFLUX_PLUGIN_DIRS.
+    plugin_dirs = list(getattr(args, "plugin_dirs", []) or [])
+    env_dirs = os.environ.get("CONFLUX_PLUGIN_DIRS", "")
+    if env_dirs:
+        plugin_dirs.extend(p.strip() for p in env_dirs.split(os.pathsep) if p.strip())
+    if plugin_dirs:
+        load_plugins_from_dirs(plugin_dirs, registry)
+
+    if args.plugin_action == "list":
+        plugins = registry.list_plugins()
+        if not plugins:
+            print("No plugins registered.")
+            return
+        for p in plugins:
+            caps = p.capabilities
+            print(f"{p.id} v{p.manifest.version} — {len(caps)} capabilities")
+            if getattr(args, "verbose", False):
+                for cap in caps:
+                    print(f"  - {cap.id}: {cap.description or '(no description)'}")
+
+    elif args.plugin_action == "validate":
+        path = args.path
+        try:
+            manifest = load_manifest(path)
+            issues = validate_manifest(manifest)
+            if issues:
+                print(f"Validation issues in {path}:")
+                for i in issues:
+                    print(f"  - {i}")
+            else:
+                print(f"Manifest {path} is valid.")
+                print(f"  Plugin: {manifest.id} v{manifest.version}")
+                print(f"  Capabilities: {len(manifest.capabilities)}")
+                for cap in manifest.capabilities:
+                    print(f"    - {cap.id} [{cap.mode.value}]")
+        except Exception as e:
+            print(f"Error loading {path}: {e}")
+            raise SystemExit(1)
+
+    elif args.plugin_action == "inspect":
+        record = registry.get(args.plugin_id)
+        if record is None:
+            print(f"Plugin '{args.plugin_id}' not found.")
+            raise SystemExit(1)
+        m = record.manifest
+        print(f"Plugin: {m.id}")
+        print(f"Version: {m.version}")
+        print(f"Entrypoint: {m.entrypoint}")
+        print(f"SDK compat: {m.sdk_compat}")
+        print(f"Permissions: {[p.value for p in m.permissions]}")
+        print(f"Side effects: {m.side_effects}")
+        print(f"Capabilities ({len(m.capabilities)}):")
+        for cap in m.capabilities:
+            print(f"  - {cap.id} [{cap.mode.value}]: {cap.description}")
+
+    else:
+        print("Usage: python -m conflux plugin {list|validate|inspect} [...]")
+
+
+def _workflow_command(args: argparse.Namespace) -> None:
+    """Handle ``conflux workflow <action>``."""
+    import os
+    from .core.registry import get_registry
+    from .core.policy import check_workflow_steps, validate_workflow_inputs
+    from .adapters.plugin_loader import load_builtin_plugins, load_plugins_from_dirs
+    from .sdk.manifest import load_workflow
+
+    registry = get_registry()
+    load_builtin_plugins(registry)
+
+    # Load user plugins if --plugin-dir given.
+    plugin_dirs = list(getattr(args, "wf_plugin_dirs", []) or [])
+    env_dirs = os.environ.get("CONFLUX_PLUGIN_DIRS", "")
+    if env_dirs:
+        plugin_dirs.extend(p.strip() for p in env_dirs.split(os.pathsep) if p.strip())
+    if plugin_dirs:
+        load_plugins_from_dirs(plugin_dirs, registry)
+
+    if args.workflow_action in {"validate", "run"}:
+        path = args.path
+        try:
+            wf = load_workflow(path)
+        except Exception as e:
+            print(f"Error loading workflow {path}: {e}")
+            raise SystemExit(1)
+
+        if args.workflow_action == "run":
+            from .core.workflow_compiler import execute_workflow
+            from .core.contracts import StepStatus
+
+            try:
+                input_values = json.loads(args.input_json or "{}")
+                if not isinstance(input_values, dict):
+                    raise ValueError("--input-json must contain a JSON object")
+                results = execute_workflow(wf, registry, input_values)
+            except Exception as exc:
+                print(f"Workflow execution failed: {exc}")
+                raise SystemExit(1)
+            for step_id, result in results.items():
+                print(f"{step_id}: {result.status.value}")
+                if result.error:
+                    print(f"  error: {result.error}")
+            if any(result.status != StepStatus.SUCCESS for result in results.values()):
+                raise SystemExit(1)
+        elif getattr(args, "dry_run", False):
+            from .core.workflow_compiler import dry_run_workflow, workflow_text_graph
+            print(workflow_text_graph(wf))
+            print()
+            print(dry_run_workflow(wf, registry))
+        else:
+            from .core.workflow_compiler import compile_workflow
+            result = compile_workflow(wf, registry)
+            print(f"Workflow: {wf.id} v{wf.version}")
+            print(f"Steps: {len(wf.steps)}")
+            if result.issues:
+                print(f"\nIssues ({len(result.issues)}):")
+                for i in result.issues:
+                    print(f"  {i}")
+            if result.is_valid:
+                print("\nWorkflow is valid.")
+            else:
+                print("\nWorkflow is INVALID.")
+                raise SystemExit(1)
+    else:
+        print("Usage: python -m conflux workflow {validate|run} <path> [options]")
+
+
 def main() -> None:
     _configure_console_encoding()
     parser = argparse.ArgumentParser(description="Conflux multi-source research CLI")
-    parser.add_argument("query", nargs="?", help="Research question")
+    sub = parser.add_subparsers(dest="command", help="Subcommands")
+
+    # ── plugin subcommands ──────────────────────────────────────
+    plugin_parser = sub.add_parser("plugin", help="Plugin management")
+    plugin_sub = plugin_parser.add_subparsers(dest="plugin_action")
+
+    list_parser = plugin_sub.add_parser("list", help="List registered plugins")
+    list_parser.add_argument("--verbose", "-v", action="store_true", help="Show capability details")
+    list_parser.add_argument("--plugin-dir", action="append", default=[], dest="plugin_dirs",
+                             help="Extra plugin directory (repeatable); also read from CONFLUX_PLUGIN_DIRS env var")
+
+    validate_parser = plugin_sub.add_parser("validate", help="Validate a plugin manifest")
+    validate_parser.add_argument("path", help="Path to manifest.yaml or plugin directory")
+
+    inspect_parser = plugin_sub.add_parser("inspect", help="Show plugin details")
+    inspect_parser.add_argument("plugin_id", help="Plugin id to inspect")
+    inspect_parser.add_argument("--plugin-dir", action="append", default=[], dest="plugin_dirs",
+                                help="Extra plugin directory for resolving the plugin")
+
+    # ── workflow subcommands ────────────────────────────────────
+    wf_parser = sub.add_parser("workflow", help="Workflow management")
+    wf_sub = wf_parser.add_subparsers(dest="workflow_action")
+
+    wf_validate_parser = wf_sub.add_parser("validate", help="Validate a workflow definition")
+    wf_validate_parser.add_argument("path", help="Path to workflow YAML file")
+    wf_validate_parser.add_argument("--dry-run", action="store_true", help="Show execution plan without running")
+    wf_validate_parser.add_argument("--plugin-dir", action="append", default=[], dest="wf_plugin_dirs",
+                                     help="Extra plugin directory for resolving capabilities")
+    wf_run_parser = wf_sub.add_parser("run", help="Run a workflow with JSON inputs")
+    wf_run_parser.add_argument("path", help="Path to workflow YAML file")
+    wf_run_parser.add_argument("--input-json", default="{}", help="Workflow inputs as a JSON object")
+    wf_run_parser.add_argument("--plugin-dir", action="append", default=[], dest="wf_plugin_dirs",
+                               help="Extra plugin directory for resolving capabilities")
+
+    # ── legacy research CLI (preserved) ─────────────────────────
+    research_parser = sub.add_parser("research", help="Run a research query (default)")
+    research_parser.add_argument("query", nargs="?", help="Research question")
+    research_parser.add_argument("--index", help="Index a document directory")
+    research_parser.add_argument("--query", dest="query_opt", help="Research question used with --index")
+    research_parser.add_argument("--mode", choices=["phase1", "phase2"], default="phase2", help="Run mode")
+    research_parser.add_argument("--output-dir", default="reports", help="Markdown/HTML output directory")
+    research_parser.add_argument("--thread-id", help="LangGraph checkpoint thread id")
+    research_parser.add_argument("--resume", help="Resume a checkpoint thread id")
+    research_parser.add_argument("--checkpoint-backend", default="none", choices=["none", "memory"], help="Checkpoint backend")
+    research_parser.add_argument("--stream-events", action="store_true", help="Print structured trace events as JSON lines")
+    research_parser.add_argument("--trace-dir", help="Directory for .trace.jsonl and .summary.json outputs")
+
+    # ── also accept top-level args for backward compat ──────────
+    parser.add_argument("query", nargs="?", help="Research question (legacy mode)")
     parser.add_argument("--index", help="Index a document directory")
     parser.add_argument("--query", dest="query_opt", help="Research question used with --index")
     parser.add_argument("--mode", choices=["phase1", "phase2"], default="phase2", help="Run mode")
@@ -359,27 +565,33 @@ def main() -> None:
     parser.add_argument("--trace-dir", help="Directory for .trace.jsonl and .summary.json outputs")
 
     args = parser.parse_args()
-    actual_query = args.query or args.query_opt
 
-    if args.index:
-        index_command(args.index)
-
-    if actual_query:
-        query_command(
-            actual_query,
-            mode=args.mode,
-            output_dir=args.output_dir,
-            thread_id=args.thread_id,
-            resume=args.resume,
-            checkpoint_backend=args.checkpoint_backend,
-            stream_events=args.stream_events,
-            trace_dir=args.trace_dir,
-        )
-    elif not args.index:
+    if args.command == "plugin":
+        _plugin_command(args)
+    elif args.command == "workflow":
+        _workflow_command(args)
+    elif args.command == "research" or (not args.command and (args.query or args.query_opt or args.index)):
+        actual_query = args.query or args.query_opt
+        if args.index:
+            index_command(args.index)
+        if actual_query:
+            query_command(
+                actual_query,
+                mode=args.mode,
+                output_dir=args.output_dir,
+                thread_id=args.thread_id,
+                resume=args.resume,
+                checkpoint_backend=args.checkpoint_backend,
+                stream_events=args.stream_events,
+                trace_dir=args.trace_dir,
+            )
+        elif not args.index:
+            parser.print_help()
+            print("\nExamples:")
+            print("  python -m conflux --index data/documents/")
+            print('  python -m conflux "How should RAG/Web/Model arbitration work?" --stream-events')
+    else:
         parser.print_help()
-        print("\nExamples:")
-        print("  python -m conflux --index data/documents/")
-        print('  python -m conflux "How should RAG/Web/Model arbitration work?" --stream-events')
 
 
 if __name__ == "__main__":

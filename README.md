@@ -1,52 +1,49 @@
 # Conflux
 
-Conflux is an API-first multi-agent research system that combines local RAG, web search, and model knowledge into auditable Markdown and HTML reports.
+Conflux 是一个本地优先的研究工作台，将论文发现、知识入库、多源证据调研和项目进度审计连接起来，并生成可追溯的 Markdown、HTML 和结构化运行产物。
 
-The project is designed for personal use and resume demonstration: it shows source-aware agent orchestration, Evidence Graph tracing, FactCheck verification, chunk-level RAG citations, offline eval harnesses, and structured run traces.
+当前项目适合个人研究和工程能力展示，重点包括多源检索编排、Evidence Graph、FactCheck、Chunk 级引用、离线评测和结构化 Trace。可扩展 ResearchOps 架构改造已完成 M0-M2：Plugin SDK、Registry、动态来源协议、第一方 RAG/Web/论文评审插件和 YAML 工作流均已接入。
 
-## Technical Highlights
+## 当前技术能力
 
-- LangGraph fan-out/fan-in workflow for RAG, Web, and Model agents.
-- Source status protocol: every source is `success`, `failed`, or `fallback`.
-- Failed/fallback sources are excluded from Evidence Graph nodes and consensus voting.
-- Agent outputs include claim-level `evidence_refs`, `confidence`, and `limitations`.
-- RAG results carry chunk citations such as `[RAG:quantum-crypto.txt#chunk-p0-c0]`.
-- FactCheck performs deterministic leakage checks and a revision pass before human review.
-- Structured trace JSONL and run summary JSON make each run inspectable.
-- Offline eval scripts validate retrieval quality, report acceptance, leakage, and prompt-injection handling.
+- LangGraph 工作流并行执行 RAG 和 Web 检索，再由 Model Analyst 读取外部证据进行分析。
+- 来源状态协议包含 `success`、`low_relevance`、`no_evidence`、`failed` 和 `fallback`。
+- `no_evidence`、`failed` 和 `fallback` 来源不会进入 Evidence Graph 共识投票。
+- 来源结果包含声明级 `evidence_refs`、`confidence` 和 `limitations`。
+- RAG 结果使用 `[RAG:quantum-crypto.txt#chunk-p0-c0]` 等 Chunk 级引用。
+- FactCheck 包含确定性追溯检查和独立模型核查；当前尚未形成自动修订再核查循环。
+- Trace JSONL 和 Run Summary JSON 用于检查每次运行的阶段和来源状态。
+- 离线评测覆盖检索质量、报告验收、失败来源泄漏和 Prompt Injection。
 
-## Why LangGraph
+## 为什么使用 LangGraph
 
-Conflux uses LangGraph because the workflow needs explicit state boundaries, parallel branches, durable execution hooks, and resumable thread IDs. The current graph is checkpoint-ready through an in-memory checkpointer and records `run_id`, `thread_id`, checkpoint backend, source statuses, and stage progression in the report and run summary.
+当前调研流程需要明确状态边界、并行检索分支、条件路由和可选 Checkpointer。仓库已接入内存 Checkpointer，并记录 `run_id`、`thread_id`、Checkpoint 后端、来源状态和阶段进度；内存后端不会在进程重启后保留状态，因此当前不能宣称已经支持持久断点恢复。
 
 ```mermaid
 flowchart TD
     Q["User query"] --> D["dispatch"]
-    D --> R["RAG agent"]
-    D --> W["Web agent"]
-    D --> M["Model agent"]
-    R --> E["evidence merge"]
-    W --> E
-    M --> E
-    E --> A["claim arbitration"]
-    A --> S["synthesize report"]
-    S --> F["FactCheck + revision"]
-    F --> H{"needs review?"}
-    H -->|yes| U["human review hook"]
-    H -->|no| L["L4 deep research"]
-    U --> L
-    L --> O["Markdown + HTML + trace"]
+    D --> R["RAG retrieval"]
+    D --> W["Web retrieval"]
+    R --> M["Model Analyst"]
+    W --> M
+    M --> E["evidence merge + arbitration"]
+    E --> S["synthesize report"]
+    S --> F["FactCheck"]
+    F --> L{"L4 enabled?"}
+    L -->|yes| U["deep retrieval + analysis"]
+    L -->|no| O["Markdown + HTML + trace"]
+    U --> O
 ```
 
-## Resume-Demonstrable Capabilities
+## 当前可用于简历展示的能力
 
-- Built a reproducible API-first multi-agent research system with documented setup, sample reports, acceptance verification, and source-aware report generation.
-- Implemented LangGraph-based durable orchestration with fan-out/fan-in execution, checkpoint-ready state, structured streaming traces, and human review hooks.
-- Built a RAG pipeline with chunk-level citations and an offline retrieval evaluation baseline.
-- Designed a claim-level collaboration protocol with confidence scoring, conflict arbitration, and failed-source exclusion.
-- Developed an evaluation harness covering source failure, disagreement, hallucination leakage, prompt injection, retrieval quality, and acceptance gates.
+- 构建可复现的多源研究系统，包含样例报告、验收检查和来源感知的报告生成。
+- 使用 LangGraph 实现并行检索、分阶段分析、内存 Checkpoint 接口和结构化 Trace。
+- 构建包含混合检索、Chunk 级引用和离线检索评测的 RAG 流程。
+- 设计声明级证据协议、置信度、冲突仲裁和失败来源排除规则。
+- 建立覆盖来源失败、证据分歧、幻觉泄漏、Prompt Injection 和报告验收的评测 Harness。
 
-## Repository Layout
+## 仓库结构
 
 ```text
 .
@@ -54,6 +51,8 @@ flowchart TD
 ├── .env.example
 ├── examples/
 ├── docs/
+│   ├── architecture.md       # 已批准的长期架构蓝图
+│   └── execution_plan_v1.md  # 已批准，M0-M2 完成 / M3+ 未启动
 ├── data/documents/
 ├── prompts/
 ├── scripts/
@@ -74,15 +73,24 @@ flowchart TD
 └── tests/
 ```
 
-## Setup
+## 文档与后续方向
+
+- [PRODUCT.md](PRODUCT.md)：当前产品定位和设计原则。
+- [DESIGN.md](DESIGN.md)：当前工作台视觉和交互约束。
+- [docs/architecture.md](docs/architecture.md)：已批准的可扩展 ResearchOps 长期架构蓝图。
+- [docs/execution_plan_v1.md](docs/execution_plan_v1.md)：M0-M2 已完成、M3+ 尚未启动的实施方案和验收记录。
+
+蓝图负责把握项目方向，执行方案负责实现方法和验收标准。M1/M2 已完成核心协议、第一方能力、动态来源和 YAML 工作流；持久 Run Store、Evidence Ledger 等内容尚未开始实施。
+
+## 安装
 
 ```powershell
 python -m pip install -e ".[dev]"
 ```
 
-Copy `.env.example` to `.env` for local use only. Do not commit real keys.
+将 `.env.example` 复制为仅供本地使用的 `.env`，不要提交真实密钥。
 
-The default config uses an OpenAI-compatible provider:
+默认配置使用 OpenAI 兼容服务：
 
 ```yaml
 models:
@@ -95,13 +103,13 @@ embedding:
   base_url: https://www.dmxapi.cn/v1
 ```
 
-Required for real runs:
+真实运行需要配置：
 
 ```powershell
 $env:OPENAI_API_KEY="your-api-key"
 ```
 
-Optional overrides:
+可选覆盖项：
 
 ```powershell
 $env:CONFLUX_MODELS__REASONING__API_KEY="your-api-key"
@@ -110,27 +118,41 @@ $env:CONFLUX_EMBEDDING__API_KEY="your-api-key"
 $env:SERPAPI_API_KEY="your-serpapi-key"
 ```
 
-When keys are missing, the CLI exits with a clear credential message before attempting real API calls.
+缺少密钥时，CLI 会在发起真实 API 请求前退出并明确说明缺失的凭证。
 
-## Quick Start
+## 快速开始
 
-Build the local RAG index:
+构建本地 RAG 索引：
 
 ```powershell
 python -m conflux --index data/documents
 ```
 
-Run a Phase 2 research query:
+运行 Phase 2 调研查询：
 
 ```powershell
 python -m conflux "Explain how Conflux should arbitrate RAG, Web, and Model evidence." --mode phase2 --output-dir reports --stream-events
 ```
 
-Run the local research workbench:
+运行本地研究工作台：
 
 ```powershell
 python -m conflux.workbench --host 127.0.0.1 --port 8765
 ```
+
+## 插件与 YAML 工作流
+
+查看内置能力、加载用户插件目录并校验工作流：
+
+```powershell
+python -m conflux plugin list --verbose
+python -m conflux plugin list --plugin-dir path\to\plugins
+python -m conflux workflow validate tests\fixtures\architecture\workflows\research_query_v2.yaml --dry-run
+python -m conflux workflow run tests\fixtures\architecture\workflows\test_query.yaml --input-json '{"query":"quantum crypto"}'
+python -m conflux.paper_ingestion inbox --profile profiles\example_gis_agent.yaml --fixture tests\fixtures\papers\arxiv_sample.json --llm-review
+```
+
+也可以使用 `CONFLUX_PLUGIN_DIRS` 指定多个插件目录。M1/M2 插件是可信的进程内 Python 代码，Manifest 权限用于校验和审计，不提供沙箱；YAML 只组合已注册能力，不执行任意 Python。
 
 ## 项目进度审计
 
@@ -179,79 +201,75 @@ refresh:
   timezone: Asia/Shanghai
 ```
 
-“提取计划候选”会读取已配置的 Markdown 文档并返回总体目标、阶段目标和后续计划候选。候选项始终保持待确认状态，不会自动改写项目 YAML。`schedule_enabled`、`interval_minutes` 和 `next_refresh_at` 已预留给后续定时任务，当前不会启动后台调度。
+“分析项目计划”会读取已配置的 Markdown 文档，通过模型生成结构化计划预览，并结合代码、Git、测试、报告和研究产物进行证据核验。分析结果只有在用户明确选择并确认后才会写入项目 YAML。`schedule_enabled`、`interval_minutes` 和 `next_refresh_at` 已预留给后续定时任务，当前不会启动后台调度。
 
-Run with checkpoint-ready state:
+使用内存 Checkpointer 运行：
 
 ```powershell
 python -m conflux "Evaluate Loop Engineering in agent workflows." --thread-id demo-loop-001 --checkpoint-backend memory --output-dir reports
 ```
 
-Resume the same thread ID:
+该后端只在当前进程生命周期内保存状态。跨进程持久恢复属于已批准但尚未实施的方向，不是当前能力。
 
-```powershell
-python -m conflux "Evaluate Loop Engineering in agent workflows." --resume demo-loop-001 --checkpoint-backend memory --output-dir reports
-```
-
-Validate a generated report:
+验证生成的报告：
 
 ```powershell
 python -m conflux.acceptance path\to\report.md path\to\report.html
 ```
 
-## Quality Gates
+## 质量门禁
 
-Run unit tests:
+运行单元测试：
 
 ```powershell
 python -m pytest -q
 ```
 
-Run offline retrieval eval:
+运行离线检索评测：
 
 ```powershell
 python scripts/eval_retrieval.py --offline
 ```
 
-Run offline report eval:
+运行离线报告评测：
 
 ```powershell
 python scripts/eval_reports.py --offline
 ```
 
-Run an opt-in real API smoke test:
+显式选择运行真实 API 冒烟测试：
 
 ```powershell
 python scripts/eval_end_to_end.py --real
 ```
 
-## Current Offline Baselines
+## 当前离线基线
 
-The deterministic offline retrieval eval writes:
+确定性离线检索评测输出：
 
 - `reports/eval/retrieval_eval.md`
 - `reports/eval/retrieval_eval.json`
 
-The report eval writes:
+报告评测输出：
 
 - `reports/eval/report_eval.md`
 - `reports/eval/report_eval.json`
 
-These outputs include recall@k, hit rate, source coverage, irrelevant hit rate, acceptance pass rate, failed-source leakage, prompt-injection leakage, latency, and estimated cost.
+这些产物包含 recall@k、hit rate、来源覆盖、无关结果比例、验收通过率、失败来源泄漏、Prompt Injection 泄漏、延迟和成本估算。
 
-## Examples
+## 示例
 
-- [Three sources succeeded](examples/three_sources_success.md)
-- [Web failed, RAG + Model succeeded](examples/web_failed_rag_model_success.md)
-- [RAG and Web conflict](examples/rag_web_conflict.md)
+- [三个来源均成功](examples/three_sources_success.md)
+- [Web 失败，RAG 和 Model 成功](examples/web_failed_rag_model_success.md)
+- [RAG 与 Web 存在冲突](examples/rag_web_conflict.md)
 
-## Security
+## 安全
 
-- API keys belong in environment variables only.
-- `.env`, generated reports, Chroma databases, caches, and runtime artifacts are ignored by Git.
-- Prompt-injection text retrieved from RAG is treated as evidence text only, never as system instructions.
-- Failed and fallback sources remain visible to the user but cannot become Evidence Graph nodes.
+- API Key 只通过环境变量或本地 Secret 配置提供。
+- `.env`、生成报告、Chroma 数据库、缓存和运行产物均被 Git 忽略。
+- RAG 检索到的 Prompt Injection 文本只作为证据内容，不能成为系统指令。
+- `failed` 和 `fallback` 来源对用户可见，但不能成为 Evidence Graph 节点。
 
-## License
+## 许可证
 
-MIT. See [LICENSE](LICENSE).
+项目采用 MIT 许可证，参见 [LICENSE](LICENSE)。

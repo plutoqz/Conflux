@@ -1,5 +1,7 @@
 """RAG 索引模块 — ChromaDB 向量存储管理"""
 
+import hashlib
+
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 from langchain_chroma import Chroma
@@ -36,24 +38,55 @@ def index_documents(
     if not documents:
         return 0
 
-    # 去重：跳过已有相同 chunk_id 的文档
-    existing_ids = set()
+    # Content-hash-aware upsert: an unchanged chunk is skipped, while a
+    # changed chunk with the same logical id updates the existing vector.
+    existing_hashes: dict[str, str] = {}
     try:
-        existing = vector_store.get()
-        existing_ids = set(existing.get("ids", []))
+        existing = vector_store.get(include=["documents", "metadatas"])
+        for index, item_id in enumerate(existing.get("ids", [])):
+            metadata = (existing.get("metadatas") or [])[index] or {}
+            content = (existing.get("documents") or [])[index] or ""
+            existing_hashes[str(item_id)] = str(
+                metadata.get("content_hash") or _content_hash(str(content))
+            )
     except Exception:
         pass  # 空 collection 报错是正常的
 
-    new_docs = [d for d in documents if d.metadata.get("chunk_id") not in existing_ids]
-    if not new_docs:
+    additions: list[tuple[str, Document]] = []
+    updates: list[tuple[str, Document]] = []
+    for original in documents:
+        metadata = dict(original.metadata or {})
+        logical_id = str(metadata.get("chunk_id") or _content_hash(original.page_content))
+        digest = _content_hash(original.page_content)
+        metadata["content_hash"] = digest
+        metadata["content_version"] = digest[:16]
+        document = Document(page_content=original.page_content, metadata=metadata)
+        if logical_id not in existing_hashes:
+            additions.append((logical_id, document))
+        elif existing_hashes[logical_id] != digest:
+            updates.append((logical_id, document))
+
+    if not additions and not updates:
         return 0
 
-    ids = [d.metadata.get("chunk_id", str(hash(d.page_content))) for d in new_docs]
     batch_size = 5000
-    for start in range(0, len(new_docs), batch_size):
-        end = start + batch_size
-        vector_store.add_documents(new_docs[start:end], ids=ids[start:end])
-    return len(new_docs)
+    for start in range(0, len(additions), batch_size):
+        batch = additions[start : start + batch_size]
+        vector_store.add_documents(
+            [document for _, document in batch],
+            ids=[item_id for item_id, _ in batch],
+        )
+    if updates:
+        ids = [item_id for item_id, _ in updates]
+        docs = [document for _, document in updates]
+        try:
+            vector_store.update_documents(ids=ids, documents=docs)
+        except (AttributeError, TypeError, NotImplementedError):
+            # Older Chroma versions lack update_documents; delete/add keeps
+            # logical ids stable and remains idempotent.
+            vector_store.delete(ids=ids)
+            vector_store.add_documents(docs, ids=ids)
+    return len(additions) + len(updates)
 
 
 def clear_index(vector_store: Chroma) -> None:
@@ -67,3 +100,7 @@ def clear_index(vector_store: Chroma) -> None:
                 vector_store.delete(ids=ids[start : start + batch_size])
     except Exception:
         pass
+
+
+def _content_hash(text: str) -> str:
+    return hashlib.sha256(str(text).encode("utf-8")).hexdigest()

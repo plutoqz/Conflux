@@ -33,6 +33,9 @@ embedding:
 web_search:
   provider: duckduckgo
   max_results: 5
+  # Providers are attempted in order when the current source fails or yields
+  # too few relevant URLs. Bing/Google require their authorized API keys.
+  fallback_providers: [duckduckgo, bing, google, serpapi]
 
 vector_store:
   provider: chromadb

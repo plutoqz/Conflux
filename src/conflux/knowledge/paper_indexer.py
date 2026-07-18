@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,6 +83,8 @@ def paper_to_documents(
         "summary",
         content_scope="summary",
         full_text_status=full_text_status,
+        content=content,
+        paper_section="summary",
     )
     documents = [Document(page_content=content, metadata=metadata)]
     if decision.action == "full_text" and full_text.strip():
@@ -131,8 +134,12 @@ def promote_inbox(
         for doc in docs:
             sources.append(knowledge_source_from_metadata(doc.metadata))
 
-    artifacts = write_promoted_papers(documents, decisions, sources, out_dir=out_dir) if out_dir else None
     indexed_count = _index_documents(documents) if index else 0
+    if index:
+        for document in documents:
+            if document.metadata.get("full_text_requested"):
+                document.metadata["full_text_indexed"] = True
+    artifacts = write_promoted_papers(documents, decisions, sources, out_dir=out_dir) if out_dir else None
     return PaperPromotionResult(
         documents=documents,
         decisions=decisions,
@@ -164,6 +171,12 @@ def write_promoted_papers(
             "path": str(path),
             "chunk_id": chunk_id,
             "citation_ref": paper_citation_ref(doc.metadata),
+            "paper_section": doc.metadata.get("paper_section", ""),
+            "full_text_requested": bool(doc.metadata.get("full_text_requested")),
+            "full_text_downloaded": bool(doc.metadata.get("full_text_downloaded")),
+            "full_text_extracted": bool(doc.metadata.get("full_text_extracted")),
+            "full_text_indexed": bool(doc.metadata.get("full_text_indexed")),
+            "content_hash": doc.metadata.get("content_hash", ""),
         })
 
     manifest_path = root / "paper_promotion_manifest.json"
@@ -243,10 +256,17 @@ def _document_metadata(
     *,
     content_scope: str,
     full_text_status: str = "not_requested",
+    content: str = "",
+    paper_section: str = "",
+    char_start: int | None = None,
+    char_end: int | None = None,
 ) -> dict[str, Any]:
     safe_id = _safe_paper_id(paper.id)
     chunk_id = f"paper:{safe_id}#{scope}"
-    return {
+    full_text_requested = decision.action == "full_text"
+    full_text_downloaded = full_text_status in {"downloaded", "extracted", "success"} or bool(content_scope == "full_text" and content.strip())
+    full_text_extracted = bool(content_scope == "full_text" and content.strip()) or full_text_status in {"extracted", "success"}
+    metadata = {
         "source_type": "LocalPaper",
         "paper_id": paper.id,
         "paper_title": paper.title,
@@ -265,7 +285,18 @@ def _document_metadata(
         "source": f"papers/{safe_id}/{scope}",
         "content_scope": content_scope,
         "full_text_status": full_text_status,
+        "full_text_requested": full_text_requested,
+        "full_text_downloaded": full_text_downloaded,
+        "full_text_extracted": full_text_extracted,
+        "full_text_indexed": False,
+        "paper_section": paper_section or content_scope,
+        "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
     }
+    if char_start is not None:
+        metadata["char_start"] = char_start
+    if char_end is not None:
+        metadata["char_end"] = char_end
+    return metadata
 
 
 def _full_text_documents(
@@ -276,9 +307,9 @@ def _full_text_documents(
     *,
     chunk_chars: int = 3500,
 ) -> list[Document]:
-    chunks = _text_chunks(full_text, chunk_chars=chunk_chars)
+    chunks = _sectioned_text_chunks(full_text, chunk_chars=chunk_chars)
     documents = []
-    for idx, chunk in enumerate(chunks):
+    for idx, (chunk, section, char_start, char_end) in enumerate(chunks):
         scope = f"fulltext-{idx}"
         metadata = _document_metadata(
             paper,
@@ -287,6 +318,10 @@ def _full_text_documents(
             scope,
             content_scope="full_text",
             full_text_status="success",
+            content=chunk,
+            paper_section=section,
+            char_start=char_start,
+            char_end=char_end,
         )
         content = "\n".join([
             f"# {paper.title}",
@@ -309,6 +344,12 @@ def _document_markdown(doc: Document) -> str:
         f"chunk_id: {metadata.get('chunk_id', '')}",
         f"citation_ref: {paper_citation_ref(metadata)}",
         f"ingestion_action: {metadata.get('ingestion_action', '')}",
+        f"paper_section: {metadata.get('paper_section', '')}",
+        f"full_text_requested: {str(bool(metadata.get('full_text_requested'))).lower()}",
+        f"full_text_downloaded: {str(bool(metadata.get('full_text_downloaded'))).lower()}",
+        f"full_text_extracted: {str(bool(metadata.get('full_text_extracted'))).lower()}",
+        f"full_text_indexed: {str(bool(metadata.get('full_text_indexed'))).lower()}",
+        f"content_hash: {metadata.get('content_hash', '')}",
         "---",
         "",
         doc.page_content.rstrip(),
@@ -339,10 +380,12 @@ def _load_full_text(
         target_dir = Path(pdf_dir) if pdf_dir else Path(out_dir or "data/documents/papers") / "pdfs"
         pdf_path = PDFDownloader(target_dir).download(paper.id, paper.pdf_url)
     if pdf_path is None:
-        return "", "pdf_not_available"
+        return "", "not_downloaded"
 
     result = extract_pdf_text(pdf_path)
-    return result.text, result.status
+    if result.text.strip():
+        return result.text, "extracted"
+    return "", f"extraction_{result.status}"
 
 
 def _safe_paper_id(value: str) -> str:
@@ -372,10 +415,22 @@ def _as_list(value: Any) -> list[str]:
 
 
 def _text_chunks(text: str, *, chunk_chars: int) -> list[str]:
+    return [chunk for chunk, _, _, _ in _sectioned_text_chunks(text, chunk_chars=chunk_chars)]
+
+
+def _sectioned_text_chunks(text: str, *, chunk_chars: int) -> list[tuple[str, str, int, int]]:
     clean = text.strip()
     if not clean:
         return []
-    chunks = []
+    headings: list[tuple[int, str]] = []
+    heading_pattern = re.compile(
+        r"^(?:#{1,6}\s+|\d+(?:\.\d+)*\s+)(.+?)\s*$",
+        flags=re.MULTILINE,
+    )
+    for match in heading_pattern.finditer(clean):
+        headings.append((match.start(), _normalize_paper_section(match.group(1))))
+
+    chunks: list[tuple[str, str, int, int]] = []
     start = 0
     while start < len(clean):
         end = min(len(clean), start + chunk_chars)
@@ -385,6 +440,40 @@ def _text_chunks(text: str, *, chunk_chars: int) -> list[str]:
                 end = boundary
         chunk = clean[start:end].strip()
         if chunk:
-            chunks.append(chunk)
+            section = "full_text"
+            for position, heading in headings:
+                if position <= start:
+                    section = heading or section
+                else:
+                    break
+            actual_start = start
+            while actual_start < end and clean[actual_start].isspace():
+                actual_start += 1
+            chunks.append((chunk, section, actual_start, min(end, len(clean))))
         start = end
     return chunks
+
+
+def _normalize_paper_section(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+    if not text:
+        return "full_text"
+    aliases = (
+        ("abstract", "abstract"),
+        ("introduction", "introduction"),
+        ("method", "method"),
+        ("approach", "method"),
+        ("experiment", "results"),
+        ("result", "results"),
+        ("evaluation", "results"),
+        ("limitation", "limitations"),
+        ("challenge", "limitations"),
+        ("failure", "limitations"),
+        ("discussion", "discussion"),
+        ("future", "future_work"),
+        ("conclusion", "conclusion"),
+    )
+    for marker, normalized in aliases:
+        if marker in text:
+            return normalized
+    return text[:80]

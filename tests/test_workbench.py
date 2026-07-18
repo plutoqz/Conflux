@@ -120,6 +120,37 @@ def test_profile_optimizer_returns_reviewable_structured_suggestion(monkeypatch)
     assert draft["keywords"] == "knowledge graph\nnatural disaster"
 
 
+def test_profile_optimizer_retries_and_rejects_echoed_draft(monkeypatch):
+    from conflux.workbench import server
+
+    calls = []
+    echoed = {
+        "fields": ["cs.AI"],
+        "keywords": ["knowledge graph", "natural disaster"],
+        "description": "研究知识图谱在自然灾害应急响应中的作用",
+        "negative_keywords": [],
+        "optimization_notes": [],
+    }
+
+    def fake_probe(payload):
+        calls.append(payload)
+        return {"ok": True, "model": "profile-editor", "content": json.dumps(echoed, ensure_ascii=False)}
+
+    monkeypatch.setattr(server, "run_model_probe", fake_probe)
+    result = server.optimize_inline_profile({
+        "fields": "cs.AI",
+        "keywords": "knowledge graph\nnatural disaster",
+        "description": "研究知识图谱在自然灾害应急响应中的作用",
+        "base_url": "https://api.example.test/v1",
+        "api_key": "secret",
+        "model": "profile-editor",
+    })
+
+    assert result["ok"] is False
+    assert "过于接近" in result["error"]
+    assert len(calls) == 2
+
+
 def test_saved_inline_profile_preserves_negative_keywords_and_yaml_punctuation(tmp_path, monkeypatch):
     import yaml
     from conflux.workbench import server
@@ -493,6 +524,13 @@ def test_frontend_has_login_and_timeout_cancellation_flow():
     assert "'/api/login'" in app
     assert "requestQueryCancellation(runId)" in timeout_block
     assert "clearInterval(pollInterval)" not in timeout_block
+
+
+def test_frontend_query_failure_keeps_node_progress_visible():
+    app = Path("src/conflux/workbench/static/app.js").read_text(encoding="utf-8")
+
+    assert "const progress = $('queryOutput').textContent" in app
+    assert "=== 执行结果 ===" in app
 
 
 def test_dashboard_distribution_bars_and_metric_dividers_are_scaled():

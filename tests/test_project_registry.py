@@ -85,6 +85,20 @@ def test_plan_document_discovery_prefers_project_charter_case_insensitively(tmp_
     assert context["documents"][0]["content"].startswith("# 项目纲领")
 
 
+def test_plan_document_discovery_finds_architecture_charter_in_configured_docs(tmp_path):
+    from conflux.project_registry import ProjectDefinition, discover_plan_documents
+
+    root = tmp_path / "research"
+    (root / "docs").mkdir(parents=True)
+    (root / "docs" / "architecture.md").write_text("# 研究项目蓝图\n", encoding="utf-8")
+    project = ProjectDefinition(id="blueprint", name="Blueprint", path=str(root), document_dirs=["docs"])
+
+    context = discover_plan_documents(project)
+
+    assert context["charter"]["status"] == "available"
+    assert context["charter"]["path"] == "docs/architecture.md"
+
+
 def test_plan_analysis_filters_noise_and_gates_completed_evidence():
     from conflux.project_registry import normalize_plan_analysis
 

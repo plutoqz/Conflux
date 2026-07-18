@@ -64,8 +64,7 @@ function enterBusy(button, label = '处理中') {
   $('busyText').textContent = label;
   if (button) {
     button.disabled = true;
-    button.dataset.previousHtml = button.innerHTML;
-    button.innerHTML = '<span class="spin" aria-hidden="true"></span><span>' + escapeHtml(label) + '</span>';
+    button.setAttribute('aria-busy', 'true');
   }
 }
 
@@ -77,7 +76,7 @@ function leaveBusy(button) {
   }
   if (button) {
     button.disabled = false;
-    if (button.dataset.previousHtml) button.innerHTML = button.dataset.previousHtml;
+    button.removeAttribute('aria-busy');
   }
   refreshIcons();
 }
@@ -333,17 +332,30 @@ function webSearchState() {
   const configured = (statusCache && statusCache.defaults && statusCache.defaults.web_search) || {};
   const provider = ($('webSearchProvider') && $('webSearchProvider').value) || configured.provider || 'duckduckgo';
   const credentials = (statusCache && statusCache.credentials) || {};
-  const ready = provider !== 'serpapi' || Boolean(($('serpapiApiKey') && $('serpapiApiKey').value.trim()) || credentials.serpapi_api_key);
+  const ready = provider === 'duckduckgo' ||
+    (provider === 'serpapi' && Boolean(($('serpapiApiKey') && $('serpapiApiKey').value.trim()) || credentials.serpapi_api_key)) ||
+    (provider === 'bing' && Boolean(($('bingApiKey') && $('bingApiKey').value.trim()) || credentials.bing_api_key)) ||
+    (provider === 'google' && Boolean(($('googleApiKey') && $('googleApiKey').value.trim()) || credentials.google_api_key) &&
+      Boolean(($('googleCseId') && $('googleCseId').value.trim()) || credentials.google_cse_id));
   return { provider, ready };
 }
 
 function updateWebSearchFields() {
   const state = webSearchState();
   const serpapi = state.provider === 'serpapi';
+  const bing = state.provider === 'bing';
+  const google = state.provider === 'google';
   $('serpapiKeyField').hidden = !serpapi;
+  $('bingKeyField').hidden = !bing;
+  $('googleKeyField').hidden = !google;
+  $('googleCseField').hidden = !google;
   $('webSearchConfigHint').textContent = serpapi
     ? 'SerpAPI 需要 API Key；保存后仅写入本地工作台环境文件。'
-    : 'DuckDuckGo 无需 API Key，可直接用于网络搜索。';
+    : bing
+      ? 'Bing Web Search API 需要订阅密钥；主 provider 失败时仍可作为降级来源。'
+      : google
+        ? 'Google Programmable Search 需要 API Key 和 CSE ID。'
+        : 'DuckDuckGo 无需 API Key；若不可用，系统会尝试已配置的备用 provider。';
   updateQueryReadiness();
   if (statusCache) renderCapabilities(statusCache.credentials || {});
 }
@@ -379,7 +391,7 @@ function capabilityRows(credentials) {
   return [
     { name: '推理模型', detail: '生成、仲裁与事实核查', ready: Boolean(credentials.openai_api_key || credentials.reasoning_api_key), icon: 'brain-circuit', required: true },
     { name: '向量检索', detail: '检索本地论文和文档', ready: Boolean(credentials.embedding_api_key || credentials.openai_api_key), icon: 'database', required: false },
-    { name: '网络搜索', detail: search.provider === 'serpapi' ? 'SerpAPI 外部证据' : 'DuckDuckGo 外部证据', ready: search.ready, icon: 'globe-2', required: false },
+    { name: '网络搜索', detail: search.provider === 'serpapi' ? 'SerpAPI 外部证据' : search.provider === 'bing' ? 'Bing 外部证据' : search.provider === 'google' ? 'Google 外部证据' : 'DuckDuckGo + 可用备用来源', ready: search.ready, icon: 'globe-2', required: false },
     { name: '研究画像', detail: '指导论文搜索和评分', ready: profilesReady, icon: 'user-round-search', required: true }
   ];
 }
@@ -471,6 +483,10 @@ async function refreshStatus(options = {}) {
       $('embeddingBaseUrl').value = (nextStatus.defaults.embedding || {}).base_url || '';
       $('embeddingModel').value = (nextStatus.defaults.embedding || {}).model || '';
       $('webSearchProvider').value = (nextStatus.defaults.web_search || {}).provider || 'duckduckgo';
+      $('serpapiApiKey').value = '';
+      $('bingApiKey').value = '';
+      $('googleApiKey').value = '';
+      $('googleCseId').value = '';
       if (nextStatus.saved_depth) $('depthSelect').value = nextStatus.saved_depth;
     }
 
@@ -1084,6 +1100,8 @@ async function applySelectedProjectCharter() {
 async function auditSelectedProject() {
   if (!selectedProjectId) return;
   const button = $('auditSelectedProject');
+  $('projectAuditState').textContent = '审计中';
+  $('projectAuditState').className = 'status-pill warn';
   enterBusy(button, '审计项目');
   try {
     const data = await api('/api/progress/audit', {
@@ -1097,6 +1115,8 @@ async function auditSelectedProject() {
     selectProjectTab('evidence');
     toast(data.report.baseline_status === 'created' ? '项目基线已建立' : '进度审计已完成', 'ok');
   } catch (error) {
+    $('projectAuditState').textContent = '审计失败';
+    $('projectAuditState').className = 'status-pill error';
     toast('进度审计失败：' + error.message, 'err');
   } finally {
     leaveBusy(button);
@@ -1211,12 +1231,19 @@ function renderPapers(papers) {
   const rows = sorted.map((paper) => {
     const level = paper.reading_level || 'skip';
     const levelLabel = { deep: '精读', skim: '浏览', skip: '跳过' }[level] || level;
+    const reviewPending = paper.review_status === 'unreviewed' || paper.candidate_status === 'needs_deeper_review';
+    const reviewNotice = reviewPending
+      ? '<br><span class="status-pill warn">' + (paper.candidate_status === 'needs_deeper_review' ? '深度语义评审未完成' : '语义评审未完成') + '</span>' +
+        (paper.review_error_code ? '<br><small>错误码：' + escapeHtml(paper.review_error_code) + '</small>' : '') +
+        (paper.review_error ? '<br><small>' + escapeHtml(paper.review_error) + '</small>' : '') +
+        '<br><small>' + escapeHtml(paper.review_next_action || '可重试或人工复核') + '</small>'
+      : '';
     return '<tr><td><span class="reading-badge ' + escapeHtml(level) + '">' + escapeHtml(levelLabel) + '</span></td>' +
       '<td><strong>' + Number(paper.score || 0).toFixed(3) + '</strong></td>' +
       (hasLlm ? '<td>' + Number(paper.keyword_score || 0).toFixed(3) + '</td>' +
         '<td>' + (paper.llm_score != null ? Number(paper.llm_score).toFixed(0) : '-') + '</td>' : '') +
       '<td><strong>' + escapeHtml(paper.title) + '</strong><br><small>' + escapeHtml(paper.id) + '</small>' +
-      (paper.llm_reason ? '<br><small>' + escapeHtml(paper.llm_reason) + '</small>' : '') + '</td>' +
+      (paper.llm_reason ? '<br><small>' + escapeHtml(paper.llm_reason) + '</small>' : '') + reviewNotice + '</td>' +
       '<td>' + escapeHtml((paper.reasons || []).join('；')) + '</td></tr>';
   }).join('');
   $('papersTable').innerHTML = '<thead><tr><th>建议</th><th>综合分</th>' +
@@ -1361,6 +1388,9 @@ async function saveModel() {
       embedding_model: $('embeddingModel').value,
       web_search_provider: $('webSearchProvider').value,
       serpapi_api_key: $('serpapiApiKey').value,
+      bing_api_key: $('bingApiKey').value,
+      google_api_key: $('googleApiKey').value,
+      google_cse_id: $('googleCseId').value,
       depth: $('depthSelect').value
     });
     if (data.ok) {
@@ -1418,8 +1448,12 @@ async function runInbox() {
   hideInboxError();
   $('inboxEmpty').hidden = true;
   $('papersTable').innerHTML = '';
-  $('inboxStats').textContent = '';
-  $('inboxStats').className = 'status-pill neutral';
+  $('inboxStats').textContent = '正在发现论文…';
+  $('inboxStats').className = 'status-pill warn';
+  const started = Date.now();
+  const progressTimer = window.setInterval(() => {
+    $('inboxStats').textContent = '发现中 · ' + Math.max(1, Math.round((Date.now() - started) / 1000)) + ' 秒';
+  }, 1000);
   try {
     const payload = {
       profile_mode: mode,
@@ -1442,7 +1476,13 @@ async function runInbox() {
       hideInboxError();
       const seenText = Number(data.stats.previously_seen || 0) ? ' · 排除重复 ' + Number(data.stats.previously_seen) : '';
       $('inboxStats').textContent = '精读 ' + data.stats.deep + ' · 浏览 ' + data.stats.skim + ' · 跳过 ' + data.stats.skip + seenText;
-      $('inboxStats').className = 'status-pill ok';
+      if (data.review_status === 'unreviewed') {
+        $('inboxStats').textContent += ' · 语义评审未完成';
+        $('inboxStats').className = 'status-pill warn';
+        toast(data.review_next_action || '语义评审未完成，请配置模型后重试。', 'warn');
+      } else {
+        $('inboxStats').className = 'status-pill ok';
+      }
       $('promoteInbox').value = data.json_path;
       renderPapers(data.papers || []);
       await Promise.all([refreshStatus(), renderDashboard()]);
@@ -1453,6 +1493,7 @@ async function runInbox() {
   } catch (error) {
     showInboxError({ ok: false, error: error.message });
   } finally {
+    window.clearInterval(progressTimer);
     leaveBusy(button);
   }
 }
@@ -1501,6 +1542,10 @@ async function runPromotion() {
   enterBusy(button, '写入知识库');
   $('promotionOutput').hidden = true;
   $('promotionEmpty').hidden = true;
+  $('promotionStage').textContent = '入库中';
+  $('promotionStage').className = 'status-pill warn';
+  $('promotionOutput').hidden = false;
+  $('promotionOutput').textContent = '=== 入库进展 ===\n正在读取收件箱并准备写入…';
   try {
     const data = await api('/api/papers/promote', {
       inbox: $('promoteInbox').value,
@@ -1517,12 +1562,20 @@ async function runPromotion() {
     $('promotionOutput').hidden = false;
     $('promotionOutput').textContent = JSON.stringify(data, null, 2);
     if (data.ok) {
+      $('promotionStage').textContent = '已完成';
+      $('promotionStage').className = 'status-pill ok';
       await Promise.all([refreshStatus(), renderDashboard()]);
       toast('知识库已更新：' + Number(data.papers || 0) + ' 篇论文，' + Number(data.indexed || 0) + ' 条索引；已生成中文入库总结', 'ok');
-    } else toast(data.error || '知识入库失败', 'err');
+    } else {
+      $('promotionStage').textContent = '执行失败';
+      $('promotionStage').className = 'status-pill error';
+      toast(data.error || '知识入库失败', 'err');
+    }
   } catch (error) {
     $('promotionOutput').hidden = false;
     $('promotionOutput').textContent = error.message;
+    $('promotionStage').textContent = '执行失败';
+    $('promotionStage').className = 'status-pill error';
     toast('知识入库失败：' + error.message, 'err');
   } finally {
     leaveBusy(button);
@@ -1602,7 +1655,8 @@ async function runQuery() {
     runId = submitData.run_id;
     $('queryResultBand').dataset.activeRun = runId;
     activeQuery = { runId, cancelRequested: false, timedOut: false };
-    // Keep button busy — re-enabled when job completes
+    // The result panel owns the running state; the submit button is not a progress indicator.
+    leaveBusy(button);
   } catch (error) {
     $('queryStage').textContent = '提交失败';
     $('queryStage').className = 'status-pill error';
@@ -1619,10 +1673,12 @@ async function runQuery() {
   }, 1000);
 
   const nodeStates = {};
+  const nodeDetails = {};
   const updateNodeDisplay = () => {
     const order = ['rag_agent', 'web_agent', 'model_agent', 'evidence_merge', 'arbitration', 'synthesize', 'factcheck', 'deep_research'];
     const labels = { rag_agent:'RAG 检索', web_agent:'Web 搜索', model_agent:'模型推理', evidence_merge:'证据合并', arbitration:'三源仲裁', synthesize:'报告合成', factcheck:'事实核查', deep_research:'深化研究' };
-    const lines = order.filter(function(k){ return nodeStates[k]; }).map(function(k){ return (nodeStates[k]==='completed'?'\u2705':nodeStates[k]==='failed'?'\u274c':'\u23f3') + ' ' + labels[k]; });
+    Object.keys(nodeDetails).forEach(function(k){ if (labels[k]) labels[k] += ' · ' + nodeDetails[k]; });
+    const lines = order.filter(function(k){ return nodeStates[k]; }).map(function(k){ return (nodeStates[k]==='completed'?'\u2705':nodeStates[k]==='failed'?'\u274c':nodeStates[k]==='unreviewed'?'\u26a0\ufe0f':'\u23f3') + ' ' + labels[k]; });
     if (lines.length) {
       $('queryOutput').textContent = '=== 节点状态 ===\n' + lines.join('\n');
       $('queryOutput').hidden = false;
@@ -1636,6 +1692,14 @@ async function runQuery() {
       const evt = JSON.parse(event.data);
       if (evt.stage && evt.status) {
         nodeStates[evt.stage] = evt.status;
+        const metadata = evt.metadata || {};
+        if (metadata.kept_count != null || metadata.result_count != null) {
+          const kept = metadata.kept_count != null ? metadata.kept_count : '-';
+          const total = metadata.result_count != null ? metadata.result_count : '-';
+          nodeDetails[evt.stage] = '有效 ' + kept + ' / 召回 ' + total;
+        } else if (Array.isArray(metadata.provider_trace) && metadata.provider_trace.length) {
+          nodeDetails[evt.stage] = metadata.provider_trace.map((item) => item.provider + ':' + item.status).join(', ');
+        }
         updateNodeDisplay();
         $('queryStage').textContent = (evt.stage || '').replace(/_/g, ' ') + ' · ' + Math.round((Date.now() - started) / 1000) + ' 秒';
       }
@@ -1679,7 +1743,8 @@ async function runQuery() {
         } else {
           $('queryStage').textContent = job.status === 'failed' ? '执行失败' : '已取消';
           $('queryStage').className = 'status-pill error';
-          $('queryOutput').textContent = job.error || JSON.stringify(job, null, 2);
+          const progress = $('queryOutput').textContent || '=== 节点状态 ===\n未收到节点事件';
+          $('queryOutput').textContent = progress + '\n\n=== 执行结果 ===\n' + (job.error || JSON.stringify(job, null, 2));
           toast(job.error || '任务未完成', 'err');
         }
         await Promise.all([refreshStatus(), renderDashboard()]);
@@ -1874,6 +1939,9 @@ function bindEvents() {
   $('saveModel').addEventListener('click', saveModel);
   $('webSearchProvider').addEventListener('change', updateWebSearchFields);
   $('serpapiApiKey').addEventListener('input', updateQueryReadiness);
+  $('bingApiKey').addEventListener('input', updateQueryReadiness);
+  $('googleApiKey').addEventListener('input', updateQueryReadiness);
+  $('googleCseId').addEventListener('input', updateQueryReadiness);
   $('runInbox').addEventListener('click', runInbox);
   $('runProgressAudit').addEventListener('click', runProgressAudit);
   $('optimizeProfile').addEventListener('click', optimizeProfile);

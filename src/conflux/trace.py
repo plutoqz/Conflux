@@ -60,18 +60,37 @@ def event_from_state_key(
     status = "completed"
     text = str(value)
     lowered = text.lower()
+    parsed_result = None
 
     # For agent results, extract the actual SourceResult status from the
     # CONFLUX_SOURCE_RESULT_JSON marker instead of scanning raw text for
     # "failed"/"error" substrings (which may appear in body content).
     if key in ("rag_result", "web_result", "model_result"):
         status = _trace_agent_status(text)
+        try:
+            from .source_status import parse_source_results
+
+            parsed = parse_source_results(text)
+            parsed_result = parsed[-1] if parsed else None
+        except Exception:
+            parsed_result = None
     else:
-        if "failed" in lowered or "error" in lowered:
+        if "unreviewed" in lowered:
+            status = "unreviewed"
+        elif "failed" in lowered or "error" in lowered:
             status = "failed"
         elif "fallback" in lowered:
             status = "fallback"
     elapsed_ms = round((time.time() - started_at) * 1000, 2) if started_at else 0.0
+    metadata = {"state_key": key, "size": len(text)}
+    if parsed_result is not None:
+        metadata.update({
+            "source_status": parsed_result.status,
+            "result_count": (parsed_result.metadata or {}).get("result_count"),
+            "kept_count": (parsed_result.metadata or {}).get("kept_count"),
+            "provider_trace": (parsed_result.metadata or {}).get("provider_trace", []),
+            "query_plan": (parsed_result.metadata or {}).get("query_plan", {}),
+        })
     return TraceEvent(
         stage=stage,
         status=status,
@@ -80,8 +99,38 @@ def event_from_state_key(
         summary=text[:180].replace("\n", " "),
         run_id=run_id,
         thread_id=thread_id,
-        metadata={"state_key": key, "size": len(text)},
+        metadata=metadata,
     )
+
+
+def events_from_source_results(
+    source_results: dict[str, Any],
+    *,
+    run_id: str | None = None,
+    thread_id: str | None = None,
+    started_at: float | None = None,
+) -> list[TraceEvent]:
+    """Create one trace event per namespaced dynamic source result."""
+
+    events: list[TraceEvent] = []
+    for source, payload in source_results.items():
+        if not isinstance(payload, dict):
+            continue
+        status = str(payload.get("status") or "unknown")
+        content = str(payload.get("content") or payload.get("error") or "")
+        events.append(
+            TraceEvent(
+                stage="source_result",
+                status=status,
+                elapsed_ms=round((time.time() - started_at) * 1000, 2) if started_at else 0.0,
+                source=source,
+                summary=content[:180].replace("\n", " "),
+                run_id=run_id,
+                thread_id=thread_id,
+                metadata={"source_id": source, "dynamic": True},
+            )
+        )
+    return events
 
 
 def write_trace_jsonl(events: list[TraceEvent], path: str | Path) -> Path:

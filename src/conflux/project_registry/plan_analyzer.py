@@ -17,7 +17,10 @@ from typing import Any, Iterable
 from .models import ProjectDefinition
 
 
-CHARTER_NAMES = ("PROJECT.md", "AGENTS.md", "AGENT.md", "CLAUDE.md", "CODEX.md")
+CHARTER_NAMES = (
+    "PROJECT.md", "AGENTS.md", "AGENT.md", "CLAUDE.md", "CODEX.md",
+    "PROJECT_CHARTER.md", "architecture.md", "blueprint.md", "项目纲领.md",
+)
 SUPPLEMENT_NAMES = (
     "README.md",
     "PRODUCT.md",
@@ -86,6 +89,15 @@ def discover_plan_documents(
             break
 
     configured = _configured_document_paths(root, project)
+    # A project may keep its charter under the configured docs directory
+    # (Conflux uses docs/architecture.md). Resolve that local file before
+    # falling back to a generated draft.
+    if charter_path is None:
+        charter_names = {name.casefold() for name in CHARTER_NAMES}
+        for candidate in configured:
+            if candidate.name.casefold() in charter_names:
+                charter_path = candidate
+                break
     candidates: list[tuple[Path, str]] = []
     if charter_path is not None:
         candidates.append((charter_path, "charter"))

@@ -1,0 +1,24 @@
+api_version: conflux.dev/v1alpha1
+kind: Workflow
+id: research.query_v2
+version: 0.1.0
+description: Research query using plugin-based RAG + LLM semantic review
+inputs:
+  query:
+    type: string
+    required: true
+steps:
+  - id: local_search
+    uses: builtin.rag.search
+    mode: deterministic
+    config:
+      query: "{{query}}"
+      top_k: 5
+  - id: semantic_review
+    uses: builtin.research.evidence_review
+    mode: agentic
+    inputs:
+      query: "{{query}}"
+      candidates: "{{local_search.documents}}"
+policies:
+  budget_token_limit: 5000

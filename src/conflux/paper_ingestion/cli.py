@@ -37,6 +37,11 @@ def main(argv: list[str] | None = None) -> int:
     inbox_source.add_argument("--source", choices=["arxiv"], help="Real paper source")
     inbox_parser.add_argument("--out-dir", default="reports/papers", help="Directory for paper_inbox.md/json")
     inbox_parser.add_argument("--max-results", type=int, default=10, help="Maximum results for a real source")
+    inbox_parser.add_argument(
+        "--llm-review",
+        action="store_true",
+        help="Use builtin.paper.review for semantic relevance; unavailable models produce unreviewed items",
+    )
 
     promote_parser = subparsers.add_parser("promote", help="Promote a paper inbox into reviewable RAG documents")
     promote_parser.add_argument("inbox", help="Path to paper_inbox.json")
@@ -81,15 +86,21 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "inbox":
             if args.fixture:
-                result = build_inbox_from_fixture(args.profile, args.fixture, out_dir=args.out_dir)
+                result = build_inbox_from_fixture(
+                    args.profile, args.fixture, out_dir=args.out_dir, llm_review=args.llm_review
+                )
             else:
-                result = build_inbox_from_arxiv(args.profile, max_results=args.max_results, out_dir=args.out_dir)
+                result = build_inbox_from_arxiv(
+                    args.profile, max_results=args.max_results, out_dir=args.out_dir, llm_review=args.llm_review
+                )
             artifacts = result.artifacts
             print(f"Paper inbox built for profile: {result.profile.id}")
             print(f"Total loaded: {result.stats['total_loaded']}")
             print(f"After deduplication: {result.stats['after_dedup']}")
             print(f"After negative filters: {result.stats['after_filter']}")
             print(f"Deep/skim/skip: {result.stats['deep']}/{result.stats['skim']}/{result.stats['skip']}")
+            if args.llm_review:
+                print(f"Semantic review: {result.stats.get('review_status', 'unknown')} ")
             if artifacts:
                 print(f"Markdown inbox: {artifacts.markdown_path.resolve()}")
                 print(f"JSON inbox: {artifacts.json_path.resolve()}")

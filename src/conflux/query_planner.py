@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Any
 
 
 STOPWORDS = {
@@ -109,6 +110,15 @@ CONCEPT_EXPANSIONS = {
     "内涝": ["urban flooding", "pluvial flood", "inundation depth", "urban drainage"],
     "水文": ["hydrology", "hydrological modelling", "water level", "flood forecasting"],
     "flood": ["flood depth estimation", "inundation mapping", "water level", "hydrology"],
+    "局限性": ["limitations", "challenges", "failure modes", "research gaps", "future work"],
+    "局限": ["limitations", "challenges", "failure modes", "research gaps", "future work"],
+    "挑战": ["limitations", "challenges", "failure modes"],
+    "失败模式": ["failure modes", "failure cases", "limitations"],
+    "未来工作": ["future work", "research gaps", "open problems"],
+    "研究空白": ["research gaps", "open problems", "future work"],
+    "limitations": ["limitations", "challenges", "research gaps", "future work"],
+    "failure modes": ["failure modes", "failure cases", "limitations"],
+    "research gaps": ["research gaps", "open problems", "future work"],
 }
 
 
@@ -137,6 +147,33 @@ TECHNICAL_ENTITIES = {
 }
 
 
+BILINGUAL_TERM_MAP = {
+    "局限性": "limitations",
+    "局限": "limitations",
+    "挑战": "challenges",
+    "失败模式": "failure modes",
+    "未来工作": "future work",
+    "研究空白": "research gaps",
+    "评估": "evaluation",
+    "方法": "methods",
+    "模型": "model",
+    "算法": "algorithm",
+    "数据集": "dataset",
+    "论文": "paper",
+    "研究": "research",
+    "深度估计": "depth estimation",
+    "水深": "water depth",
+    "内涝": "urban flooding",
+    "洪水": "flood",
+    "水文": "hydrology",
+    "风险": "risk assessment",
+    "遥感": "remote sensing",
+    "知识图谱": "knowledge graph",
+    "智能体": "agent",
+    "大模型": "large language model",
+}
+
+
 @dataclass(frozen=True)
 class QueryPlan:
     """A small deterministic query plan for retrieval tools."""
@@ -145,6 +182,7 @@ class QueryPlan:
     subqueries: list[str]
     entities: list[str]
     terms: list[str]
+    bilingual_queries: list[str] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -152,7 +190,50 @@ class QueryPlan:
             "subqueries": self.subqueries,
             "entities": self.entities,
             "terms": self.terms,
+            "bilingual_queries": self.bilingual_queries or [],
         }
+
+
+class QueryRewriteProvider:
+    """Independent query-rewrite boundary for bilingual retrieval.
+
+    The deterministic path is always available. A caller may inject a cheap
+    chat model for higher-quality translation without coupling the retriever
+    to an LLM client.
+    """
+
+    def __init__(self, model: Any | None = None) -> None:
+        self.model = model
+
+    def rewrite(self, query: str, *, target: str = "rag") -> list[str]:
+        variants = _deterministic_bilingual_queries(query, target=target)
+        if self.model is None:
+            return variants
+        try:
+            generated = self._model_rewrite(query, target=target)
+        except Exception:
+            generated = []
+        return _dedupe_texts([*variants, *generated])
+
+    def _model_rewrite(self, query: str, *, target: str) -> list[str]:
+        from langchain_core.messages import HumanMessage
+
+        prompt = f"""Rewrite this research query for {target} retrieval.
+Return a JSON array with at most 3 concise queries: the original language,
+an English translation preserving technical terms, and a terminology-expanded
+variant. Do not answer the question or add prose.
+
+Query: {query}"""
+        response = self.model.invoke([HumanMessage(content=prompt)])
+        content = str(response.content if hasattr(response, "content") else response)
+        start, end = content.find("["), content.rfind("]")
+        if start >= 0 and end > start:
+            import json
+
+            value = json.loads(content[start : end + 1])
+            if isinstance(value, list):
+                return [str(item).strip() for item in value if str(item).strip()]
+        return [line.strip(" -*\t") for line in content.splitlines() if len(line.strip()) >= 8]
 
 
 def plan_queries(query: str, *, target: str, max_subqueries: int = 4) -> QueryPlan:
@@ -162,7 +243,8 @@ def plan_queries(query: str, *, target: str, max_subqueries: int = 4) -> QueryPl
     entities = sorted(extract_entities(query))
     expansions = _expansions_for_query(query)
 
-    subqueries = [query.strip()]
+    bilingual_queries = QueryRewriteProvider().rewrite(query, target=target)
+    subqueries = [query.strip(), *bilingual_queries]
     combined = _dedupe_words([*entities, *expansions])
     if combined:
         subqueries.append(" ".join(combined[:12]))
@@ -190,6 +272,7 @@ def plan_queries(query: str, *, target: str, max_subqueries: int = 4) -> QueryPl
         subqueries=clean or [query],
         entities=entities,
         terms=terms,
+        bilingual_queries=bilingual_queries,
     )
 
 
@@ -258,7 +341,9 @@ def is_academic_query(text: str) -> bool:
     markers = {
         "论文", "文献", "研究", "方法", "实验", "基准", "数据集", "综述",
         "paper", "study", "research", "method", "experiment", "benchmark", "dataset", "review",
-        "doi", "arxiv", "洪水", "水深", "水文", "遥感",
+        "doi", "arxiv", "limitation", "limitations", "challenge", "failure mode", "future work",
+        "research gap", "evaluation", "algorithm", "model", "洪水", "水深", "水文", "遥感",
+        "局限", "挑战", "失败模式", "未来工作", "研究空白", "评估", "算法", "模型", "风险",
     }
     return any(marker in lower for marker in markers)
 
@@ -290,6 +375,39 @@ def _expansions_for_query(query: str) -> list[str]:
         if trigger.lower() in lower or trigger in query:
             expansions.extend(values)
     return _dedupe_words(expansions)
+
+
+def _deterministic_bilingual_queries(query: str, *, target: str) -> list[str]:
+    if target not in {"rag", "web"}:
+        return []
+    original = str(query or "").strip()
+    if not original:
+        return []
+    translated = original
+    for source, target_term in sorted(BILINGUAL_TERM_MAP.items(), key=lambda item: len(item[0]), reverse=True):
+        translated = translated.replace(source, f" {target_term} ")
+    translated = re.sub(r"\s+", " ", translated).strip()
+    expansions = _expansions_for_query(original)
+    terms = sorted(important_terms(original))
+    expanded = " ".join(_dedupe_words([*expansions, *terms])[:14])
+    candidates = []
+    if translated.casefold() != original.casefold() and translated:
+        candidates.append(translated)
+    if expanded:
+        candidates.append(expanded)
+    return _dedupe_texts(candidates)
+
+
+def _dedupe_texts(items: list[str]) -> list[str]:
+    clean: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        normalized = re.sub(r"\s+", " ", str(item or "")).strip()
+        key = normalized.casefold()
+        if normalized and key not in seen:
+            seen.add(key)
+            clean.append(normalized)
+    return clean
 
 
 def _priority_domains_for_query(query: str) -> list[str]:

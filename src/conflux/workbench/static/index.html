@@ -302,7 +302,7 @@
             <div class="form-actions"><button id="runPromote" class="button primary" type="button"><i data-lucide="database-zap" aria-hidden="true"></i><span>开始入库</span></button></div>
           </section>
           <section class="surface result-surface" id="promotionResultBand" aria-labelledby="promotionResultTitle">
-            <div class="section-heading"><div><h2 id="promotionResultTitle">入库记录</h2><p>操作结果和可审计日志会保留在这里。</p></div></div>
+            <div class="section-heading"><div><h2 id="promotionResultTitle">入库记录</h2><p>操作结果和可审计日志会保留在这里。</p></div><span id="promotionStage" class="status-pill neutral">等待开始</span></div>
             <div id="promotionEmpty" class="empty-state"><i data-lucide="database" aria-hidden="true"></i><strong>等待入库任务</strong><p>先完成论文发现，再选择需要沉淀的论文。</p></div>
             <pre id="promotionOutput" hidden></pre>
           </section>
@@ -623,8 +623,11 @@
             <fieldset class="form-section settings-subsection">
               <legend>网络搜索</legend>
               <div class="field-grid two">
-                <label>搜索提供商<select id="webSearchProvider"><option value="duckduckgo">DuckDuckGo（无需密钥）</option><option value="serpapi">SerpAPI</option></select></label>
+                <label>搜索提供商<select id="webSearchProvider"><option value="duckduckgo">DuckDuckGo（无需密钥）</option><option value="bing">Bing Web Search API</option><option value="google">Google Programmable Search</option><option value="serpapi">SerpAPI</option></select></label>
                 <label id="serpapiKeyField">SerpAPI Key<input id="serpapiApiKey" type="password" autocomplete="off" placeholder="使用已保存凭证，或输入新值"></label>
+                <label id="bingKeyField" hidden>Bing API Key<input id="bingApiKey" type="password" autocomplete="off" placeholder="使用已保存凭证，或输入新值"></label>
+                <label id="googleKeyField" hidden>Google API Key<input id="googleApiKey" type="password" autocomplete="off" placeholder="使用已保存凭证，或输入新值"></label>
+                <label id="googleCseField" hidden>Google CSE ID<input id="googleCseId" type="text" autocomplete="off" placeholder="Programmable Search Engine ID"></label>
               </div>
               <p id="webSearchConfigHint" class="field-hint">DuckDuckGo 无需 API Key，可直接用于网络搜索。</p>
             </fieldset>

@@ -10,6 +10,8 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import Callable
 from urllib.parse import urlparse
 
 from langchain_core.tools import tool
@@ -27,6 +29,72 @@ from ..query_planner import (
     rewrite_queries,
 )
 from ..source_status import AgentClaim, SourceResult
+
+
+@dataclass(frozen=True)
+class SearchProvider:
+    """Small adapter boundary for a web search provider."""
+
+    name: str
+    search: Callable[[str, int], list[dict]]
+    credential_env: tuple[str, ...] = ()
+
+    def available(self) -> bool:
+        return not self.credential_env or all(os.environ.get(key, "").strip() for key in self.credential_env)
+
+
+def _search_bing(query: str, max_results: int = 5) -> list[dict]:
+    """Search Bing through the authorized Web Search API."""
+
+    api_key = os.environ.get("BING_SEARCH_API_KEY", "").strip()
+    if not api_key:
+        return [{"title": "Search unavailable", "snippet": "BING_SEARCH_API_KEY is not set", "url": "", "status": "failed"}]
+    params = urllib.parse.urlencode({
+        "q": query,
+        "count": max_results,
+        "textDecorations": "false",
+        "textFormat": "Raw",
+    })
+    request = urllib.request.Request(
+        f"https://api.bing.microsoft.com/v7.0/search?{params}",
+        headers={"Ocp-Apim-Subscription-Key": api_key, "User-Agent": "Conflux/0.1 research-assistant"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    return [
+        {
+            "title": item.get("name", ""),
+            "snippet": item.get("snippet", ""),
+            "url": item.get("url", ""),
+            "provider_source": "bing",
+        }
+        for item in ((payload.get("webPages") or {}).get("value") or [])[:max_results]
+    ]
+
+
+def _search_google(query: str, max_results: int = 5) -> list[dict]:
+    """Search Google through the authorized Programmable Search API."""
+
+    api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+    cx = (os.environ.get("GOOGLE_CSE_ID", "") or os.environ.get("GOOGLE_CX", "")).strip()
+    if not api_key or not cx:
+        return [{"title": "Search unavailable", "snippet": "GOOGLE_API_KEY or GOOGLE_CSE_ID is not set", "url": "", "status": "failed"}]
+    params = urllib.parse.urlencode({"key": api_key, "cx": cx, "q": query, "num": min(10, max_results)})
+    request = urllib.request.Request(
+        f"https://www.googleapis.com/customsearch/v1?{params}",
+        headers={"User-Agent": "Conflux/0.1 research-assistant"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    return [
+        {
+            "title": item.get("title", ""),
+            "snippet": item.get("snippet", ""),
+            "url": item.get("link", ""),
+            "provider_source": "google",
+        }
+        for item in (payload.get("items") or [])[:max_results]
+    ]
 
 
 def _search_duckduckgo(query: str, max_results: int = 5) -> list[dict]:
@@ -90,9 +158,17 @@ def search_web(query: str) -> str:
     max_results = int(get("web_search", "max_results", default=5))
     plan = plan_queries(query, target="web")
     retry_queries: list[str] = []
+    preferred_provider = str(provider)
+    provider_trace: list[dict] = []
+    used_providers: list[str] = []
 
     try:
-        results = _search_with_plan(str(provider), plan.subqueries, max_results)
+        results, provider_trace, used_providers = _search_cascade(
+            plan.subqueries,
+            max_results,
+            preferred=preferred_provider,
+            required_results=max(1, min(2, max_results)),
+        )
         if is_academic_query(query):
             academic_results = _search_academic_sources(query, max_results=max_results)
             results = _merge_web_results(academic_results, results)
@@ -100,7 +176,7 @@ def search_web(query: str) -> str:
         return SourceResult(
             source="Web",
             status="failed",
-            detail=str(provider),
+            detail=preferred_provider,
             error=f"{type(exc).__name__}: {exc}",
             content="Web search failed.",
         ).to_tool_text()
@@ -109,10 +185,15 @@ def search_web(query: str) -> str:
         return SourceResult(
             source="Web",
             status="no_evidence",
-            detail=str(provider),
+            detail=preferred_provider,
             error="No web search results were found.",
             content="No web search results were found.",
-            metadata={"query_plan": plan.to_dict(), "result_count": 0},
+            metadata={
+                "query_plan": plan.to_dict(),
+                "result_count": 0,
+                "provider_trace": provider_trace,
+                "provider_chain": used_providers,
+            },
         ).to_tool_text()
 
     failed_results = [item for item in results if item.get("status") == "failed" or not item.get("url")]
@@ -121,13 +202,34 @@ def search_web(query: str) -> str:
         return SourceResult(
             source="Web",
             status="failed",
-            detail=str(provider),
+            detail=preferred_provider,
             error=error or "Web search is unavailable.",
             content=error or "Web search is unavailable.",
-            metadata={"query_plan": plan.to_dict(), "result_count": len(results)},
+            metadata={
+                "query_plan": plan.to_dict(),
+                "result_count": len(results),
+                "provider_trace": provider_trace,
+                "provider_chain": used_providers,
+            },
         ).to_tool_text()
 
     kept_results, filtered_results = _filter_web_results(query, results)
+    # A provider may return URLs that all fail semantic/domain filtering. Try
+    # an unused configured provider before spending rewrite attempts on the
+    # same backend.
+    if len(kept_results) < 2 or (kept_results and kept_results[0].get("_score", 0.0) < 0.55):
+        fallback_results, fallback_trace, fallback_used = _search_cascade(
+            plan.subqueries,
+            max_results,
+            preferred=preferred_provider,
+            excluded=set(used_providers),
+            required_results=max(1, min(2, max_results)),
+        )
+        provider_trace.extend(fallback_trace)
+        used_providers.extend(item for item in fallback_used if item not in used_providers)
+        if fallback_results:
+            results = _merge_web_results(results, fallback_results)
+            kept_results, filtered_results = _filter_web_results(query, results)
     for attempt in range(1, int(get("research", "max_rewrite_attempts", default=1)) + 1):
         top_attempt = kept_results[0].get("_score", 0.0) if kept_results else 0.0
         if len(kept_results) >= 2 and top_attempt >= 0.55:
@@ -135,7 +237,15 @@ def search_web(query: str) -> str:
         rewritten = rewrite_queries(query, target="web", attempt=attempt)
         retry_queries.extend(rewritten)
         try:
-            retry_results = _search_with_plan(str(provider), rewritten, max_results)
+            retry_results, retry_trace, retry_used = _search_cascade(
+                rewritten,
+                max_results,
+                preferred=preferred_provider,
+                excluded=set(used_providers),
+                required_results=max(1, min(2, max_results)),
+            )
+            provider_trace.extend(retry_trace)
+            used_providers.extend(item for item in retry_used if item not in used_providers)
         except Exception:
             break
         results = _merge_web_results(results, retry_results)
@@ -144,7 +254,7 @@ def search_web(query: str) -> str:
         return SourceResult(
             source="Web",
             status="no_evidence",
-            detail=str(provider),
+            detail=preferred_provider,
             error="Web search ran, but all results were off-topic or low quality.",
             content="Web search returned results, but none passed relevance and quality filtering.",
             metadata={
@@ -155,6 +265,8 @@ def search_web(query: str) -> str:
                 "filtered_domains": sorted({_domain(item.get("url", "")) for item in filtered_results if item.get("url")}),
                 "top_relevance_score": max((item.get("_score", 0.0) for item in filtered_results), default=0.0),
                 "filtered_results": _filtered_results_metadata(filtered_results),
+                "provider_trace": provider_trace,
+                "provider_chain": used_providers,
             },
         ).to_tool_text()
 
@@ -208,7 +320,7 @@ def search_web(query: str) -> str:
     return SourceResult(
         source="Web",
         status=status,
-        detail=str(provider),
+        detail=preferred_provider,
         content="\n".join(parts),
         evidence_class=_strongest_evidence_class(claims),
         claims=claims,
@@ -222,6 +334,8 @@ def search_web(query: str) -> str:
             "top_relevance_score": top_score,
             "citations": citations,
             "filtered_results": _filtered_results_metadata(filtered_results),
+            "provider_trace": provider_trace,
+            "provider_chain": used_providers,
         },
     ).to_tool_text()
 
@@ -293,6 +407,112 @@ def _search_semantic_scholar(query: str, max_results: int) -> list[dict]:
     return results
 
 
+def _search_serpapi_sync(query: str, max_results: int = 5) -> list[dict]:
+    return asyncio.run(_search_serpapi(query, max_results=max_results))
+
+
+def _provider(name: str) -> SearchProvider | None:
+    normalized = {
+        "ddgs": "duckduckgo",
+        "duckduckgo": "duckduckgo",
+        "bing_api": "bing",
+        "google_cse": "google",
+        "serp": "serpapi",
+    }.get(name.casefold(), name.casefold())
+    providers = {
+        "duckduckgo": SearchProvider("duckduckgo", _search_duckduckgo),
+        "bing": SearchProvider("bing", _search_bing, ("BING_SEARCH_API_KEY",)),
+        "google": SearchProvider("google", _search_google, ("GOOGLE_API_KEY",)),
+        "serpapi": SearchProvider("serpapi", _search_serpapi_sync, ("SERPAPI_API_KEY",)),
+    }
+    # Google requires both credentials; handle the second one here so an
+    # incomplete configuration is represented as an explicit skipped provider.
+    if normalized == "google":
+        cx = (os.environ.get("GOOGLE_CSE_ID", "") or os.environ.get("GOOGLE_CX", "")).strip()
+        if not cx:
+            return SearchProvider("google", _search_google, ("GOOGLE_API_KEY", "GOOGLE_CSE_ID"))
+    return providers.get(normalized)
+
+
+def _provider_chain(preferred: str) -> list[str]:
+    configured = get("web_search", "fallback_providers", default=None)
+    if isinstance(configured, str):
+        configured = [item.strip() for item in configured.split(",") if item.strip()]
+    if not isinstance(configured, (list, tuple)) or not configured:
+        configured = ["duckduckgo", "bing", "google", "serpapi"]
+    values = [preferred, *[str(item) for item in configured]]
+    result: list[str] = []
+    for value in values:
+        normalized = {
+            "ddgs": "duckduckgo",
+            "bing_api": "bing",
+            "google_cse": "google",
+            "serp": "serpapi",
+        }.get(value.casefold(), value.casefold())
+        if normalized and normalized not in result:
+            result.append(normalized)
+    return result
+
+
+def _valid_provider_results(results: list[dict]) -> list[dict]:
+    return [
+        item for item in results
+        if item.get("status") != "failed" and str(item.get("url") or "").strip()
+    ]
+
+
+def _search_cascade(
+    subqueries: list[str],
+    max_results: int,
+    *,
+    preferred: str,
+    excluded: set[str] | None = None,
+    required_results: int = 2,
+) -> tuple[list[dict], list[dict], list[str]]:
+    """Run configured providers in order and retain an auditable trace."""
+
+    results: list[dict] = []
+    trace: list[dict] = []
+    used: list[str] = []
+    excluded = excluded or set()
+    for name in _provider_chain(preferred):
+        if name in excluded:
+            continue
+        provider = _provider(name)
+        if provider is None:
+            trace.append({"provider": name, "status": "unsupported", "result_count": 0})
+            continue
+        if not provider.available():
+            trace.append({
+                "provider": name,
+                "status": "skipped_missing_credentials",
+                "result_count": 0,
+                "required_env": list(provider.credential_env),
+            })
+            continue
+        try:
+            batch = _search_with_plan(name, subqueries, max_results)
+            used.append(name)
+            results = _merge_web_results(results, batch)
+            valid_count = len(_valid_provider_results(batch))
+            trace.append({
+                "provider": name,
+                "status": "success" if valid_count else "no_results",
+                "result_count": valid_count,
+            })
+            if len(_valid_provider_results(results)) >= required_results:
+                break
+        except Exception as exc:
+            used.append(name)
+            trace.append({
+                "provider": name,
+                "status": "failed",
+                "result_count": 0,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+    return results, trace, used
+
+
 def _search_openalex(query: str, max_results: int) -> list[dict]:
     params = urllib.parse.urlencode({"search": query, "per-page": max_results})
     payload = _fetch_json(f"https://api.openalex.org/works?{params}")
@@ -359,10 +579,10 @@ def _search_with_plan(provider: str, subqueries: list[str], max_results: int) ->
     seen = set()
     per_query = max(2, max_results)
     for subquery in subqueries:
-        if provider == "serpapi":
-            batch = asyncio.run(_search_serpapi(subquery, max_results=per_query))
-        else:
-            batch = _search_duckduckgo(subquery, max_results=per_query)
+        adapter = _provider(provider)
+        if adapter is None:
+            raise ValueError(f"Unsupported web search provider: {provider}")
+        batch = adapter.search(subquery, per_query)
         for item in batch:
             url = str(item.get("url") or "")
             key = url or f"{item.get('title', '')}|{item.get('snippet', '')}"
@@ -371,6 +591,7 @@ def _search_with_plan(provider: str, subqueries: list[str], max_results: int) ->
             seen.add(key)
             enriched = dict(item)
             enriched.setdefault("matched_query", subquery)
+            enriched.setdefault("provider_source", adapter.name)
             results.append(enriched)
         if len(results) >= max_results * 2:
             break

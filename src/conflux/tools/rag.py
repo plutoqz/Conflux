@@ -8,6 +8,7 @@ from langchain_core.tools import tool
 
 from ..config import get
 from ..query_planner import (
+    QueryRewriteProvider,
     entity_score,
     extract_entities,
     important_terms,
@@ -19,7 +20,7 @@ from ..rag.retriever import HybridRetriever
 from ..source_status import AgentClaim, SourceResult
 
 
-def create_rag_tool(retriever: HybridRetriever):
+def create_rag_tool(retriever: HybridRetriever, query_rewriter: QueryRewriteProvider | None = None):
     """Create a RAG search tool bound to a specific retriever."""
 
     @tool
@@ -27,11 +28,19 @@ def create_rag_tool(retriever: HybridRetriever):
         """Search the local knowledge base and return chunk-level evidence."""
 
         plan = plan_queries(query, target="rag")
+        rewrite_provider = query_rewriter or QueryRewriteProvider()
+        model_rewrites = rewrite_provider.rewrite(query, target="rag")
+        retrieval_queries = list(plan.subqueries)
+        existing_queries = {item.casefold() for item in retrieval_queries}
+        for variant in model_rewrites:
+            if variant.casefold() not in existing_queries:
+                retrieval_queries.append(variant)
+                existing_queries.add(variant.casefold())
         retry_queries: list[str] = []
         try:
-            docs = _search_with_plan(retriever, plan.subqueries)
+            docs = _search_with_plan(retriever, retrieval_queries)
             for attempt in range(1, int(get("research", "max_rewrite_attempts", default=1)) + 1):
-                scored_attempt = _score_docs(query, docs)
+                scored_attempt = _score_docs(query, docs, query_variants=model_rewrites)
                 top_attempt = scored_attempt[0]["score"] if scored_attempt else 0.0
                 if top_attempt >= 0.55:
                     break
@@ -54,10 +63,14 @@ def create_rag_tool(retriever: HybridRetriever):
                 detail="Local Chroma hybrid retrieval",
                 error="No local knowledge-base chunks were found for the planned queries.",
                 content="No relevant local knowledge-base chunks were found.",
-                metadata={"query_plan": plan.to_dict(), "result_count": 0},
+                metadata={
+                    "query_plan": plan.to_dict(),
+                    "query_rewrites": model_rewrites,
+                    "result_count": 0,
+                },
             ).to_tool_text()
 
-        scored_docs = _limit_per_paper(_score_docs(query, docs), limit=2)
+        scored_docs = _limit_per_paper(_score_docs(query, docs, query_variants=model_rewrites), limit=2)
         kept_docs = [item for item in scored_docs if item["score"] >= 0.25]
         top_score = scored_docs[0]["score"] if scored_docs else 0.0
         sources = sorted({str(doc.metadata.get("source", "unknown")) for doc in docs})
@@ -75,6 +88,7 @@ def create_rag_tool(retriever: HybridRetriever):
                 ),
                 metadata={
                     "query_plan": plan.to_dict(),
+                    "query_rewrites": model_rewrites,
                     "result_count": len(docs),
                     "kept_count": 0,
                     "dropped_count": len(docs),
@@ -151,6 +165,7 @@ def create_rag_tool(retriever: HybridRetriever):
             claims=claims,
             metadata={
                 "query_plan": plan.to_dict(),
+                "query_rewrites": model_rewrites,
                 "retry_queries": retry_queries,
                 "result_count": len(docs),
                 "kept_count": len(kept_docs),
@@ -167,28 +182,46 @@ def create_rag_tool(retriever: HybridRetriever):
 
 def _search_with_plan(retriever: HybridRetriever, subqueries: list[str]):
     docs = []
-    seen = set()
+    positions: dict[str, int] = {}
     for subquery in subqueries:
         for doc in retriever.search(subquery):
             key = str(doc.metadata.get("chunk_id") or doc.metadata.get("source") or doc.page_content[:120])
-            if key in seen:
-                continue
-            seen.add(key)
             metadata = dict(doc.metadata or {})
             metadata.setdefault("matched_query", subquery)
             doc.metadata = metadata
+            if key in positions:
+                current_index = positions[key]
+                current = docs[current_index]
+                current_score = float((current.metadata or {}).get("query_dense_score") or 0.0)
+                new_score = float(metadata.get("query_dense_score") or 0.0)
+                matched = str((current.metadata or {}).get("matched_query") or "")
+                if subquery not in matched and new_score <= current_score:
+                    current.metadata["matched_query"] = f"{matched}; {subquery}".strip("; ")
+                    continue
+                if new_score <= current_score:
+                    continue
+                metadata["matched_query"] = f"{matched}; {subquery}".strip("; ")
+                docs[current_index] = doc
+                continue
+            positions[key] = len(docs)
             docs.append(doc)
     return docs
 
 
 def _merge_documents(existing, additional):
     merged = []
-    seen = set()
+    positions: dict[str, int] = {}
     for doc in [*existing, *additional]:
         key = str(doc.metadata.get("chunk_id") or doc.metadata.get("source") or doc.page_content[:120])
-        if key in seen:
+        if key in positions:
+            index = positions[key]
+            current = merged[index]
+            current_score = float((current.metadata or {}).get("query_dense_score") or 0.0)
+            new_score = float((doc.metadata or {}).get("query_dense_score") or 0.0)
+            if new_score > current_score:
+                merged[index] = doc
             continue
-        seen.add(key)
+        positions[key] = len(merged)
         merged.append(doc)
     return merged
 
@@ -298,9 +331,11 @@ def _extract_metric(text: str) -> str:
     return match.group(0) if match else ""
 
 
-def _score_docs(query: str, docs) -> list[dict]:
-    query_terms = important_terms(query)
-    query_entities = extract_entities(query)
+def _score_docs(query: str, docs, *, query_variants: list[str] | None = None) -> list[dict]:
+    bilingual = query_variants if query_variants is not None else QueryRewriteProvider().rewrite(query, target="rag")
+    scoring_query = " ".join([query, *bilingual])
+    query_terms = important_terms(scoring_query)
+    query_entities = extract_entities(scoring_query)
     scored = []
     for doc in docs:
         text = doc.page_content or ""
@@ -315,14 +350,28 @@ def _score_docs(query: str, docs) -> list[dict]:
         entity = entity_score(query_entities, full_text)
         topic = _topic_score(query_terms, query_entities, source)
         dense_hint = _dense_hint(doc)
-        final = (0.35 * dense_hint) + (0.30 * lexical) + (0.20 * entity) + (0.15 * topic)
+        cross_language = _is_cross_language_query(query, text)
+        if dense_hint is None:
+            # Do not invent a dense score for retriever fakes or legacy docs.
+            dense_weight, lexical_weight, entity_weight, topic_weight = (0.0, 0.55, 0.25, 0.20)
+        elif cross_language:
+            dense_weight, lexical_weight, entity_weight, topic_weight = (0.72, 0.13, 0.05, 0.10)
+        else:
+            dense_weight, lexical_weight, entity_weight, topic_weight = (0.35, 0.30, 0.20, 0.15)
+        dense_value = dense_hint if dense_hint is not None else 0.0
+        final = (
+            dense_weight * dense_value
+            + lexical_weight * lexical
+            + entity_weight * entity
+            + topic_weight * topic
+        )
         if entity > 0 and lexical > 0:
             final += 0.08
         scored.append({
             "doc": doc,
             "score": round(min(1.0, final), 3),
             "breakdown": {
-                "dense_hint": round(dense_hint, 3),
+                "dense_hint": round(dense_hint, 3) if dense_hint is not None else None,
                 "lexical_overlap": round(lexical, 3),
                 "entity_match": round(entity, 3),
                 "topic_match": round(topic, 3),
@@ -339,9 +388,10 @@ def _topic_score(query_terms: set[str], query_entities: set[str], source: str) -
     return max(lexical, entity)
 
 
-def _dense_hint(doc) -> float:
+def _dense_hint(doc) -> float | None:
     metadata = doc.metadata or {}
-    for key in ("relevance_score", "score", "dense_score", "bm25_score", "rrf_score"):
+    # Only scores produced for the current vector query are valid here.
+    for key in ("query_dense_score", "dense_score"):
         raw = metadata.get(key)
         if raw is None:
             continue
@@ -349,10 +399,16 @@ def _dense_hint(doc) -> float:
             value = float(raw)
         except (TypeError, ValueError):
             continue
-        if key == "score" and value > 1:
-            value = 1 / (1 + value)
         return max(0.0, min(1.0, value))
-    return 0.5
+    return None
+
+
+def _is_cross_language_query(query: str, text: str) -> bool:
+    return bool(
+        re.search(r"[\u4e00-\u9fff]", str(query or ""))
+        and re.search(r"[A-Za-z]", str(text or ""))
+        and not re.search(r"[\u4e00-\u9fff]", str(text or ""))
+    )
 
 
 def _score_breakdown_for_metadata(scored_docs: list[dict]) -> list[dict]:

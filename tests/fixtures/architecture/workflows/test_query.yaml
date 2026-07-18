@@ -1,0 +1,17 @@
+api_version: conflux.dev/v1alpha1
+kind: Workflow
+id: test.research_query
+version: 0.1.0
+inputs:
+  query:
+    type: string
+    required: true
+steps:
+  - id: keyword_check
+    uses: builtin.text.keyword_match
+    mode: deterministic
+    config:
+      text: "{{query}}"
+      keywords:
+        - quantum
+        - crypto

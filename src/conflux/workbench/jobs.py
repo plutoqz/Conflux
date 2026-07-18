@@ -82,6 +82,8 @@ class ResearchJob:
     source_statuses: dict[str, str] = field(default_factory=dict)
     factcheck_status: str = ""
     error: str = ""
+    current_stage: str = ""
+    progress: dict[str, str] = field(default_factory=dict)
     thread: threading.Thread | None = None
     _cancel_flag: threading.Event = field(default_factory=threading.Event)
     _event_log: _EventLog = field(default_factory=_EventLog)
@@ -149,6 +151,8 @@ class JobManager:
             "source_statuses": job.source_statuses,
             "factcheck_status": job.factcheck_status,
             "error": job.error,
+            "current_stage": job.current_stage,
+            "progress": dict(job.progress),
         }
 
     def event_log(self, run_id: str) -> _EventLog | None:
@@ -243,6 +247,8 @@ class JobManager:
                                     )
                                     if trace_event:
                                         events.append(trace_event)
+                                        job.current_stage = trace_event.stage
+                                        job.progress[trace_event.stage] = trace_event.status
                                         job._event_log.append(trace_event.to_dict())
                         return event, events
 
