@@ -41,6 +41,7 @@ def index_documents(
     # Content-hash-aware upsert: an unchanged chunk is skipped, while a
     # changed chunk with the same logical id updates the existing vector.
     existing_hashes: dict[str, str] = {}
+    existing_metadatas: dict[str, dict] = {}
     try:
         existing = vector_store.get(include=["documents", "metadatas"])
         for index, item_id in enumerate(existing.get("ids", [])):
@@ -49,6 +50,7 @@ def index_documents(
             existing_hashes[str(item_id)] = str(
                 metadata.get("content_hash") or _content_hash(str(content))
             )
+            existing_metadatas[str(item_id)] = dict(metadata)
     except Exception:
         pass  # 空 collection 报错是正常的
 
@@ -63,7 +65,7 @@ def index_documents(
         document = Document(page_content=original.page_content, metadata=metadata)
         if logical_id not in existing_hashes:
             additions.append((logical_id, document))
-        elif existing_hashes[logical_id] != digest:
+        elif existing_hashes[logical_id] != digest or _metadata_requires_update(existing_metadatas.get(logical_id) or {}, metadata):
             updates.append((logical_id, document))
 
     if not additions and not updates:
@@ -104,3 +106,12 @@ def clear_index(vector_store: Chroma) -> None:
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
+
+
+def _metadata_requires_update(existing: dict, current: dict) -> bool:
+    tracked = {
+        "content_scope", "full_text_requested", "full_text_downloaded",
+        "full_text_extracted", "full_text_indexed", "full_text_status",
+        "paper_section", "page_start", "page_end", "char_start", "char_end",
+    }
+    return any(existing.get(key) != current.get(key) for key in tracked)

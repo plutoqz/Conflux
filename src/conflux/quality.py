@@ -9,6 +9,203 @@ from typing import Any
 from .source_status import EXTERNAL_EVIDENCE_CLASSES
 
 
+def evaluate_p1_quality(state: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate P1 answer quality without treating source count as a vote."""
+
+    report = str(state.get("final_answer") or "")
+    run_summary = state.get("_run_summary") or {}
+    findings = state.get("_factcheck_findings") or {}
+    statuses = state.get("_source_statuses") or {}
+    evidence = _load_evidence_payload(str(state.get("_evidence_json") or ""))
+    nodes = [item for item in evidence.get("nodes") or [] if isinstance(item, dict)]
+    external_nodes = [
+        item for item in nodes
+        if item.get("evidence_class") in EXTERNAL_EVIDENCE_CLASSES
+        and item.get("evidence_refs")
+        and item.get("verbatim_quote")
+        and _source_succeeded(item, statuses)
+    ]
+    model_nodes = [item for item in nodes if item.get("evidence_class") == "model_inference"]
+    invalid_citations = int(findings.get("invalid_citation_count") or 0)
+    coverage = float(findings.get("verified_claim_ratio") or 0.0)
+    issues = findings.get("issues") or []
+    unresolved_high = [
+        item for item in issues
+        if isinstance(item, dict)
+        and item.get("severity") == "high"
+        and not item.get("resolved")
+    ]
+
+    scores = {
+        "研究过程": _score_p1_process(run_summary),
+        "回答质量": 1 if str(state.get("_synthesis_status") or "completed") != "completed" else _score_p1_report(report),
+        "证据质量": _score_p1_evidence(external_nodes, model_nodes),
+        "引用质量": _score_p1_citations(coverage, invalid_citations, external_nodes),
+        "核验修订": _score_p1_verification(str(state.get("_factcheck_status") or ""), findings),
+    }
+    overall = round(sum(scores.values()) / len(scores), 2)
+    passed = (
+        overall >= 4.0
+        and str(state.get("_factcheck_status") or "") == "passed"
+        and invalid_citations == 0
+        and not unresolved_high
+        and bool(report.strip())
+    )
+    available_sources = [
+        source for source in ("RAG", "Web", "Model")
+        if str((statuses.get(source) or {}).get("status") or "") == "success"
+    ]
+    return {
+        "scores": scores,
+        "overall": overall,
+        "passed": passed,
+        "available_sources": available_sources,
+        "external_evidence_count": len(external_nodes),
+        "model_context_count": len(model_nodes),
+        "claim_citation_coverage": {
+            "ratio": coverage,
+            "valid": int(findings.get("valid_citation_count") or 0),
+            "invalid": invalid_citations,
+        },
+        "factcheck_status": state.get("_factcheck_status"),
+        "notes": _p1_quality_notes(scores, available_sources, findings),
+    }
+
+
+def _score_p1_process(summary: dict[str, Any]) -> int:
+    stages = set(summary.get("stages") or [])
+    required = {"dispatch", "research_plan", "model_analysis", "evidence_merge", "synthesize", "factcheck_revision"}
+    if required.issubset(stages):
+        return 5
+    if {"research_plan", "evidence_merge", "synthesize"}.issubset(stages):
+        return 4
+    return 2 if stages else 1
+
+
+def _score_p1_report(report: str) -> int:
+    if not report.strip():
+        return 1
+    fallback_markers = (
+        "Model Prior unavailable",
+        "deterministic research plan retained",
+        "当前可用来源未能完整覆盖",
+        "本轮报告综合未能在档位时限内完成",
+    )
+    if any(marker in report for marker in fallback_markers):
+        return 1
+    headings = re.findall(r"^##\s+(.+)$", report, flags=re.MULTILINE)
+    public_required = ["回答", "参考文献与证据", "置信度附录"]
+    if headings == public_required:
+        answer = _extract_section_text(report, "回答")
+        references = _extract_section_text(report, "参考文献与证据")
+        confidence = _extract_section_text(report, "置信度附录")
+        internal_leak = bool(re.search(r"\[(?:RAG:|Web:)", answer))
+        reference_entries = re.findall(r"(?m)^\d+\.\s+", references)
+        complete_entries = references.count("引用内容：")
+        confidence_table = "| 关键结论 |" in confidence and "|---|" in confidence
+        if (
+            answer
+            and references
+            and confidence
+            and not internal_leak
+            and confidence_table
+            and (not reference_entries or complete_entries == len(reference_entries))
+        ):
+            return 5
+        if answer and references and confidence and not internal_leak:
+            return 4
+        return 2
+    required = ["回答", "研究依据", "可靠性与缺口"]
+    hits = sum(item in headings for item in required)
+    repeated_reliability = report.count("## 可靠性与缺口") > 1
+    sections = {title: _extract_section_text(report, title) for title in required}
+    source_blocked = any(title.casefold() in {"rag", "web", "model"} for title in headings)
+    reliability_units = [
+        line for line in sections["可靠性与缺口"].splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if (
+        headings == required
+        and all(sections.values())
+        and not repeated_reliability
+        and not source_blocked
+        and len(reliability_units) <= 5
+    ):
+        return 5
+    if hits == 3 and sections["回答"] and not repeated_reliability and not source_blocked:
+        return 4
+    if hits >= 2:
+        return 3
+    return 2
+
+
+def _score_p1_evidence(external_nodes: list[dict], model_nodes: list[dict]) -> int:
+    if external_nodes:
+        direct_authority = [
+            item for item in external_nodes
+            if float(item.get("authority_score") or 0.0) >= 0.75
+            and (float(item.get("directness") or 0.0) >= 0.6 or item.get("verbatim_quote"))
+        ]
+        return 5 if len(direct_authority) >= 2 else 4
+    if model_nodes:
+        return 4
+    return 1
+
+
+def _source_succeeded(item: dict[str, Any], statuses: dict[str, Any]) -> bool:
+    source_id = str(item.get("source") or "")
+    source = "RAG" if source_id.casefold().endswith("rag") else "Web" if source_id.casefold().endswith("web") else source_id
+    payload = statuses.get(source) or statuses.get(source_id)
+    if not isinstance(payload, dict):
+        return True
+    return str(payload.get("status") or "") == "success"
+
+
+def _score_p1_citations(coverage: float, invalid: int, external_nodes: list[dict]) -> int:
+    if invalid:
+        return 1
+    if not external_nodes:
+        return 4
+    if coverage >= 0.85:
+        return 5
+    if coverage >= 0.6:
+        return 4
+    if coverage > 0:
+        return 3
+    return 1
+
+
+def _score_p1_verification(status: str, findings: dict[str, Any]) -> int:
+    issues = findings.get("issues") or []
+    unresolved = [item for item in issues if isinstance(item, dict) and not item.get("resolved")]
+    if status == "passed" and not unresolved:
+        return 5
+    if status == "passed" and not any(item.get("severity") == "high" for item in unresolved):
+        return 4
+    if status == "needs_review":
+        return 2
+    return 1
+
+
+def _extract_section_text(report: str, title: str) -> str:
+    match = re.search(
+        rf"^##\s+{re.escape(title)}\s*$\n(.*?)(?=^##\s+|\Z)",
+        report,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _p1_quality_notes(scores: dict[str, int], available_sources: list[str], findings: dict[str, Any]) -> list[str]:
+    notes = [f"{name}低于达标线：{score}/5" for name, score in scores.items() if score < 4]
+    missing = [source for source in ("RAG", "Web", "Model") if source not in available_sources]
+    if missing:
+        notes.append(f"本轮未覆盖来源：{', '.join(missing)}。这不会自动判定回答失败。")
+    if findings.get("invalid_citation_count"):
+        notes.append("存在无法解析到证据项的引用。")
+    return notes
+
+
 def evaluate_run_quality(state: dict[str, Any]) -> dict[str, Any]:
     """Score a run on the Phase 1 + Phase 2 acceptance dimensions."""
 

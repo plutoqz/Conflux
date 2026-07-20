@@ -31,6 +31,7 @@ class ReportArtifacts:
     evidence_json_path: Path | None = None
     raw_sources_path: Path | None = None
     deep_evidence_json_path: Path | None = None
+    audit_markdown_path: Path | None = None
 
 
 def slugify(value: str, max_length: int = 48) -> str:
@@ -43,6 +44,9 @@ def slugify(value: str, max_length: int = 48) -> str:
 
 
 def build_markdown_report(query: str, state: dict[str, Any]) -> str:
+    if _is_p1_state(state):
+        return _build_p1_main_report(query, state)
+
     final_answer = _sanitize_report_text(_strip_code_fence(str(state.get("final_answer", "")).strip()))
     verified = _sanitize_report_text(str(state.get("_verified_answer", "")).strip())
     deep_research = _sanitize_report_text(str(state.get("_deep_research", "")).strip())
@@ -97,6 +101,75 @@ def build_markdown_report(query: str, state: dict[str, Any]) -> str:
     # Raw source outputs are saved as a separate appendix file.
 
     return "\n".join(sections).rstrip() + "\n"
+
+
+def _is_p1_state(state: dict[str, Any]) -> bool:
+    summary = state.get("_run_summary") or {}
+    return bool(state.get("_research_profile")) or str(summary.get("mode") or "").casefold() == "p1"
+
+
+def _build_p1_main_report(query: str, state: dict[str, Any]) -> str:
+    """Render the user-facing P1 answer without operational audit noise."""
+
+    final_answer = _sanitize_report_text(_strip_code_fence(str(state.get("final_answer") or "").strip()))
+    run_summary = state.get("_run_summary") or {}
+    sections = [
+        REPORT_TITLE,
+        "",
+        f"- 查询：{query}",
+        f"- Generated at: {datetime.now().isoformat(timespec='seconds')}",
+        f"- Run id: {run_summary.get('run_id') or state.get('_run_id') or 'n/a'}",
+        "",
+        final_answer or "## 回答\n\n未生成最终报告。\n\n## 研究依据\n\n无。\n\n## 可靠性与缺口\n\n本轮生成失败。",
+    ]
+    return "\n".join(sections).rstrip() + "\n"
+
+
+def build_p1_audit_report(query: str, state: dict[str, Any]) -> str:
+    """Render P1 planning, evidence, verification, and routing details."""
+
+    source_statuses = state.get("_source_statuses") or {}
+    run_summary = state.get("_run_summary") or {}
+    quality_report = state.get("_quality_report") or {}
+    evidence_json = str(state.get("_evidence_json") or "").strip()
+    factcheck = str(state.get("_factcheck_report") or "").strip()
+    sections = [
+        "# Conflux 研究审计",
+        "",
+        f"- 查询：{query}",
+        f"- Run id: {run_summary.get('run_id') or state.get('_run_id') or 'n/a'}",
+        f"- 研究深度：{(state.get('_research_profile') or {}).get('depth', 'unknown')}",
+        "",
+        "## 模型路由",
+        _json_block(state.get("_model_trace") or {}),
+        "",
+        "## 研究计划",
+        _json_block(state.get("_research_plan") or {}),
+        "",
+        "## 子问题来源覆盖",
+        _json_block(state.get("_source_coverage") or []),
+        "",
+        "## 声明评估",
+        _json_block(state.get("_claim_assessments") or []),
+        "",
+        SOURCE_STATUS_HEADING,
+        _source_status_markdown(source_statuses),
+        "",
+        "## 核验与修订",
+        _demote_markdown_headings(factcheck) if factcheck else "未生成核验摘要。",
+        _json_block(state.get("_verification_issues") or []),
+    ]
+    if evidence_json:
+        sections.extend(["", EVIDENCE_HEADING, _evidence_summary_markdown(evidence_json)])
+    if run_summary:
+        sections.extend(["", RUN_SUMMARY_HEADING, _run_summary_markdown(run_summary)])
+    if quality_report:
+        sections.extend(["", QUALITY_HEADING, _quality_report_markdown(quality_report)])
+    return "\n".join(sections).rstrip() + "\n"
+
+
+def _json_block(value: Any) -> str:
+    return "```json\n" + _safe_fenced_json(json.dumps(value, ensure_ascii=False, indent=2)) + "\n```"
 
 
 def markdown_to_html(markdown: str, title: str = "Conflux \u8c03\u7814\u62a5\u544a") -> str:
@@ -186,6 +259,7 @@ def write_report_artifacts(
     evidence_json_path = out_dir / f"{stem}.evidence.json"
     deep_evidence_json_path = out_dir / f"{stem}.deep-evidence.json"
     raw_sources_path = out_dir / f"{stem}.sources.md"
+    audit_markdown_path = out_dir / f"{stem}.audit.md"
 
     markdown = build_markdown_report(query, state)
     html_doc = markdown_to_html(markdown)
@@ -221,12 +295,17 @@ def write_report_artifacts(
         )
     else:
         raw_sources_path = None
+    if _is_p1_state(state):
+        audit_markdown_path.write_text(build_p1_audit_report(query, state), encoding="utf-8")
+    else:
+        audit_markdown_path = None
     return ReportArtifacts(
         markdown_path=markdown_path,
         html_path=html_path,
         evidence_json_path=evidence_json_path,
         raw_sources_path=raw_sources_path,
         deep_evidence_json_path=deep_evidence_json_path,
+        audit_markdown_path=audit_markdown_path,
     )
 
 

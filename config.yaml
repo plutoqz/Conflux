@@ -4,25 +4,68 @@
 # api_key 不应写入仓库；留空时由模型工厂读取对应环境变量。
 
 models:
-  reasoning:
+  # These presets are deployment configuration, not backend model choices.
+  # Users may replace every provider/model mapping while keeping the role names.
+  # The values below are the current non-Gemini development-test setup.
+  flash:
     provider: openai_compatible
-    model: deepseek-v4-flash
+    model: qwen3.7-plus
     base_url: https://www.dmxapi.cn/v1
     api_key:
-    temperature: 0.3
+    temperature: 0.2
     max_tokens: 4096
     timeout: 60
     max_retries: 1
+    extra_body:
+      enable_thinking: false
 
+  balanced:
+    provider: openai_compatible
+    model: qwen3.7-plus
+    base_url: https://www.dmxapi.cn/v1
+    api_key:
+    temperature: 0.25
+    max_tokens: 8192
+    timeout: 90
+    max_retries: 1
+    extra_body:
+      enable_thinking: false
+
+  reasoning:
+    provider: openai_compatible
+    model: deepseek-v4-pro
+    base_url: https://www.dmxapi.cn/v1
+    api_key:
+    temperature: 0.25
+    max_tokens: 12288
+    timeout: 120
+    max_retries: 1
+
+  verifier:
+    provider: openai_compatible
+    model: MiniMax-M3
+    base_url: https://www.dmxapi.cn/v1
+    api_key:
+    temperature: 0.0
+    max_tokens: 8192
+    timeout: 90
+    max_retries: 1
+    extra_body:
+      enable_thinking: false
+
+  # Legacy alias retained for existing integrations. P1 roles use the
+  # explicit flash/balanced/reasoning/verifier presets below.
   cheap:
     provider: openai_compatible
-    model: deepseek-v4-flash
+    model: qwen3.7-plus
     base_url: https://www.dmxapi.cn/v1
     api_key:
     temperature: 0.0
     max_tokens: 1024
     timeout: 60
     max_retries: 1
+    extra_body:
+      enable_thinking: false
 
 embedding:
   provider: openai_compatible
@@ -33,6 +76,14 @@ embedding:
 web_search:
   provider: duckduckgo
   max_results: 5
+  max_subqueries: 6
+  max_parallel_queries: 3
+  fetch_content: true
+  max_fetched_results: 5
+  max_fetch_attempts: 8
+  fetch_timeout_seconds: 12
+  max_fetch_bytes: 5242880
+  max_pdf_pages: 30
   # Providers are attempted in order when the current source fails or yields
   # too few relevant URLs. Bing/Google require their authorized API keys.
   fallback_providers: [duckduckgo, bing, google, serpapi]
@@ -55,10 +106,91 @@ agent:
   confidence_threshold: 0.7
 
 research:
+  pipeline: p1
+  depth: standard
   enable_l4: true
   max_deep_questions: 2
   max_verify_iterations: 1
   max_rewrite_attempts: 2
+  profiles:
+    quick:
+      planner_model: flash
+      analyst_model: flash
+      reranker_model: balanced
+      synthesizer_model: flash
+      verifier_model: flash
+      max_gap_iterations: 0
+      max_subquestions: 4
+      max_parallel_subquestions: 2
+      candidate_limit: 6
+      final_evidence_limit: 6
+      web_max_results: 3
+      web_max_subqueries: 3
+      web_fetch_limit: 2
+      web_fetch_attempts: 3
+      max_query_rewrites: 0
+      factcheck_strength: light
+      planner_max_tokens: 4000
+      analyst_max_tokens: 4000
+      reranker_max_tokens: 600
+      synthesizer_max_tokens: 5000
+      verifier_max_tokens: 600
+      token_budget: 55000
+      model_timeout_seconds: 30
+      max_retries: 0
+      timeout_seconds: 180
+    standard:
+      planner_model: flash
+      analyst_model: flash
+      reranker_model: flash
+      synthesizer_model: verifier
+      verifier_model: balanced
+      max_gap_iterations: 1
+      max_subquestions: 4
+      max_parallel_subquestions: 3
+      candidate_limit: 8
+      final_evidence_limit: 8
+      web_max_results: 4
+      web_max_subqueries: 4
+      web_fetch_limit: 3
+      web_fetch_attempts: 5
+      max_query_rewrites: 1
+      factcheck_strength: full
+      planner_max_tokens: 4500
+      analyst_max_tokens: 3200
+      reranker_max_tokens: 1000
+      synthesizer_max_tokens: 5500
+      verifier_max_tokens: 1600
+      token_budget: 75000
+      model_timeout_seconds: 70
+      max_retries: 0
+      timeout_seconds: 240
+    deep:
+      planner_model: reasoning
+      analyst_model: reasoning
+      reranker_model: balanced
+      synthesizer_model: reasoning
+      verifier_model: balanced
+      max_gap_iterations: 2
+      max_subquestions: 6
+      max_parallel_subquestions: 3
+      candidate_limit: 12
+      final_evidence_limit: 12
+      web_max_results: 5
+      web_max_subqueries: 6
+      web_fetch_limit: 4
+      web_fetch_attempts: 6
+      max_query_rewrites: 2
+      factcheck_strength: cross_check
+      planner_max_tokens: 2400
+      analyst_max_tokens: 3200
+      reranker_max_tokens: 1200
+      synthesizer_max_tokens: 6000
+      verifier_max_tokens: 3200
+      token_budget: 140000
+      model_timeout_seconds: 120
+      max_retries: 0
+      timeout_seconds: 480
 
 slo:
   survey_p95_ms: 45000

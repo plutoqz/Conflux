@@ -288,6 +288,12 @@
         <div class="content-grid form-result-layout">
           <section class="surface form-surface" aria-labelledby="promotionTitle">
             <div class="section-heading"><div><h2 id="promotionTitle">沉淀到知识库</h2><p>审核收件箱产物，控制全文下载和向量索引范围。</p></div></div>
+            <div id="paperIngestionAudit" class="ingestion-audit" role="status">
+              <div><strong id="fullTextIndexedCount">0</strong><span>全文已索引</span></div>
+              <div><strong id="summaryIndexedCount">0</strong><span>仅摘要索引</span></div>
+              <div><strong id="fullTextRepairCount">0</strong><span>全文待修复</span></div>
+              <p id="paperIngestionAuditDetail">正在核对本地向量库...</p>
+            </div>
             <div class="field-grid two">
               <label>收件箱文件<input id="promoteInbox"></label>
               <label>知识文档目录<input id="promoteOut"></label>
@@ -341,6 +347,8 @@
             <div class="section-heading"><div><h2 id="queryOutputTitle">研究进展</h2><p>结果、证据状态和运行日志</p></div><span id="queryStage" class="status-pill neutral">等待开始</span></div>
             <div id="queryEmpty" class="empty-state"><i data-lucide="flask-conical" aria-hidden="true"></i><strong>准备好开始研究</strong><p>执行后，这里会持续显示当前状态和最终答案。</p></div>
             <pre id="queryOutput" hidden></pre>
+            <iframe id="queryReportPreview" class="query-report-preview" title="研究报告 Markdown 预览" sandbox="allow-same-origin" hidden></iframe>
+            <pre id="queryResultMeta" class="query-result-meta" hidden></pre>
           </section>
         </div>
       </section>
@@ -612,13 +620,33 @@
       <section id="model" class="view" aria-labelledby="pageTitle">
         <div class="settings-layout">
           <section class="surface settings-main" aria-labelledby="modelTitle">
-            <div class="section-heading"><div><h2 id="modelTitle">推理模型</h2><p>配置 OpenAI 兼容接口。凭证仅写入本地工作台环境文件。</p></div></div>
-            <div class="field-grid two">
-              <label>Base URL<input id="baseUrl" autocomplete="off" placeholder="https://api.openai.com/v1"></label>
-              <label>模型名称<input id="modelName" autocomplete="off" placeholder="gpt-4o"></label>
-              <label>API Key<input id="apiKey" type="password" autocomplete="off" placeholder="使用已保存凭证，或输入新值"></label>
+            <div class="section-heading"><div><h2 id="modelTitle">分档推理模型</h2><p>每个研究档位独立使用你配置的 OpenAI 兼容模型。</p></div></div>
+            <div class="model-tier-grid">
+              <fieldset class="model-tier" data-tier="quick">
+                <legend>快速档</legend>
+                <label>Base URL<input id="quickBaseUrl" autocomplete="off" placeholder="https://api.openai.com/v1"></label>
+                <label>模型名称<input id="quickModelName" autocomplete="off" placeholder="用户自定义模型"></label>
+                <label>API Key<input id="quickApiKey" type="password" autocomplete="off" placeholder="使用已保存凭证，或输入新值"></label>
+                <label>Temperature<input id="quickTemperature" type="number" min="0" max="2" step="0.1" value="0.2"></label>
+              </fieldset>
+              <fieldset class="model-tier" data-tier="standard">
+                <legend>标准档</legend>
+                <label>Base URL<input id="standardBaseUrl" autocomplete="off" placeholder="https://api.openai.com/v1"></label>
+                <label>模型名称<input id="standardModelName" autocomplete="off" placeholder="用户自定义模型"></label>
+                <label>API Key<input id="standardApiKey" type="password" autocomplete="off" placeholder="使用已保存凭证，或输入新值"></label>
+                <label>Temperature<input id="standardTemperature" type="number" min="0" max="2" step="0.1" value="0.2"></label>
+              </fieldset>
+              <fieldset class="model-tier" data-tier="deep">
+                <legend>深度档</legend>
+                <label>Base URL<input id="deepBaseUrl" autocomplete="off" placeholder="https://api.openai.com/v1"></label>
+                <label>模型名称<input id="deepModelName" autocomplete="off" placeholder="用户自定义模型"></label>
+                <label>API Key<input id="deepApiKey" type="password" autocomplete="off" placeholder="使用已保存凭证，或输入新值"></label>
+                <label>Temperature<input id="deepTemperature" type="number" min="0" max="2" step="0.1" value="0.2"></label>
+              </fieldset>
+            </div>
+            <div class="field-grid two settings-subsection">
               <label>默认思考深度<select id="depthSelect"><option value="quick">快速 · 轻量检索</option><option value="standard" selected>标准 · 平衡质量与速度</option><option value="deep">深度 · 多轮研究</option></select></label>
-              <label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.1" value="0.2"></label>
+              <label>连接测试档位<select id="testTierSelect"><option value="quick">快速档</option><option value="standard" selected>标准档</option><option value="deep">深度档</option></select></label>
             </div>
             <fieldset class="form-section settings-subsection">
               <legend>网络搜索</legend>

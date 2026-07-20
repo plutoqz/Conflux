@@ -45,6 +45,7 @@ def event_from_state_key(
     if not value:
         return None
     mapping = {
+        "_research_plan": ("research_plan", "Model"),
         "rag_result": ("rag_agent", "RAG"),
         "web_result": ("web_agent", "Web"),
         "model_result": ("model_agent", "Model"),
@@ -52,6 +53,9 @@ def event_from_state_key(
         "_arbitration": ("arbitration", None),
         "final_answer": ("synthesize", None),
         "_verified_answer": ("factcheck", "FactCheck"),
+        "_factcheck_report": ("verify_revise", "FactCheck"),
+        "_verification_issues": ("verify_revise", "FactCheck"),
+        "_deep_queries": ("gap_research", None),
         "_deep_research": ("deep_research", None),
     }
     if key not in mapping:
@@ -59,7 +63,6 @@ def event_from_state_key(
     stage, source = mapping[key]
     status = "completed"
     text = str(value)
-    lowered = text.lower()
     parsed_result = None
 
     # For agent results, extract the actual SourceResult status from the
@@ -74,13 +77,6 @@ def event_from_state_key(
             parsed_result = parsed[-1] if parsed else None
         except Exception:
             parsed_result = None
-    else:
-        if "unreviewed" in lowered:
-            status = "unreviewed"
-        elif "failed" in lowered or "error" in lowered:
-            status = "failed"
-        elif "fallback" in lowered:
-            status = "fallback"
     elapsed_ms = round((time.time() - started_at) * 1000, 2) if started_at else 0.0
     metadata = {"state_key": key, "size": len(text)}
     if parsed_result is not None:

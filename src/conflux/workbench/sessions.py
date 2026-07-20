@@ -101,7 +101,7 @@ def get_session_detail(run_id: str) -> dict[str, Any] | None:
             legacy_html = _find_legacy_report(summary_path.parent, run_id, ".html")
             result["report_html_available"] = legacy_html is not None
             result["report_html_path"] = _rel(legacy_html) if legacy_html else ""
-        for field in ("report_evidence_path", "report_sources_path", "report_deep_evidence_path"):
+        for field in ("report_evidence_path", "report_sources_path", "report_deep_evidence_path", "report_audit_path"):
             value = payload.get(field)
             if value:
                 resolved = _resolve_artifact_path(str(value))

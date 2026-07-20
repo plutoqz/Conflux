@@ -48,6 +48,18 @@ class EvidenceItem:
     confidence: float = 0.5
     limitations: list[str] = field(default_factory=list)
     evidence_class: str = ""
+    document_title: str = ""
+    url: str = ""
+    published_at: str = ""
+    retrieved_at: str = ""
+    content_hash: str = ""
+    content_kind: str = ""
+    directness: float = 0.0
+    authority: float = 0.0
+    relationship: str = "supports"
+    page_start: int | None = None
+    page_end: int | None = None
+    subquestion_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -68,11 +80,32 @@ class EvidenceItem:
             confidence=float(payload.get("confidence", 0.5)),
             limitations=[str(item) for item in payload.get("limitations") or []],
             evidence_class=normalize_evidence_class(payload.get("evidence_class"), source),
+            document_title=str(payload.get("document_title") or payload.get("title") or ""),
+            url=str(payload.get("url") or ""),
+            published_at=str(payload.get("published_at") or ""),
+            retrieved_at=str(payload.get("retrieved_at") or ""),
+            content_hash=str(payload.get("content_hash") or ""),
+            content_kind=str(payload.get("content_kind") or ""),
+            directness=float(payload.get("directness", 0.0)),
+            authority=float(payload.get("authority", 0.0)),
+            relationship=str(payload.get("relationship") or "supports"),
+            page_start=_optional_int(payload.get("page_start")),
+            page_end=_optional_int(payload.get("page_end")),
+            subquestion_id=str(payload.get("subquestion_id") or ""),
         )
 
 
 # Backwards-compatible public name used by existing tools and integrations.
 AgentClaim = EvidenceItem
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass

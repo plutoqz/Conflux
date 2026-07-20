@@ -87,8 +87,6 @@ CSP_HEADER = (
     "font-src 'self'; "
 )
 
-_reload_env()
-
 
 def _nonnegative_env_float(name: str, default: float) -> float:
     try:
@@ -107,18 +105,50 @@ SEMANTIC_SCHOLAR_MAX_PAGES = 3
 _SEMANTIC_SCHOLAR_RATE_LOCK = threading.Lock()
 _SEMANTIC_SCHOLAR_LAST_REQUEST_AT = 0.0
 
-# Security: access token for non-loopback binds (empty = loopback-only)
-# Must be read AFTER _reload_env so .env.workbench values are visible.
+# Security: initialized from the parent environment and refreshed at startup.
 _ACCESS_TOKEN = os.environ.get("CONFLUX_ACCESS_TOKEN", "").strip()
 
 # Cookie name used for browser-based auth when bound to a non-loopback address.
 _AUTH_COOKIE = "conflux_token"
+
+
+def _load_runtime_env() -> None:
+    """Load persisted workbench settings only when the server is started."""
+
+    global SEMANTIC_SCHOLAR_MIN_INTERVAL_SECONDS, _ACCESS_TOKEN
+
+    _reload_env()
+    SEMANTIC_SCHOLAR_MIN_INTERVAL_SECONDS = _nonnegative_env_float(
+        "SEMANTIC_SCHOLAR_MIN_INTERVAL_SECONDS",
+        1.1,
+    )
+    _ACCESS_TOKEN = os.environ.get("CONFLUX_ACCESS_TOKEN", "").strip()
+
+
 _AUTH_COOKIE_MAX_AGE = 12 * 60 * 60
+
+_TIER_DEFAULT_PRESETS = {
+    "quick": "flash",
+    "standard": "verifier",
+    "deep": "reasoning",
+}
 
 
 def _auth_cookie_value() -> str:
     """Derive a browser session value without exposing the access token."""
     return hashlib.sha256(f"conflux-workbench:{_ACCESS_TOKEN}".encode("utf-8")).hexdigest()
+
+
+def _resolved_tier_model_config(raw: dict[str, Any], tier: str) -> dict[str, Any]:
+    """Resolve the user-facing model for one research depth."""
+
+    models = raw.get("models") or {}
+    direct = dict(models.get(tier) or {})
+    if direct.get("model"):
+        return direct
+    profile = ((raw.get("research") or {}).get("profiles") or {}).get(tier) or {}
+    preset = str(profile.get("synthesizer_model") or _TIER_DEFAULT_PRESETS[tier])
+    return dict(models.get(preset) or {})
 
 
 def build_status() -> dict[str, Any]:
@@ -127,6 +157,13 @@ def build_status() -> dict[str, Any]:
     raw = config.load()
     reasoning = dict(raw.get("models", {}).get("reasoning") or {})
     cheap = dict(raw.get("models", {}).get("cheap") or {})
+    tier_models = {
+        tier: _sanitize_model_config(
+            _resolved_tier_model_config(raw, tier),
+            f"CONFLUX_MODELS__{tier.upper()}__API_KEY",
+        )
+        for tier in ("quick", "standard", "deep")
+    }
     embedding = dict(raw.get("embedding") or {})
     web_search = dict(raw.get("web_search") or {})
     web_provider = str(web_search.get("provider") or "duckduckgo").strip().lower()
@@ -142,6 +179,7 @@ def build_status() -> dict[str, Any]:
         "profiles": [_enrich_profile(p) for p in _list_files(PROJECT_ROOT / "profiles", {".yaml", ".yml"})],
         "reports": _list_files(PROJECT_ROOT / "reports", {".md", ".html", ".json"}),
         "paper_outputs": _list_files(PROJECT_ROOT / "data" / "documents" / "papers", {".md", ".json"}),
+        "paper_ingestion_audit": build_paper_ingestion_audit(),
         "defaults": {
             "profile": DEFAULT_PROFILE,
             "fixture": DEFAULT_FIXTURE,
@@ -150,6 +188,7 @@ def build_status() -> dict[str, Any]:
             "progress_dir": DEFAULT_PROGRESS_DIR,
             "reasoning": _sanitize_model_config(reasoning, "OPENAI_API_KEY"),
             "cheap": _sanitize_model_config(cheap, "OPENAI_API_KEY"),
+            "tier_models": tier_models,
             "embedding": _sanitize_model_config(embedding, "OPENAI_API_KEY"),
             "web_search": {
                 "provider": web_provider,
@@ -164,6 +203,9 @@ def build_status() -> dict[str, Any]:
             "openai_api_key": _has_env("OPENAI_API_KEY"),
             "reasoning_api_key": _has_env("CONFLUX_MODELS__REASONING__API_KEY"),
             "cheap_api_key": _has_env("CONFLUX_MODELS__CHEAP__API_KEY"),
+            "quick_api_key": tier_models["quick"]["api_key_present"],
+            "standard_api_key": tier_models["standard"]["api_key_present"],
+            "deep_api_key": tier_models["deep"]["api_key_present"],
             "embedding_api_key": _has_env("CONFLUX_EMBEDDING__API_KEY"),
             "serpapi_api_key": _has_env("SERPAPI_API_KEY"),
             "bing_api_key": _has_env("BING_SEARCH_API_KEY"),
@@ -723,6 +765,119 @@ def _s2_str(obj: dict, key: str) -> str:
     return str(val).strip() if val else ""
 
 
+def build_paper_ingestion_audit() -> dict[str, Any]:
+    """Compare promotion intent with documents that really exist in Chroma."""
+
+    manifest_path = PROJECT_ROOT / "data" / "documents" / "papers" / "paper_promotion_manifest.json"
+    expected_full_text: dict[str, dict[str, Any]] = {}
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for decision in manifest.get("decisions") or []:
+                if not isinstance(decision, dict) or decision.get("action") != "full_text":
+                    continue
+                paper_id = str(decision.get("paper_id") or "").strip()
+                if paper_id:
+                    expected_full_text[_paper_identity("arxiv", paper_id)] = decision
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    seen_titles: dict[str, str] = {}
+    for key, entry in _load_seen_papers().items():
+        if isinstance(entry, dict):
+            seen_titles[_canonical_seen_key(key)] = str(entry.get("title") or "")
+
+    aggregates: dict[str, dict[str, Any]] = {}
+    available = False
+    error = ""
+    try:
+        import chromadb
+        from chromadb.config import Settings as ChromaSettings
+
+        persist_dir = Path(str(config.get("vector_store", "persist_dir", default="./data/chroma_db")))
+        if not persist_dir.is_absolute():
+            persist_dir = PROJECT_ROOT / persist_dir
+        collection_name = str(config.get("vector_store", "collection_name", default="conflux_docs"))
+        client = chromadb.PersistentClient(
+            path=str(persist_dir),
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
+        collection = client.get_collection(collection_name)
+        payload = collection.get(include=["metadatas"])
+        available = True
+        for metadata in payload.get("metadatas") or []:
+            if not isinstance(metadata, dict):
+                continue
+            paper_id = str(metadata.get("paper_id") or "").strip()
+            if not paper_id:
+                continue
+            source = _normalized_paper_source(metadata.get("paper_source"), paper_id)
+            identity = _paper_identity(source, paper_id)
+            item = aggregates.setdefault(identity, {
+                "identity": identity,
+                "paper_id": paper_id,
+                "title": str(metadata.get("paper_title") or seen_titles.get(identity) or ""),
+                "summary_chunks": 0,
+                "full_text_chunks": 0,
+            })
+            scope = str(metadata.get("content_scope") or "")
+            if scope == "full_text":
+                item["full_text_chunks"] += 1
+            elif scope == "summary":
+                item["summary_chunks"] += 1
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+
+    for identity, decision in expected_full_text.items():
+        item = aggregates.setdefault(identity, {
+            "identity": identity,
+            "paper_id": str(decision.get("paper_id") or identity.partition(":")[2]),
+            "title": seen_titles.get(identity, ""),
+            "summary_chunks": 0,
+            "full_text_chunks": 0,
+        })
+        item["full_text_expected"] = True
+
+    papers = []
+    for identity, item in aggregates.items():
+        full_text_chunks = int(item.get("full_text_chunks") or 0)
+        summary_chunks = int(item.get("summary_chunks") or 0)
+        full_text_expected = bool(item.get("full_text_expected"))
+        if full_text_chunks:
+            status = "full_text_indexed"
+        elif full_text_expected and available:
+            status = "full_text_missing"
+        elif summary_chunks:
+            status = "summary_indexed"
+        else:
+            status = "not_ingested" if available else "audit_unavailable"
+        papers.append({**item, "status": status, "repairable": status == "full_text_missing"})
+
+    papers.sort(key=lambda item: (not item["repairable"], str(item.get("paper_id") or "")))
+    return {
+        "available": available,
+        "error": error,
+        "collection": str(config.get("vector_store", "collection_name", default="conflux_docs")),
+        "indexed_papers": len([item for item in papers if item["status"] in {"summary_indexed", "full_text_indexed"}]),
+        "full_text_indexed": len([item for item in papers if item["status"] == "full_text_indexed"]),
+        "summary_only": len([item for item in papers if item["status"] == "summary_indexed"]),
+        "expected_full_text": len(expected_full_text),
+        "repairable": [item for item in papers if item["repairable"]],
+        "papers": papers,
+    }
+
+
+def _seen_entry_should_skip(identity: str, entry: dict[str, Any], audit: dict[str, Any]) -> bool:
+    retryable_states = {"full_text_missing", "full_text_failed", "full_text_extracted", "not_ingested"}
+    audit_item = next(
+        (item for item in audit.get("papers") or [] if item.get("identity") == identity),
+        None,
+    )
+    if audit_item and audit_item.get("status") in retryable_states:
+        return False
+    return str(entry.get("status") or "inboxed") not in retryable_states
+
+
 def _discover_unseen_papers(
     profile: ResearchProfile,
     source: str,
@@ -730,7 +885,14 @@ def _discover_unseen_papers(
 ) -> tuple[list, int]:
     """Fetch fresh online papers, paging past results already shown before."""
     seen_map = _load_seen_papers()
-    seen_identities = {_canonical_seen_key(key) for key in seen_map}
+    seen_entries: dict[str, dict[str, Any]] = {}
+    for key, value in seen_map.items():
+        identity = _canonical_seen_key(key)
+        entry = dict(value) if isinstance(value, dict) else {}
+        current = seen_entries.get(identity) or {}
+        if current.get("status") in {"", "inboxed"} or not current:
+            seen_entries[identity] = entry
+    audit = build_paper_ingestion_audit()
     collected = []
     collected_ids: set[str] = set()
     skipped_seen = 0
@@ -739,7 +901,7 @@ def _discover_unseen_papers(
         nonlocal skipped_seen
         for paper in batch:
             identity = _paper_identity(source, paper.id)
-            if identity in seen_identities:
+            if identity in seen_entries and _seen_entry_should_skip(identity, seen_entries[identity], audit):
                 skipped_seen += 1
                 continue
             if identity in collected_ids:
@@ -823,6 +985,17 @@ def _paper_identity(source: str, paper_id: str) -> str:
     if source == "arxiv":
         normalized_id = re.sub(r"v\d+$", "", normalized_id, flags=re.IGNORECASE)
     return f"{source}:{normalized_id}"
+
+
+def _normalized_paper_source(source: Any, paper_id: str) -> str:
+    """Recover arXiv identity from legacy metadata whose source was unknown."""
+
+    normalized = str(source or "").strip().lower()
+    if normalized in {"arxiv", "semantic_scholar"}:
+        return normalized
+    if re.fullmatch(r"\d{4}\.\d{4,5}(?:v\d+)?", str(paper_id or "").strip()):
+        return "arxiv"
+    return normalized or "unknown"
 
 
 def _canonical_seen_key(key: str) -> str:
@@ -948,10 +1121,17 @@ def run_paper_inbox(payload: dict[str, Any]) -> dict[str, Any]:
 
 def save_model_config(payload: dict[str, Any]) -> dict[str, Any]:
     try:
+        tier_models = payload.get("tier_models") or {}
+        if not isinstance(tier_models, dict):
+            return {"ok": False, "error": "tier_models 必须是对象。"}
         count = save_workbench_env(
             base_url=str(payload.get("base_url") or "").strip(),
             api_key=str(payload.get("api_key") or "").strip(),
             model=str(payload.get("model") or "").strip(),
+            tier_models={
+                tier: dict(tier_models.get(tier) or {})
+                for tier in ("quick", "standard", "deep")
+            },
             embedding_base_url=str(payload.get("embedding_base_url") or "").strip(),
             embedding_api_key=str(payload.get("embedding_api_key") or "").strip(),
             embedding_model=str(payload.get("embedding_model") or "").strip(),
@@ -1097,6 +1277,7 @@ def run_paper_promotion(payload: dict[str, Any]) -> dict[str, Any]:
         inbox=inbox,
         out_dir=out_dir,
     )
+    _update_seen_after_promotion(result, inbox=inbox, indexed=do_index)
     return {
         "ok": True,
         "documents": len(result.documents),
@@ -1108,6 +1289,71 @@ def run_paper_promotion(payload: dict[str, Any]) -> dict[str, Any]:
         "sources_path": _rel(artifacts.sources_path) if artifacts else "",
         "report_path": _rel(report_path),
     }
+
+
+def _update_seen_after_promotion(result: Any, *, inbox: str, indexed: bool) -> None:
+    """Persist actual ingestion outcomes so failed full text remains selectable."""
+
+    try:
+        from conflux.knowledge.paper_indexer import load_inbox_payload
+
+        records = {
+            str(paper.id): paper
+            for paper, _analysis in load_inbox_payload(inbox)
+        }
+        documents_by_paper: dict[str, list[dict[str, Any]]] = {}
+        for document in result.documents:
+            metadata = dict(document.metadata or {})
+            paper_id = str(metadata.get("paper_id") or "")
+            if paper_id:
+                documents_by_paper.setdefault(paper_id, []).append(metadata)
+
+        with _SEEN_PAPERS_LOCK:
+            seen = _load_seen_papers()
+            now = time.strftime("%Y-%m-%dT%H:%M:%S")
+            for decision in result.decisions:
+                paper_id = str(decision.paper_id or "")
+                paper = records.get(paper_id)
+                source = str(getattr(paper, "source", "") or "arxiv")
+                identity = _paper_identity(source, paper_id)
+                documents = documents_by_paper.get(paper_id) or []
+                summary = next(
+                    (item for item in documents if item.get("content_scope") == "summary"),
+                    {},
+                )
+                full_text = [item for item in documents if item.get("content_scope") == "full_text"]
+                if full_text and indexed:
+                    status = "full_text_indexed"
+                elif full_text:
+                    status = "full_text_extracted"
+                elif decision.action == "full_text":
+                    status = "full_text_missing"
+                elif summary and indexed:
+                    status = "summary_indexed"
+                elif summary:
+                    status = "summary_saved"
+                elif decision.action == "skip":
+                    status = "skipped_by_policy"
+                elif decision.action == "metadata_only":
+                    status = "metadata_only"
+                else:
+                    status = "not_ingested"
+
+                aliases = [key for key in seen if _canonical_seen_key(key) == identity] or [identity]
+                for key in aliases:
+                    entry = dict(seen.get(key) or {})
+                    entry.update({
+                        "status": status,
+                        "at": now,
+                        "title": str(getattr(paper, "title", "") or entry.get("title") or "")[:120],
+                        "requested_action": str(decision.action or ""),
+                        "full_text_status": str(summary.get("full_text_status") or ""),
+                    })
+                    seen[key] = entry
+            _save_seen_papers(seen)
+    except Exception:
+        # Promotion artifacts remain valid even if the optional history file is unavailable.
+        return
 
 
 def _write_paper_promotion_report(result: Any, *, inbox: str, out_dir: str) -> Path:
@@ -1123,8 +1369,8 @@ def _write_paper_promotion_report(result: Any, *, inbox: str, out_dir: str) -> P
         counter += 1
     action_labels = {
         "pinned": "用户强制收录",
-        "full_text": "全文入库",
-        "summary_only": "摘要入库",
+        "full_text": "全文策略命中",
+        "summary_only": "摘要策略命中",
         "metadata_only": "仅保留元数据",
         "skip": "跳过",
     }
@@ -1133,11 +1379,13 @@ def _write_paper_promotion_report(result: Any, *, inbox: str, out_dir: str) -> P
         action_counts[decision.action] = action_counts.get(decision.action, 0) + 1
 
     summaries: dict[str, dict[str, Any]] = {}
+    paper_documents: dict[str, list[dict[str, Any]]] = {}
     for document in result.documents:
         metadata = document.metadata or {}
+        paper_id = str(metadata.get("paper_id") or "未知 ID")
+        paper_documents.setdefault(paper_id, []).append(metadata)
         if metadata.get("content_scope") != "summary":
             continue
-        paper_id = str(metadata.get("paper_id") or "未知 ID")
         summaries[paper_id] = metadata
 
     lines = [
@@ -1159,7 +1407,7 @@ def _write_paper_promotion_report(result: Any, *, inbox: str, out_dir: str) -> P
     if summaries:
         for paper_id, metadata in summaries.items():
             title = str(metadata.get("paper_title") or "未命名论文")
-            action = action_labels.get(str(metadata.get("ingestion_action") or ""), "已入库")
+            action = _actual_paper_ingestion_label(metadata, paper_documents.get(paper_id) or [])
             score = float(metadata.get("relevance_score") or 0)
             lines.append(f"- **{title}**（`{paper_id}`，{action}，相关度 {score:.3f}）")
     else:
@@ -1173,6 +1421,23 @@ def _write_paper_promotion_report(result: Any, *, inbox: str, out_dir: str) -> P
     ])
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+def _actual_paper_ingestion_label(summary: dict[str, Any], documents: list[dict[str, Any]]) -> str:
+    """Describe what was actually extracted and indexed, not the policy decision."""
+
+    fulltext_docs = [item for item in documents if item.get("content_scope") == "full_text"]
+    if any(item.get("full_text_indexed") for item in fulltext_docs):
+        return "全文已提取并索引"
+    if fulltext_docs or summary.get("full_text_extracted"):
+        return "全文已提取，未建立向量索引"
+    if summary.get("full_text_requested"):
+        status = str(summary.get("full_text_status") or "unknown")
+        if summary.get("full_text_downloaded"):
+            return f"摘要回退（全文解析失败：{status}）"
+        return f"摘要回退（全文未获取：{status}）"
+    action = str(summary.get("ingestion_action") or "")
+    return "用户强制收录（摘要）" if action == "pinned" else "摘要入库"
 
 
 def run_model_probe(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2248,7 +2513,10 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 job = mgr.get(run_id)
                 if job is None:
                     self._send_json({"ok": False, "error": "任务不存在"}, status=404)
-                elif job["status"] not in ("pending", "running") or not mgr.cancel(run_id):
+                elif job["status"] not in ("pending", "running") or not mgr.cancel(
+                    run_id,
+                    reason=str(payload.get("reason") or "user"),
+                ):
                     current = mgr.get(run_id) or job
                     self._send_json({
                         "ok": False,
@@ -2376,6 +2644,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
 
 
 def main(argv: list[str] | None = None) -> None:
+    _load_runtime_env()
     parser = argparse.ArgumentParser(description="Run the Conflux local research workbench.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
@@ -2514,6 +2783,13 @@ def _load_seen_papers() -> dict:
     return seen
 
 
+def _save_seen_papers(seen: dict[str, Any]) -> None:
+    SEEN_PAPERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = SEEN_PAPERS_PATH.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(seen, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(SEEN_PAPERS_PATH)
+
+
 def _mark_papers_seen(papers: list, source: str) -> None:
     with _SEEN_PAPERS_LOCK:
         seen = _load_seen_papers()
@@ -2523,10 +2799,7 @@ def _mark_papers_seen(papers: list, source: str) -> None:
             if key not in seen:
                 seen[key] = {"status": "inboxed", "at": now, "title": (p.title or "")[:120]}
         try:
-            SEEN_PAPERS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = SEEN_PAPERS_PATH.with_suffix(".tmp")
-            temp_path.write_text(json.dumps(seen, ensure_ascii=False, indent=2), encoding="utf-8")
-            temp_path.replace(SEEN_PAPERS_PATH)
+            _save_seen_papers(seen)
         except Exception:
             pass
 
@@ -2571,7 +2844,11 @@ def _sanitize_model_config(cfg: dict[str, Any], fallback_env: str) -> dict[str, 
         "model": cfg.get("model", ""),
         "base_url": cfg.get("base_url", ""),
         "temperature": cfg.get("temperature", 0.2),
-        "api_key_present": bool(cfg.get("api_key") or os.environ.get(fallback_env)),
+        "api_key_present": bool(
+            cfg.get("api_key")
+            or os.environ.get(fallback_env)
+            or os.environ.get("OPENAI_API_KEY")
+        ),
     }
 
 
@@ -2631,21 +2908,26 @@ def _model_env_updates(payload: dict[str, Any]) -> dict[str, str]:
     embedding_api_key = str(payload.get("embedding_api_key") or "").strip()
     embedding_model = str(payload.get("embedding_model") or "").strip()
 
-    for preset in ("REASONING", "CHEAP"):
-        updates[f"CONFLUX_MODELS__{preset}__PROVIDER"] = "openai_compatible"
-        if base_url:
-            updates[f"CONFLUX_MODELS__{preset}__BASE_URL"] = base_url
-        if api_key:
-            updates[f"CONFLUX_MODELS__{preset}__API_KEY"] = api_key
-        if model:
-            updates[f"CONFLUX_MODELS__{preset}__MODEL"] = model
+    depth = str(payload.get("depth") or "standard").strip().lower()
+    if depth not in {"quick", "standard", "deep"}:
+        depth = "standard"
+    preset = depth.upper()
+    updates[f"CONFLUX_MODELS__{preset}__PROVIDER"] = "openai_compatible"
+    if base_url:
+        updates[f"CONFLUX_MODELS__{preset}__BASE_URL"] = base_url
+    if api_key:
+        updates[f"CONFLUX_MODELS__{preset}__API_KEY"] = api_key
+    if model:
+        updates[f"CONFLUX_MODELS__{preset}__MODEL"] = model
+    for role in ("PLANNER", "ANALYST", "RERANKER", "SYNTHESIZER", "VERIFIER"):
+        updates[f"CONFLUX_RESEARCH__PROFILES__{preset}__{role}_MODEL"] = depth
     if embedding_base_url or base_url:
         updates["CONFLUX_EMBEDDING__BASE_URL"] = embedding_base_url or base_url
     if embedding_api_key or api_key:
         updates["CONFLUX_EMBEDDING__API_KEY"] = embedding_api_key or api_key
     if embedding_model:
         updates["CONFLUX_EMBEDDING__MODEL"] = embedding_model
-    depth = str(payload.get("depth") or "standard").strip()
+    updates["CONFLUX_RESEARCH__DEPTH"] = depth
     if depth == "quick":
         updates["CONFLUX_AGENT__MAX_ITERATIONS"] = "1"
         updates["CONFLUX_RESEARCH__ENABLE_L4"] = "false"

@@ -29,7 +29,7 @@ plan:
     status: completed
     description: 固定离线测试、检索和报告评测基线，建立架构夹具和问题登记约定。
     deliverables:
-    - docs/m0_baseline_report.md
+    - docs/reports/m0_baseline_report.md
     - tests/fixtures/architecture/
   - id: m1-extension-protocol
     title: M1 扩展协议最小闭环
@@ -57,9 +57,9 @@ plan:
   - 修复画像优化、项目文档发现和研究查询超时等已知体验问题。
   - 在 M3 启动前单独确认 SQLite Run Store、初始化和迁移方案。
   source_documents:
-  - docs/execution_plan_v1.md
+  - docs/plans/execution_plan_v1.md
   - docs/architecture.md
-  - docs/m0_baseline_report.md
+  - docs/reports/m0_baseline_report.md
   - PRODUCT.md
   updated_at: '2026-07-18'
 refresh:

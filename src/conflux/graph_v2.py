@@ -1238,7 +1238,7 @@ def _append_stage(state: MultiAgentState, stage: str) -> dict:
     stages = list(summary.get("stages") or [])
     stages.append(stage)
     elapsed_ms = round((time.time() - started_at) * 1000, 2)
-    p95_ms = int(get("slo", "survey_p95_ms", default=45000))
+    p95_ms = int(summary.get("slo_p95_ms") or get("slo", "survey_p95_ms", default=45000))
     summary.update({
         "mode": summary.get("mode", "phase2"),
         "run_id": state.get("_run_id") or summary.get("run_id"),

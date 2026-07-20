@@ -2,7 +2,7 @@
 
 Conflux 是一个本地优先的研究工作台，将论文发现、知识入库、多源证据调研和项目进度审计连接起来，并生成可追溯的 Markdown、HTML 和结构化运行产物。
 
-当前项目适合个人研究和工程能力展示，重点包括多源检索编排、Evidence Graph、FactCheck、Chunk 级引用、离线评测和结构化 Trace。可扩展 ResearchOps 架构改造已完成 M0-M2：Plugin SDK、Registry、动态来源协议、第一方 RAG/Web/论文评审插件和 YAML 工作流均已接入。
+当前项目适合个人研究和工程能力展示，重点包括多源检索编排、Evidence Graph、FactCheck、Chunk 级引用、离线评测和结构化 Trace。可扩展 ResearchOps 架构改造已完成 M0-M2，三源研究质量闭环 P1 也已通过真实 Deep/full 验收；持久运行时 M3 尚未启动。
 
 ## 当前技术能力
 
@@ -11,7 +11,8 @@ Conflux 是一个本地优先的研究工作台，将论文发现、知识入库
 - `no_evidence`、`failed` 和 `fallback` 来源不会进入 Evidence Graph 共识投票。
 - 来源结果包含声明级 `evidence_refs`、`confidence` 和 `limitations`。
 - RAG 结果使用 `[RAG:quantum-crypto.txt#chunk-p0-c0]` 等 Chunk 级引用。
-- FactCheck 包含确定性追溯检查和独立模型核查；当前尚未形成自动修订再核查循环。
+- FactCheck 包含确定性追溯检查、独立模型核查、主答案修订和轻量复核闭环。
+- Deep 档支持六维研究计划、RunScoped 临时全文、数字引用编译、置信度附录和匿名成对盲评。
 - Trace JSONL 和 Run Summary JSON 用于检查每次运行的阶段和来源状态。
 - 离线评测覆盖检索质量、报告验收、失败来源泄漏和 Prompt Injection。
 
@@ -51,8 +52,11 @@ flowchart TD
 ├── .env.example
 ├── examples/
 ├── docs/
-│   ├── architecture.md       # 已批准的长期架构蓝图
-│   └── execution_plan_v1.md  # 已批准，M0-M2 完成 / M3+ 未启动
+│   ├── architecture.md
+│   ├── plans/
+│   │   └── execution_plan_v1.md  # M0-M2、P0、P1 已完成 / M3+ 未启动
+│   └── retrospectives/
+│       └── p1_execution_retrospective.md
 ├── data/documents/
 ├── prompts/
 ├── scripts/
@@ -77,10 +81,12 @@ flowchart TD
 
 - [PRODUCT.md](PRODUCT.md)：当前产品定位和设计原则。
 - [DESIGN.md](DESIGN.md)：当前工作台视觉和交互约束。
+- [docs/README.md](docs/README.md)：项目文档索引与分类说明。
 - [docs/architecture.md](docs/architecture.md)：已批准的可扩展 ResearchOps 长期架构蓝图。
-- [docs/execution_plan_v1.md](docs/execution_plan_v1.md)：M0-M2 已完成、M3+ 尚未启动的实施方案和验收记录。
+- [docs/plans/execution_plan_v1.md](docs/plans/execution_plan_v1.md)：M0-M2、P0 与 P1 已完成验收，M3+ 尚未启动的实施方案和验收记录。
+- [docs/retrospectives/p1_execution_retrospective.md](docs/retrospectives/p1_execution_retrospective.md)：P1 从失败基线到最终 Deep/full 验收的执行与技术复盘。
 
-蓝图负责把握项目方向，执行方案负责实现方法和验收标准。M1/M2 已完成核心协议、第一方能力、动态来源和 YAML 工作流；持久 Run Store、Evidence Ledger 等内容尚未开始实施。
+蓝图负责把握项目方向，执行方案负责实现方法和验收标准。M1/M2 已完成核心协议、第一方能力、动态来源和 YAML 工作流，P1 已完成研究质量闭环；持久 Run Store、Evidence Ledger 等内容尚未开始实施。
 
 ## 安装
 
@@ -90,18 +96,36 @@ python -m pip install -e ".[dev]"
 
 将 `.env.example` 复制为仅供本地使用的 `.env`，不要提交真实密钥。
 
-默认配置使用 OpenAI 兼容服务：
+模型由用户在 `config.yaml` 中配置。低/中/高档只定义角色、检索预算、并发、核验强度和超时，不在后台绑定具体提供商或型号。以下是结构示例：
 
 ```yaml
 models:
-  reasoning:
-    model: deepseek-v4-flash
-    base_url: https://www.dmxapi.cn/v1
+  fast:
+    provider: openai_compatible
+    model: your-fast-model
+    base_url: https://your-gateway.example/v1
+  strong:
+    provider: openai_compatible
+    model: your-strong-model
+    base_url: https://your-gateway.example/v1
+
+research:
+  profiles:
+    quick:
+      planner_model: fast
+      synthesizer_model: fast
+      max_parallel_subquestions: 2
+    deep:
+      planner_model: strong
+      synthesizer_model: strong
+      max_parallel_subquestions: 3
 
 embedding:
   model: text-embedding-3-small
-  base_url: https://www.dmxapi.cn/v1
+  base_url: https://your-gateway.example/v1
 ```
+
+仓库中的具体模型名仅是当前开发测试配置，用户可以替换全部 preset 映射。Gemini 当前因成本原因暂停使用，代码不会隐式启用它。
 
 真实运行需要配置：
 
@@ -114,6 +138,9 @@ $env:OPENAI_API_KEY="your-api-key"
 ```powershell
 $env:CONFLUX_MODELS__REASONING__API_KEY="your-api-key"
 $env:CONFLUX_MODELS__CHEAP__API_KEY="your-api-key"
+$env:CONFLUX_MODELS__FLASH__API_KEY="your-api-key"
+$env:CONFLUX_MODELS__BALANCED__API_KEY="your-api-key"
+$env:CONFLUX_MODELS__VERIFIER__API_KEY="your-api-key"
 $env:CONFLUX_EMBEDDING__API_KEY="your-api-key"
 $env:SERPAPI_API_KEY="your-serpapi-key"
 ```

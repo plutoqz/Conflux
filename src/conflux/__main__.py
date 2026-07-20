@@ -15,11 +15,18 @@ from .checkpointing import create_checkpointer, graph_config
 from .config import load as load_config
 from .graph import create_graph
 from .graph_v2 import create_multi_agent_graph
-from .model_factory import create_chat_model, validate_embedding_credentials, validate_runtime_credentials
+from .graph_p1 import create_p1_research_graph
+from .model_factory import (
+    create_chat_model,
+    create_research_models,
+    validate_embedding_credentials,
+    validate_runtime_credentials,
+)
 from .query_planner import QueryRewriteProvider
-from .rag import HybridRetriever, chunk_documents, clear_index, create_vector_store, index_documents
+from .rag import HybridRetriever, SemanticReranker, chunk_documents, clear_index, create_vector_store, index_documents
+from .research_modes import resolve_research_profile
 from .report import write_report_artifacts
-from .tools import ask_model, create_rag_tool, search_web, set_model
+from .tools import ask_model, create_rag_tool, create_web_tool, search_web, set_model
 from .trace import (
     event_from_state_key,
     events_from_source_results,
@@ -143,6 +150,16 @@ def _empty_multi_agent_state(
         "_checkpoint_backend": checkpoint_backend,
         "_resumed": resumed,
         "_review_status": "",
+        "_research_plan": {},
+        "_research_profile": {},
+        "_model_trace": {},
+        "_claim_assessments": [],
+        "_source_coverage": [],
+        "_research_gaps": [],
+        "_conflicts": [],
+        "_verification_issues": [],
+        "_gap_questions": [],
+        "_gap_iteration": 0,
         "final_answer": "",
     }
 
@@ -158,11 +175,19 @@ def query_command(
     stream_events: bool = False,
     trace_dir: str | None = None,
     run_id: str | None = None,
+    depth: str | None = None,
 ) -> dict:
     """Run one research query."""
 
-    load_config()
-    credential_problems = validate_runtime_credentials()
+    loaded_config = load_config()
+    research_profile = resolve_research_profile(depth)
+    run_id = run_id or new_run_id()
+    pipeline = str(loaded_config.get("research", {}).get("pipeline") or "p1").casefold()
+    use_p1_roles = mode == "phase2" and pipeline == "p1"
+    credential_problems = validate_runtime_credentials(
+        research_profile.depth,
+        include_legacy_presets=not use_p1_roles,
+    )
     if credential_problems:
         print("Error: real API execution is missing required credentials.")
         for problem in credential_problems:
@@ -170,19 +195,38 @@ def query_command(
         print("\nConfigure OPENAI_API_KEY, or source-specific CONFLUX_* API key overrides.")
         sys.exit(2)
 
-    print("-> Initializing models...")
-    reasoning_model = create_chat_model("reasoning")
-    cheap_model = create_chat_model("cheap")
-    set_model(reasoning_model)
-
     vector_store = create_vector_store()
     retriever = HybridRetriever(vector_store)
-    rag_tool = create_rag_tool(retriever, QueryRewriteProvider(cheap_model))
+    print("-> Initializing models...")
+    if mode == "phase2" and pipeline == "p1":
+        role_models, model_trace = create_research_models(research_profile.depth)
+        set_model(role_models["analyst"])
+        rag_tool = create_rag_tool(
+            retriever,
+            QueryRewriteProvider(),
+            SemanticReranker(role_models["reranker"], batch_size=research_profile.candidate_limit),
+            research_profile,
+        )
+        web_tool = create_web_tool(research_profile, run_id=run_id)
+        reasoning_model = role_models["synthesizer"]
+        cheap_model = role_models["verifier"]
+    else:
+        reasoning_model = create_chat_model("reasoning")
+        cheap_model = create_chat_model("cheap")
+        set_model(reasoning_model)
+        rag_tool = create_rag_tool(retriever, QueryRewriteProvider(cheap_model))
+        web_tool = search_web
+        role_models = {}
+        model_trace = {}
 
-    run_id = run_id or new_run_id()
     effective_thread_id = resume or thread_id or run_id
     checkpoint = create_checkpointer(checkpoint_backend)
     print(f"-> Mode: {mode}")
+    print(f"-> Research pipeline: {pipeline if mode == 'phase2' else 'phase1'}")
+    print(f"-> Research depth: {research_profile.depth}")
+    if model_trace:
+        for role, identity in model_trace.get("roles", {}).items():
+            print(f"-> Model {role}: {identity.get('model')} ({identity.get('preset')})")
     print(f"-> Run id: {run_id}")
     print(f"-> Thread id: {effective_thread_id}")
     print(f"-> Checkpoint backend: {checkpoint.backend}")
@@ -198,6 +242,34 @@ def query_command(
             "iteration_count": 0,
         }
         final_state, trace_events = _run_phase1_graph(graph, initial_state, query)
+    elif pipeline == "p1":
+        rag_agent = create_sub_agent("rag", role_models["reranker"], rag_tool)
+        web_agent = create_sub_agent("web", role_models["reranker"], web_tool)
+        graph = create_p1_research_graph(
+            rag_agent,
+            web_agent,
+            planner_model=role_models["planner"],
+            analyst_model=role_models["analyst"],
+            synthesizer_model=role_models["synthesizer"],
+            verifier_model=role_models["verifier"],
+            profile=research_profile,
+            model_trace=model_trace,
+            checkpointer=checkpoint.checkpointer,
+        )
+        initial_state = _empty_multi_agent_state(
+            query,
+            run_id=run_id,
+            thread_id=effective_thread_id,
+            checkpoint_backend=checkpoint.backend,
+            resumed=bool(resume),
+        )
+        final_state, trace_events = _run_phase2_graph(
+            graph,
+            initial_state,
+            query,
+            stream_events=stream_events,
+            thread_id=effective_thread_id,
+        )
     else:
         rag_agent = create_sub_agent("rag", reasoning_model, rag_tool)
         web_agent = create_sub_agent("web", reasoning_model, search_web)
@@ -238,6 +310,8 @@ def query_command(
             print(f"Raw sources: {artifacts.raw_sources_path.resolve()}")
         if artifacts.deep_evidence_json_path:
             print(f"Deep evidence JSON: {artifacts.deep_evidence_json_path.resolve()}")
+        if artifacts.audit_markdown_path:
+            print(f"Research audit: {artifacts.audit_markdown_path.resolve()}")
     else:
         print("\nWarning: no final answer was generated. Check API, embedding, and tool configuration.\n")
 
@@ -259,6 +333,7 @@ def query_command(
         "report_evidence_path": str(artifacts.evidence_json_path.resolve()) if artifacts and artifacts.evidence_json_path else "",
         "report_sources_path": str(artifacts.raw_sources_path.resolve()) if artifacts and artifacts.raw_sources_path else "",
         "report_deep_evidence_path": str(artifacts.deep_evidence_json_path.resolve()) if artifacts and artifacts.deep_evidence_json_path else "",
+        "report_audit_path": str(artifacts.audit_markdown_path.resolve()) if artifacts and artifacts.audit_markdown_path else "",
         "source_statuses": {
             source: payload.get("status")
             for source, payload in (final_state.get("_source_statuses") or {}).items()
@@ -273,6 +348,7 @@ def query_command(
         "evidence_json_path": summary["report_evidence_path"],
         "raw_sources_path": summary["report_sources_path"],
         "deep_evidence_json_path": summary["report_deep_evidence_path"],
+        "audit_markdown_path": summary["report_audit_path"],
     }
     print(f"Trace JSONL: {trace_path.resolve()}")
     print(f"Run summary: {summary_path.resolve()}")
@@ -323,6 +399,7 @@ def _run_phase2_graph(
     for event in graph.stream(initial_state, config=config, stream_mode="values"):
         for key, label in [
             ("source_results", "Dynamic sources"),
+            ("_research_plan", "Research Plan"),
             ("rag_result", "RAG Agent"),
             ("web_result", "Web Agent"),
             ("model_result", "Model Agent"),
@@ -330,6 +407,9 @@ def _run_phase2_graph(
             ("_arbitration", "Arbitration"),
             ("final_answer", "Synthesis"),
             ("_verified_answer", "FactCheck"),
+            ("_factcheck_report", "Verify & Revise"),
+            ("_verification_issues", "Verify & Revise"),
+            ("_deep_queries", "Gap Research"),
             ("_deep_research", "L4 Deep Research"),
         ]:
             value = event.get(key)
@@ -353,6 +433,9 @@ def _run_phase2_graph(
                     key, value, run_id=run_id, thread_id=thread_id, started_at=started_at
                 )
                 if trace_event:
+                    if key == "final_answer" and event.get("_synthesis_status"):
+                        trace_event.status = str(event["_synthesis_status"])
+                        trace_event.metadata["synthesis_error"] = str(event.get("_synthesis_error") or "")
                     events.append(trace_event)
                     if stream_events:
                         print(json.dumps(trace_event.to_dict(), ensure_ascii=False))
@@ -545,6 +628,7 @@ def main() -> None:
     research_parser.add_argument("--index", help="Index a document directory")
     research_parser.add_argument("--query", dest="query_opt", help="Research question used with --index")
     research_parser.add_argument("--mode", choices=["phase1", "phase2"], default="phase2", help="Run mode")
+    research_parser.add_argument("--depth", choices=["quick", "standard", "deep", "low", "medium", "high"], default="standard", help="Research depth and model tier")
     research_parser.add_argument("--output-dir", default="reports", help="Markdown/HTML output directory")
     research_parser.add_argument("--thread-id", help="LangGraph checkpoint thread id")
     research_parser.add_argument("--resume", help="Resume a checkpoint thread id")
@@ -557,6 +641,7 @@ def main() -> None:
     parser.add_argument("--index", help="Index a document directory")
     parser.add_argument("--query", dest="query_opt", help="Research question used with --index")
     parser.add_argument("--mode", choices=["phase1", "phase2"], default="phase2", help="Run mode")
+    parser.add_argument("--depth", choices=["quick", "standard", "deep", "low", "medium", "high"], default="standard", help="Research depth and model tier")
     parser.add_argument("--output-dir", default="reports", help="Markdown/HTML output directory")
     parser.add_argument("--thread-id", help="LangGraph checkpoint thread id")
     parser.add_argument("--resume", help="Resume a checkpoint thread id")
@@ -584,6 +669,7 @@ def main() -> None:
                 checkpoint_backend=args.checkpoint_backend,
                 stream_events=args.stream_events,
                 trace_dir=args.trace_dir,
+                depth=args.depth,
             )
         elif not args.index:
             parser.print_help()

@@ -1,0 +1,59 @@
+- id: rag_geo_001
+  query: "Autonomous GIS 的主要局限和未来工作是什么？"
+  paper_id: "2305.06453v4"
+  section: limitations
+  pages: [14, 16]
+
+- id: rag_geo_002
+  query: "LLM-Geo 为什么会因生成代码错误而失败，当前是否能自动测试和调试？"
+  paper_id: "2305.06453v4"
+  section: limitations
+  pages: [14, 15]
+
+- id: rag_geo_003
+  query: "LLM-Geo 对栅格数据处理有哪些明确限制？"
+  paper_id: "2305.06453v4"
+  section: limitations
+  pages: [14, 15]
+
+- id: rag_geo_004
+  query: "LLM-Find 在在线地理数据发现和 handbook 扩展方面有哪些限制？"
+  paper_id: "2407.21024v2"
+  section: discussion
+  pages: [14, 15]
+
+- id: rag_geo_005
+  query: "LLM-Find 如何调试数据获取代码，循环的停止上限是什么？"
+  paper_id: "2407.21024v2"
+  section: method
+  pages: [7, 7]
+
+- id: rag_geo_006
+  query: "LLM-Find 为什么仍难以判断数据尺度、分辨率和应用适用性？"
+  paper_id: "2407.21024v2"
+  section: discussion
+  pages: [15, 15]
+
+- id: rag_geo_007
+  query: "ShapefileGPT 的幻觉和随机性会怎样影响复杂边界处理？"
+  paper_id: "2410.12376v2"
+  section: limitations
+  pages: [17, 17]
+
+- id: rag_geo_008
+  query: "ShapefileGPT 的 Token 消耗和计算成本局限是什么？"
+  paper_id: "2410.12376v2"
+  section: limitations
+  pages: [17, 17]
+
+- id: rag_geo_009
+  query: "ShapefileGPT 的评测数据集为什么不足以证明复杂多样任务上的普适性？"
+  paper_id: "2410.12376v2"
+  section: limitations
+  pages: [17, 18]
+
+- id: rag_geo_010
+  query: "ShapefileGPT 的 planner 如何发现 worker 错误并重试，这会带来什么效率代价？"
+  paper_id: "2410.12376v2"
+  section: results
+  pages: [15, 17]

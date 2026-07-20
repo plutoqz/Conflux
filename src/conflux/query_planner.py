@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 
@@ -52,6 +53,12 @@ STOPWORDS = {
 DOMAIN_PRIORITY = {
     "nist.gov": 1.0,
     "csrc.nist.gov": 1.0,
+    "nccoe.nist.gov": 1.0,
+    "cisa.gov": 0.95,
+    "nsa.gov": 0.95,
+    "media.defense.gov": 0.95,
+    "europa.eu": 0.95,
+    "digital-strategy.ec.europa.eu": 0.95,
     "esri.com": 0.95,
     "developers.arcgis.com": 0.95,
     "doc.arcgis.com": 0.95,
@@ -122,6 +129,41 @@ CONCEPT_EXPANSIONS = {
 }
 
 
+TEMPORAL_MARKERS = {
+    "截至",
+    "当前",
+    "目前",
+    "最新",
+    "近期",
+    "近两年",
+    "近三年",
+    "recent",
+    "latest",
+    "current",
+    "as of",
+    "update",
+    "updated",
+}
+
+
+WEB_INTENT_EXPANSIONS = {
+    "第四轮": "fourth round",
+    "筛选": "selection",
+    "入选": "selection",
+    "选定": "selection",
+    "标准化": "standardization",
+    "额外签名": "additional digital signature",
+    "签名算法": "digital signature algorithms",
+    "迁移": "migration",
+    "路线图": "roadmap",
+    "指南": "guidance",
+    "指导": "guidance",
+    "最终": "final",
+    "草案": "draft",
+    "发布": "publication",
+}
+
+
 TECHNICAL_ENTITIES = {
     "arcgis",
     "esri",
@@ -137,6 +179,8 @@ TECHNICAL_ENTITIES = {
     "geosparql",
     "gis",
     "geoai",
+    "geospatial",
+    "geoprocessing",
     "llm",
     "rag",
     "bm25",
@@ -148,6 +192,37 @@ TECHNICAL_ENTITIES = {
 
 
 BILINGUAL_TERM_MAP = {
+    "地理处理": "geoprocessing",
+    "地理信息系统": "geographic information system",
+    "自动化": "automation",
+    "互操作性": "interoperability",
+    "可移植性": "portability",
+    "可重复性": "reproducibility",
+    "可解释性": "explainability",
+    "可靠性": "reliability",
+    "错误恢复": "error recovery",
+    "不确定性": "uncertainty",
+    "系统工程": "systems engineering",
+    "评估基准": "evaluation benchmark",
+    "基准": "benchmark",
+    "数据": "data",
+    "工具": "tools",
+    "部署": "deployment",
+    "治理": "governance",
+    "伦理": "ethics",
+    "应用边界": "application boundaries",
+    "跨学科": "interdisciplinary",
+    "可扩展性": "scalability",
+    "泛化能力": "generalization",
+    "泛化": "generalization",
+    "算法": "algorithm",
+    "效率": "efficiency",
+    "隐私": "privacy",
+    "公平性": "fairness",
+    "公平": "fairness",
+    "审计": "audit",
+    "当前": "current",
+    "目前": "current",
     "局限性": "limitations",
     "局限": "limitations",
     "挑战": "challenges",
@@ -244,17 +319,32 @@ def plan_queries(query: str, *, target: str, max_subqueries: int = 4) -> QueryPl
     expansions = _expansions_for_query(query)
 
     bilingual_queries = QueryRewriteProvider().rewrite(query, target=target)
-    subqueries = [query.strip(), *bilingual_queries]
     combined = _dedupe_words([*entities, *expansions])
-    if combined:
-        subqueries.append(" ".join(combined[:12]))
 
     if target == "web":
-        for domain in _priority_domains_for_query(query):
+        official_queries = _official_web_queries(query, combined)
+        if is_temporal_query(query):
+            # Official, dimension-specific searches must not sit behind several
+            # broad rewrites where a provider result cap can prevent execution.
+            subqueries = [query.strip(), *official_queries]
+            subqueries.extend(bilingual_queries[:1])
             if combined:
-                subqueries.append(f"site:{domain} {' '.join(combined[:8])}")
+                years = " ".join(str(year) for year in temporal_years(query))
+                subqueries.append(f"{' '.join(combined[:10])} latest official status {years}".strip())
+        else:
+            subqueries = [query.strip(), *bilingual_queries]
+            if combined:
+                subqueries.append(" ".join(combined[:12]))
+            subqueries.extend(official_queries)
     elif terms:
+        subqueries = [query.strip(), *bilingual_queries]
+        if combined:
+            subqueries.append(" ".join(combined[:12]))
         subqueries.append(" ".join(terms[:10]))
+    else:
+        subqueries = [query.strip(), *bilingual_queries]
+        if combined:
+            subqueries.append(" ".join(combined[:12]))
 
     clean = []
     seen = set()
@@ -285,6 +375,12 @@ def rewrite_queries(query: str, *, target: str, attempt: int = 1) -> list[str]:
     suffixes = ["method results limitations", "review benchmark dataset"]
     if target == "rag":
         candidates = [" ".join(core), f"{' '.join(core)} {suffixes[(attempt - 1) % len(suffixes)]}"]
+    elif is_temporal_query(query):
+        years = " ".join(str(year) for year in temporal_years(query))
+        candidates = [
+            f"{' '.join(core)} latest official status update {years}",
+            *_official_web_queries(query, core),
+        ]
     else:
         academic = " ".join(core)
         candidates = [
@@ -327,9 +423,15 @@ def extract_entities(text: str) -> set[str]:
         if entity in lower:
             entities.add(entity)
 
-    for raw in re.findall(r"\b[A-Z][A-Z0-9+.\-]{1,}\b|\b[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*\b", text):
+    acronym_pattern = (
+        r"(?<![A-Za-z0-9])(?:[A-Z][A-Z0-9+.\-]{1,}|"
+        r"[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*)(?![A-Za-z0-9])"
+    )
+    for raw in re.findall(acronym_pattern, text):
         if len(raw) >= 2:
             entities.add(raw.lower())
+
+    entities.update(item.lower() for item in standard_identifiers(text))
 
     for phrase in _known_phrases(text):
         entities.add(phrase.lower())
@@ -415,6 +517,16 @@ def _priority_domains_for_query(query: str) -> list[str]:
     domains: list[str] = []
     if any(term in lower for term in ("nist", "pqc", "后量子", "fips")):
         domains.extend(["nist.gov", "csrc.nist.gov"])
+    if any(term in lower for term in ("nccoe", "迁移", "migration", "roadmap")):
+        domains.append("nccoe.nist.gov")
+    if "cisa" in lower:
+        domains.append("cisa.gov")
+    if re.search(r"\bnsa\b", lower):
+        # NSA's public cybersecurity PDFs are reliably hosted on the official
+        # Defense media domain even when nsa.gov HTML pages reject fetches.
+        domains.append("media.defense.gov")
+    if any(term in lower for term in ("ai act", "欧盟", "european union", "eu ")):
+        domains.extend(["europa.eu", "digital-strategy.ec.europa.eu"])
     if any(term in lower for term in ("arcgis", "esri")):
         domains.extend(["esri.com", "developers.arcgis.com"])
     if any(term in lower for term in ("osm", "openstreetmap", "geosparql", "ogc", "知识图谱")):
@@ -426,6 +538,115 @@ def _priority_domains_for_query(query: str) -> list[str]:
     )):
         domains.extend(["semanticscholar.org", "openalex.org", "crossref.org", "arxiv.org", "doi.org"])
     return _dedupe_words(domains)
+
+
+def is_temporal_query(text: str) -> bool:
+    """Return whether the query explicitly asks for current or recent state."""
+
+    lowered = str(text or "").casefold()
+    return bool(re.search(r"\b20\d{2}\b", lowered)) or any(marker in lowered for marker in TEMPORAL_MARKERS)
+
+
+def temporal_years(text: str) -> list[int]:
+    """Return a compact newest-first year window for time-sensitive search."""
+
+    current_year = date.today().year
+    explicit = [int(value) for value in re.findall(r"\b(20\d{2})\b", str(text or ""))]
+    target = max(explicit) if explicit else current_year
+    target = min(target, current_year + 1)
+    return [target, target - 1]
+
+
+def _official_web_queries(query: str, combined: list[str]) -> list[str]:
+    domains = _priority_domains_for_query(query)
+    if not domains:
+        return []
+    explicit = _explicit_web_identifiers(query)
+    standards = standard_identifiers(query)
+    intents = [english for marker, english in WEB_INTENT_EXPANSIONS.items() if marker in query]
+    suffix = ""
+    if is_temporal_query(query):
+        years = " ".join(str(year) for year in temporal_years(query))
+        suffix = f" latest official status update {years}"
+    queries = []
+    agency_names = {"nist", "nccoe", "cisa", "nsa"}
+    agency_for_domain = {
+        "nist.gov": "NIST",
+        "csrc.nist.gov": "NIST",
+        "nccoe.nist.gov": "NCCoE",
+        "cisa.gov": "CISA",
+        "nsa.gov": "NSA",
+        "media.defense.gov": "NSA",
+    }
+    pqc_migration = any(term in query.casefold() for term in ("pqc", "post-quantum", "后量子")) and any(
+        term in query.casefold() for term in ("迁移", "migration", "roadmap", "路线图")
+    )
+    for domain in domains:
+        agency = agency_for_domain.get(domain, "")
+        topic_identifiers = [item for item in explicit if item.casefold() not in agency_names]
+        if domain == "csrc.nist.gov" and len(standards) >= 2:
+            final_standards = [item for item in standards if not item.casefold().endswith(" 206")]
+            draft_standards = [item for item in standards if item.casefold().endswith(" 206")]
+            if final_standards:
+                queries.append(
+                    f"site:{domain} {' '.join(final_standards)} final published NIST PQC standard{suffix}".strip()
+                )
+            if draft_standards:
+                queries.append(
+                    f"site:{domain} {' '.join(draft_standards)} FN-DSA Initial Public Draft soon".strip()
+                )
+            continue
+        domain_hints: list[str] = []
+        if pqc_migration:
+            domain_hints = {
+                "nist.gov": ["crypto agility", "SP 800-227"],
+                "csrc.nist.gov": ["crypto agility", "SP 800-227"],
+                "nccoe.nist.gov": ["SP 1800-38B", "SP 1800-38C", "CISA NSA quantum readiness fact sheet"],
+                "cisa.gov": ["quantum readiness", "automated PQC discovery inventory tools"],
+                "nsa.gov": ["CNSA 2.0", "CSfC Post Quantum Cryptography Guidance Addendum"],
+                "media.defense.gov": ["CNSS Policy 15", "CNSA 2.0", "NSA post-quantum guidance"],
+            }.get(domain, [])
+        if domain == "nccoe.nist.gov" and any(item.casefold().startswith("sp 1800-38") for item in standards):
+            queries.append(
+                f"site:{domain} SP 1800-38 post-quantum cryptography migration practice guide{suffix}".strip()
+            )
+            continue
+        focused = [agency, *topic_identifiers, *intents, *domain_hints]
+        background = [item for item in combined if item.casefold() not in agency_names] if len(focused) < 3 else []
+        core = _dedupe_words([*focused, *background])
+        if not core:
+            core = sorted(important_terms(query))
+        format_hint = " filetype:pdf" if domain in {
+            "nccoe.nist.gov", "cisa.gov", "nsa.gov", "media.defense.gov",
+        } else ""
+        queries.append(f"site:{domain}{format_hint} {' '.join(core[:12])}{suffix}".strip())
+    return queries
+
+
+def _explicit_web_identifiers(text: str) -> list[str]:
+    pattern = (
+        r"(?<![A-Za-z0-9])(?:[A-Z][A-Z0-9+.\-]{1,}|"
+        r"[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*)(?![A-Za-z0-9])"
+    )
+    identifiers = re.findall(pattern, str(text or ""))
+    identifiers.extend(standard_identifiers(text))
+    return _dedupe_words(identifiers)
+
+
+def standard_identifiers(text: str) -> list[str]:
+    """Expand compact standard lists such as ``FIPS 203/204/205/206``."""
+
+    identifiers: list[str] = []
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9])(FIPS|SP|IR)\s*"
+        r"(\d+(?:-\d+)*(?:\s*(?:/|,|，|、)\s*\d+(?:-\d+)*)*)",
+        flags=re.IGNORECASE,
+    )
+    for match in pattern.finditer(str(text or "")):
+        family = match.group(1).upper()
+        for number in re.split(r"\s*(?:/|,|，|、)\s*", match.group(2)):
+            identifiers.append(f"{family} {number}")
+    return _dedupe_words(identifiers)
 
 
 def _known_phrases(text: str) -> set[str]:

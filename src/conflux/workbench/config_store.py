@@ -120,6 +120,7 @@ def save_workbench_env(
     base_url: str = "",
     api_key: str = "",
     model: str = "",
+    tier_models: dict[str, dict[str, Any]] | None = None,
     embedding_base_url: str = "",
     embedding_api_key: str = "",
     embedding_model: str = "",
@@ -166,6 +167,21 @@ def save_workbench_env(
     if model:
         existing["CONFLUX_MODELS__REASONING__MODEL"] = model
         existing["CONFLUX_MODELS__CHEAP__MODEL"] = model
+    for tier in ("quick", "standard", "deep"):
+        tier_config = dict((tier_models or {}).get(tier) or {})
+        if not tier_config:
+            continue
+        prefix = f"CONFLUX_MODELS__{tier.upper()}"
+        existing[f"{prefix}__PROVIDER"] = "openai_compatible"
+        for field in ("base_url", "api_key", "model", "temperature"):
+            value = tier_config.get(field)
+            if value is None or str(value).strip() == "":
+                continue
+            existing[f"{prefix}__{field.upper()}"] = str(value).strip()
+        for role in ("planner", "analyst", "reranker", "synthesizer", "verifier"):
+            existing[
+                f"CONFLUX_RESEARCH__PROFILES__{tier.upper()}__{role.upper()}_MODEL"
+            ] = tier
     if embedding_base_url:
         existing["CONFLUX_EMBEDDING__BASE_URL"] = embedding_base_url
     if embedding_api_key:

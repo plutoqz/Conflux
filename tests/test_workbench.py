@@ -1,5 +1,6 @@
 import json
 import subprocess
+import time
 from io import BytesIO
 from pathlib import Path
 
@@ -341,6 +342,7 @@ def test_job_manager_submit_and_list(monkeypatch):
     result = mgr.submit("test query", {"depth": "quick"})
     assert "run_id" in result
     assert result["status"] == "pending"
+    assert result["timeout_seconds"] == 180
     jobs = mgr.list()
     assert any(j["run_id"] == result["run_id"] for j in jobs)
 
@@ -394,6 +396,9 @@ def test_workbench_config_merge_keeps_reasoning_and_unrelated_secrets(tmp_path, 
     assert saved["CONFLUX_EMBEDDING__API_KEY"] == "embedding-key"
     assert saved["SERPAPI_API_KEY"] == "search-key"
     assert saved["CONFLUX_ACCESS_TOKEN"] == "access-key"
+    # _reload_env mutates os.environ outside monkeypatch's bookkeeping; clear
+    # every temporary managed key so later no-credential tests stay isolated.
+    config_store.save_workbench_env(clear_keys=list(saved.keys()))
 
 
 def test_workbench_config_saves_web_search_provider_and_key(tmp_path, monkeypatch):
@@ -509,21 +514,72 @@ def test_job_manager_rejects_cancelling_terminal_job():
 
     assert manager.cancel(completed.run_id) is False
     assert completed._cancel_flag.is_set() is False
-    assert manager.cancel(running.run_id) is True
+    assert manager.cancel(running.run_id, reason="timeout") is True
     assert running._cancel_flag.is_set() is True
+    assert running.cancel_reason == "timeout"
 
 
 def test_frontend_has_login_and_timeout_cancellation_flow():
     html = Path("src/conflux/workbench/static/index.html").read_text(encoding="utf-8")
     app = Path("src/conflux/workbench/static/app.js").read_text(encoding="utf-8")
     timeout_start = app.index("const queryTimeout")
-    timeout_end = app.index("}, 300000);", timeout_start)
+    timeout_end = app.index("}, runTimeoutSeconds * 1000);", timeout_start)
     timeout_block = app[timeout_start:timeout_end]
 
     assert 'id="authDialog"' in html
     assert "'/api/login'" in app
-    assert "requestQueryCancellation(runId)" in timeout_block
+    assert "requestQueryCancellation(runId, 'timeout')" in timeout_block
     assert "clearInterval(pollInterval)" not in timeout_block
+    assert "300000" not in timeout_block
+
+
+def test_timeout_and_user_cancel_have_distinct_terminal_states():
+    from conflux.workbench.jobs import (
+        ResearchJob,
+        _JobCancelled,
+        _JobTimedOut,
+        _enforce_job_stop,
+        _finish_without_report,
+    )
+
+    timed_out = ResearchJob(
+        run_id="timeout",
+        query="q",
+        status="running",
+        timeout_seconds=240,
+        cancel_reason="timeout",
+        final_answer="partial answer",
+        artifacts={"markdown_path": "partial.md"},
+    )
+    timed_out._cancel_flag.set()
+    try:
+        _enforce_job_stop(timed_out, time.time())
+        raise AssertionError("timeout should stop the job")
+    except _JobTimedOut as exc:
+        _finish_without_report(timed_out, "timed_out", str(exc))
+
+    cancelled = ResearchJob(run_id="cancel", query="q", status="running", cancel_reason="user")
+    cancelled._cancel_flag.set()
+    try:
+        _enforce_job_stop(cancelled, time.time())
+        raise AssertionError("cancel should stop the job")
+    except _JobCancelled:
+        pass
+
+    deadline = ResearchJob(run_id="deadline", query="q", status="running", timeout_seconds=1)
+    try:
+        _enforce_job_stop(deadline, time.time() - 2)
+        raise AssertionError("backend deadline should stop the job")
+    except _JobTimedOut:
+        pass
+
+    assert timed_out.status == "timed_out"
+    assert timed_out.final_answer == ""
+    assert timed_out.artifacts == {}
+    assert "系统" in timed_out.error
+    assert timed_out.cancel_reason == "timeout"
+    assert cancelled.status == "running"
+    assert deadline.cancel_reason == "timeout"
 
 
 def test_frontend_query_failure_keeps_node_progress_visible():
@@ -1067,3 +1123,163 @@ def test_project_refresh_contract_is_manual_and_scheduler_is_inactive(tmp_path, 
     assert result["scheduler_active"] is False
     assert result["projects"][0]["project"]["refresh"]["interval_minutes"] == 120
     assert result["projects"][0]["repository"]["sync_status"] == "not_applicable"
+
+
+def test_workbench_config_saves_three_user_model_tiers_and_role_routes(tmp_path, monkeypatch):
+    from dotenv import dotenv_values
+    from conflux.workbench import config_store
+
+    env_file = tmp_path / ".env.workbench"
+    monkeypatch.setattr(config_store, "WORKBENCH_ENV", env_file)
+    monkeypatch.setattr(config_store, "_loaded_env_keys", set())
+    monkeypatch.setattr(config_store, "_original_env_values", {})
+
+    config_store.save_workbench_env(tier_models={
+        "quick": {
+            "base_url": "https://quick.example/v1",
+            "model": "user-quick",
+            "api_key": "quick-key",
+            "temperature": 0.1,
+        },
+        "standard": {
+            "base_url": "https://standard.example/v1",
+            "model": "user-standard",
+            "api_key": "standard-key",
+            "temperature": 0.2,
+        },
+        "deep": {
+            "base_url": "https://deep.example/v1",
+            "model": "user-deep",
+            "api_key": "deep-key",
+            "temperature": 0.3,
+        },
+    })
+
+    saved = dotenv_values(env_file)
+    assert saved["CONFLUX_MODELS__QUICK__MODEL"] == "user-quick"
+    assert saved["CONFLUX_MODELS__STANDARD__MODEL"] == "user-standard"
+    assert saved["CONFLUX_MODELS__DEEP__MODEL"] == "user-deep"
+    for tier in ("QUICK", "STANDARD", "DEEP"):
+        for role in ("PLANNER", "ANALYST", "RERANKER", "SYNTHESIZER", "VERIFIER"):
+            assert saved[f"CONFLUX_RESEARCH__PROFILES__{tier}__{role}_MODEL"] == tier.lower()
+
+    config_store.save_workbench_env(clear_keys=list(saved.keys()))
+
+
+def test_query_model_override_targets_only_selected_user_tier():
+    from conflux.workbench.jobs import _model_env_updates
+
+    updates = _model_env_updates({
+        "depth": "deep",
+        "base_url": "https://models.example/v1",
+        "model": "user-deep-model",
+        "api_key": "secret",
+    })
+
+    assert updates["CONFLUX_MODELS__DEEP__MODEL"] == "user-deep-model"
+    assert "CONFLUX_MODELS__REASONING__MODEL" not in updates
+    assert updates["CONFLUX_RESEARCH__PROFILES__DEEP__PLANNER_MODEL"] == "deep"
+    assert updates["CONFLUX_RESEARCH__PROFILES__DEEP__VERIFIER_MODEL"] == "deep"
+
+
+def test_job_status_exposes_complete_markdown_artifact_path():
+    from conflux.workbench.jobs import JobManager, ResearchJob
+
+    manager = JobManager()
+    manager._jobs["report-run"] = ResearchJob(
+        run_id="report-run",
+        query="q",
+        status="completed",
+        final_answer="x" * 5000,
+        pipeline="p1",
+        artifacts={"markdown_path": "reports/workbench/query/report.md"},
+    )
+
+    status = manager.get("report-run")
+    assert status is not None
+    assert status["report_md_path"] == "reports/workbench/query/report.md"
+    assert status["pipeline"] == "p1"
+    assert status["final_answer_truncated"] is True
+
+
+def test_full_text_missing_history_is_reselectable(monkeypatch):
+    from conflux.paper_ingestion import arxiv_source
+    from conflux.paper_ingestion.models import PaperRecord
+    from conflux.research_profile import ResearchProfile
+    from conflux.workbench import server
+
+    profile = ResearchProfile(
+        id="repair",
+        name="Repair",
+        fields=["cs.AI"],
+        research_questions=[],
+        keywords=["geospatial agent"],
+    )
+    paper = PaperRecord(id="2604.13888v2", title="Repairable", source="arxiv")
+    monkeypatch.setattr(server, "_load_seen_papers", lambda: {
+        "arxiv:2604.13888": {"status": "inboxed", "title": "Repairable"},
+    })
+    monkeypatch.setattr(server, "build_paper_ingestion_audit", lambda: {
+        "papers": [{
+            "identity": "arxiv:2604.13888",
+            "status": "full_text_missing",
+        }],
+    })
+    monkeypatch.setattr(arxiv_source, "profile_arxiv_queries", lambda profile: ["all:agent"])
+    monkeypatch.setattr(arxiv_source, "search_arxiv", lambda *args, **kwargs: [paper])
+
+    papers, skipped = server._discover_unseen_papers(profile, "arxiv", 1)
+
+    assert [item.id for item in papers] == ["2604.13888v2"]
+    assert skipped == 0
+
+
+def test_legacy_unknown_source_is_recovered_for_arxiv_ids():
+    from conflux.workbench.server import _normalized_paper_source
+
+    assert _normalized_paper_source("unknown", "2410.12376v2") == "arxiv"
+    assert _normalized_paper_source("", "2604.13888v1") == "arxiv"
+    assert _normalized_paper_source("unknown", "custom-paper") == "unknown"
+
+
+def test_promotion_history_records_actual_missing_full_text(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from langchain_core.documents import Document
+    from conflux.knowledge import paper_indexer
+    from conflux.paper_ingestion.models import PaperRecord
+    from conflux.workbench import server
+
+    seen_path = tmp_path / ".seen_papers.json"
+    seen_path.write_text(json.dumps({
+        "arxiv:2604.13888": {"status": "inboxed", "title": "Paper"},
+    }), encoding="utf-8")
+    monkeypatch.setattr(server, "SEEN_PAPERS_PATH", seen_path)
+    paper = PaperRecord(id="2604.13888v1", title="Paper", source="arxiv")
+    monkeypatch.setattr(paper_indexer, "load_inbox_payload", lambda path: [(paper, None)])
+    result = SimpleNamespace(
+        decisions=[SimpleNamespace(paper_id=paper.id, action="full_text")],
+        documents=[Document(page_content="summary", metadata={
+            "paper_id": paper.id,
+            "content_scope": "summary",
+            "full_text_status": "not_downloaded",
+        })],
+    )
+
+    server._update_seen_after_promotion(result, inbox="ignored.json", indexed=True)
+
+    saved = json.loads(seen_path.read_text(encoding="utf-8"))
+    assert saved["arxiv:2604.13888"]["status"] == "full_text_missing"
+    assert saved["arxiv:2604.13888"]["full_text_status"] == "not_downloaded"
+
+
+def test_frontend_exposes_three_model_tiers_markdown_result_and_ingestion_audit():
+    html = Path("src/conflux/workbench/static/index.html").read_text(encoding="utf-8")
+    app = Path("src/conflux/workbench/static/app.js").read_text(encoding="utf-8")
+
+    for tier in ("quick", "standard", "deep"):
+        for suffix in ("BaseUrl", "ModelName", "ApiKey", "Temperature"):
+            assert f'id="{tier}{suffix}"' in html
+    assert 'id="queryReportPreview"' in html
+    assert 'id="paperIngestionAudit"' in html
+    assert "tier_models: allTierModelsPayload()" in app
+    assert "'/api/markdown?path=' + encodeURIComponent(reportPath)" in app

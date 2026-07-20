@@ -134,7 +134,7 @@ def test_validate_runtime_credentials_reports_missing_keys(monkeypatch):
 
     problems = validate_runtime_credentials()
 
-    assert any("models.reasoning" in problem for problem in problems)
+    assert any("models." in problem for problem in problems)
     assert any("embedding" in problem for problem in problems)
 
 

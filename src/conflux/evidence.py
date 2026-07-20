@@ -25,7 +25,10 @@ EVIDENCE_AUTHORITY = {
     "authoritative_document": 0.85,
     "preprint": 0.72,
     "community_content": 0.42,
-    "model_inference": 0.2,
+    # Parametric knowledge is not externally citable, but it is still useful
+    # research context. Reliability is controlled by claim type and required
+    # verification, not by assigning the Model channel a near-zero weight.
+    "model_inference": 0.55,
 }
 
 LOW_RELEVANCE_AUTHORITY_MULTIPLIER = 0.6
@@ -64,6 +67,17 @@ class EvidenceNode:
     relevance: float = 0.0
     research_type: str = ""
     metric: str = ""
+    document_title: str = ""
+    url: str = ""
+    published_at: str = ""
+    retrieved_at: str = ""
+    content_hash: str = ""
+    content_kind: str = ""
+    directness: float = 0.0
+    subquestion_id: str = ""
+    relationship: str = "supports"
+    page_start: int | None = None
+    page_end: int | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -236,7 +250,7 @@ def build_evidence_graph_from_results(results: dict[str, SourceResult]) -> Evide
                     continue
                 graph.add_node(EvidenceNode(
                     id=f"{source}_claim_{index}",
-                    claim=claim.claim[:240],
+                    claim=claim.claim[:500],
                     source=source,
                     source_detail=result.detail or result.source,
                     authority_score=_authority_for_item(result, claim),
@@ -250,6 +264,17 @@ def build_evidence_graph_from_results(results: dict[str, SourceResult]) -> Evide
                     relevance=claim.relevance,
                     research_type=claim.research_type,
                     metric=claim.metric,
+                    document_title=claim.document_title,
+                    url=claim.url,
+                    published_at=claim.published_at,
+                    retrieved_at=claim.retrieved_at,
+                    content_hash=claim.content_hash,
+                    content_kind=claim.content_kind,
+                    directness=claim.directness,
+                    subquestion_id=claim.subquestion_id,
+                    relationship=claim.relationship,
+                    page_start=claim.page_start,
+                    page_end=claim.page_end,
                 ))
         else:
             for node in extract_claims_from_text(
@@ -278,11 +303,13 @@ def _authority_for_result(source: str, result: SourceResult) -> float:
 
 def _authority_for_item(result: SourceResult, item: EvidenceItem) -> float:
     evidence_class = item.evidence_class or result.evidence_class
-    authority = EVIDENCE_AUTHORITY.get(evidence_class, 0.2)
+    authority = item.authority or EVIDENCE_AUTHORITY.get(evidence_class, 0.55)
     if result.is_low_relevance:
         authority *= LOW_RELEVANCE_AUTHORITY_MULTIPLIER
     if item.relevance:
         authority *= 0.7 + (0.3 * max(0.0, min(1.0, item.relevance)))
+    if item.directness:
+        authority *= 0.75 + (0.25 * max(0.0, min(1.0, item.directness)))
     return round(authority, 3)
 
 

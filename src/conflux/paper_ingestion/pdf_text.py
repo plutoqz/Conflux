@@ -46,9 +46,11 @@ def extract_pdf_text(path: str | Path, *, max_pages: int = 30) -> PDFTextResult:
     try:
         reader = PdfReader(str(pdf_path))
         pages = []
-        for page in reader.pages[:max_pages]:
-            pages.append(page.extract_text() or "")
-        text = "\n\n".join(part.strip() for part in pages if part.strip())
+        for page_number, page in enumerate(reader.pages[:max_pages], start=1):
+            extracted = (page.extract_text() or "").strip()
+            if extracted:
+                pages.append(f"[[CONFLUX_PAGE:{page_number}]]\n{extracted}")
+        text = "\n\n".join(pages)
         if not text:
             return PDFTextResult(path=pdf_path, text="", status="no_text", error="No extractable text found.")
         return PDFTextResult(path=pdf_path, text=text, status="success")

@@ -162,6 +162,20 @@ def test_search_web_integration_uses_bing_after_garbage_primary(monkeypatch):
         "url": "https://example.gov/flood-risk",
     }])
     monkeypatch.setattr(web, "_search_academic_sources", lambda query, max_results: [])
+    monkeypatch.setattr(web, "_fetch_web_results", lambda results: [{
+        **item,
+        "fetch": web.FetchedContent(
+            url=item["url"],
+            final_url=item["url"],
+            title=item["title"],
+            text="Official flood risk assessment research reports methods and findings for flood planning.",
+            content_type="text/html",
+            content_kind="html",
+            status="success",
+            retrieved_at="2026-07-18T00:00:00+00:00",
+            content_hash="abc",
+        ),
+    } for item in results])
     monkeypatch.setattr(web, "get", lambda *path, default=None: {
         ("web_search", "provider"): "duckduckgo",
         ("web_search", "fallback_providers"): ["duckduckgo", "bing"],
@@ -330,6 +344,12 @@ def test_index_documents_upserts_changed_content_by_logical_chunk_id():
     assert index_documents(store, [changed]) == 1
     assert store.items["paper#limitations"][0] == "new limitations"
     assert store.items["paper#limitations"][1]["content_version"]
+    metadata_changed = Document(
+        page_content="new limitations",
+        metadata={"chunk_id": "paper#limitations", "content_scope": "full_text", "full_text_indexed": True},
+    )
+    assert index_documents(store, [metadata_changed]) == 1
+    assert store.items["paper#limitations"][1]["full_text_indexed"] is True
 
 
 def test_trace_event_exposes_retrieval_and_provider_diagnostics():

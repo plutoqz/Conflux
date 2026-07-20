@@ -134,11 +134,13 @@ def promote_inbox(
         for doc in docs:
             sources.append(knowledge_source_from_metadata(doc.metadata))
 
-    indexed_count = _index_documents(documents) if index else 0
     if index:
         for document in documents:
-            if document.metadata.get("full_text_requested"):
-                document.metadata["full_text_indexed"] = True
+            document.metadata["full_text_indexed"] = bool(
+                document.metadata.get("content_scope") == "full_text"
+                and document.metadata.get("full_text_extracted")
+            )
+    indexed_count = _index_documents(documents) if index else 0
     artifacts = write_promoted_papers(documents, decisions, sources, out_dir=out_dir) if out_dir else None
     return PaperPromotionResult(
         documents=documents,
@@ -323,6 +325,11 @@ def _full_text_documents(
             char_start=char_start,
             char_end=char_end,
         )
+        page_start, page_end = _page_range_for_offsets(full_text, char_start, char_end)
+        if page_start is not None:
+            metadata["page_start"] = page_start
+        if page_end is not None:
+            metadata["page_end"] = page_end
         content = "\n".join([
             f"# {paper.title}",
             "",
@@ -424,11 +431,19 @@ def _sectioned_text_chunks(text: str, *, chunk_chars: int) -> list[tuple[str, st
         return []
     headings: list[tuple[int, str]] = []
     heading_pattern = re.compile(
-        r"^(?:#{1,6}\s+|\d+(?:\.\d+)*\s+)(.+?)\s*$",
+        r"^(?:#{1,6}\s+|\d+(?:\.\d+)*\.?\s+)(.+?)\s*$",
         flags=re.MULTILINE,
     )
+    inherited_section = "full_text"
+    canonical_sections = {
+        "abstract", "introduction", "method", "results", "limitations",
+        "discussion", "future_work", "conclusion",
+    }
     for match in heading_pattern.finditer(clean):
-        headings.append((match.start(), _normalize_paper_section(match.group(1))))
+        normalized = _normalize_paper_section(match.group(1))
+        if normalized in canonical_sections:
+            inherited_section = normalized
+        headings.append((match.start(), inherited_section if inherited_section != "full_text" else normalized))
 
     chunks: list[tuple[str, str, int, int]] = []
     start = 0
@@ -477,3 +492,22 @@ def _normalize_paper_section(value: str) -> str:
         if marker in text:
             return normalized
     return text[:80]
+
+
+def _page_range_for_offsets(text: str, start: int, end: int) -> tuple[int | None, int | None]:
+    markers = [
+        (match.start(), int(match.group(1)))
+        for match in re.finditer(r"\[\[CONFLUX_PAGE:(\d+)\]\]", text)
+    ]
+    if not markers:
+        return None, None
+    page_start = markers[0][1]
+    page_end = page_start
+    for position, page in markers:
+        if position <= start:
+            page_start = page
+        if position <= end:
+            page_end = page
+        else:
+            break
+    return page_start, page_end

@@ -30,6 +30,14 @@ from conflux.trace import new_run_id
 _EXECUTION_LOCK = threading.RLock()
 
 
+class _JobCancelled(RuntimeError):
+    pass
+
+
+class _JobTimedOut(RuntimeError):
+    pass
+
+
 # ── Append-only event log (multi-consumer safe) ────────────
 
 
@@ -77,13 +85,17 @@ class ResearchJob:
     query: str
     started_at: float = field(default_factory=time.time)
     ended_at: float | None = None
-    status: str = "pending"  # pending | running | completed | failed | cancelled
+    status: str = "pending"  # pending | running | completed | failed | cancelled | timed_out
+    timeout_seconds: int = 300
     final_answer: str = ""
     source_statuses: dict[str, str] = field(default_factory=dict)
     factcheck_status: str = ""
+    pipeline: str = ""
+    artifacts: dict[str, str] = field(default_factory=dict)
     error: str = ""
     current_stage: str = ""
     progress: dict[str, str] = field(default_factory=dict)
+    cancel_reason: str = ""
     thread: threading.Thread | None = None
     _cancel_flag: threading.Event = field(default_factory=threading.Event)
     _event_log: _EventLog = field(default_factory=_EventLog)
@@ -93,13 +105,34 @@ class ResearchJob:
         return self.status in ("pending", "running")
 
 
+def _enforce_job_stop(job: ResearchJob, started_at: float) -> None:
+    if job._cancel_flag.is_set():
+        if job.cancel_reason == "timeout":
+            raise _JobTimedOut(
+                f"系统在 {job.timeout_seconds} 秒档位时限后自动终止研究任务"
+            )
+        raise _JobCancelled("用户取消了研究任务")
+    if time.time() - started_at >= job.timeout_seconds:
+        job.cancel_reason = "timeout"
+        raise _JobTimedOut(f"研究任务超过 {job.timeout_seconds} 秒档位时限")
+
+
+def _finish_without_report(job: ResearchJob, status: str, error: str) -> None:
+    job.ended_at = time.time()
+    job.status = status
+    job.final_answer = ""
+    job.artifacts = {}
+    job.factcheck_status = ""
+    job.error = f"{error}，未生成正式报告。"
+
+
 # ── JobManager ─────────────────────────────────────────────
 
 
 class JobManager:
     """Singleton registry of in-flight and recent research jobs.
 
-    Expires completed/cancelled/failed jobs after *ttl_seconds*.
+    Expires terminal jobs after *ttl_seconds*.
     """
 
     MAX_JOBS = 100
@@ -113,7 +146,14 @@ class JobManager:
     def submit(self, query: str, payload: dict[str, Any], *, run_id: str | None = None) -> dict[str, Any]:
         """Create a new job and start it in a background thread."""
         run_id = run_id or new_run_id()
-        job = ResearchJob(run_id=run_id, query=query)
+        depth = str(payload.get("depth") or "standard")
+        try:
+            from conflux.research_modes import resolve_research_profile
+
+            timeout_seconds = resolve_research_profile(depth).timeout_seconds
+        except Exception:
+            timeout_seconds = 300
+        job = ResearchJob(run_id=run_id, query=query, timeout_seconds=max(1, int(timeout_seconds)))
         with self._lock:
             if len(self._jobs) >= self.MAX_JOBS:
                 raise RuntimeError(f"Job limit reached ({self.MAX_JOBS}). Wait for older jobs to expire.")
@@ -130,6 +170,7 @@ class JobManager:
             "status": "pending",
             "events_url": f"/api/query/jobs/{run_id}/events",
             "status_url": f"/api/query/jobs/{run_id}",
+            "timeout_seconds": job.timeout_seconds,
         }
 
     def get(self, run_id: str) -> dict[str, Any] | None:
@@ -145,14 +186,19 @@ class JobManager:
             "status": job.status,
             "started_at": job.started_at,
             "ended_at": job.ended_at,
+            "timeout_seconds": job.timeout_seconds,
             "final_answer": full_answer[:4000],
             "final_answer_truncated": answer_len > 4000,
             "final_answer_total_length": answer_len,
             "source_statuses": job.source_statuses,
             "factcheck_status": job.factcheck_status,
+            "pipeline": job.pipeline,
+            "artifacts": dict(job.artifacts),
+            "report_md_path": str(job.artifacts.get("markdown_path") or ""),
             "error": job.error,
             "current_stage": job.current_stage,
             "progress": dict(job.progress),
+            "cancel_reason": job.cancel_reason,
         }
 
     def event_log(self, run_id: str) -> _EventLog | None:
@@ -160,12 +206,13 @@ class JobManager:
         job = self._jobs.get(run_id)
         return job._event_log if job else None
 
-    def cancel(self, run_id: str) -> bool:
+    def cancel(self, run_id: str, *, reason: str = "user") -> bool:
         """Signal a best-effort cancel for an active job."""
         with self._lock:
             job = self._jobs.get(run_id)
             if job is None or not job.active:
                 return False
+            job.cancel_reason = "timeout" if reason == "timeout" else "user"
             job._cancel_flag.set()
             return True
 
@@ -196,16 +243,13 @@ class JobManager:
         updates = _model_env_updates(payload)
         output_dir = _path_value(payload.get("output_dir"), "reports/workbench/query")
         mode = str(payload.get("mode") or "phase2")
+        depth = str(payload.get("depth") or "standard")
 
         stream = io.StringIO()
         try:
             with _EXECUTION_LOCK:
-                # Early cancel check — skip heavy imports if already cancelled
-                if job._cancel_flag.is_set():
-                    job.ended_at = time.time()
-                    job.status = "cancelled"
-                    job._event_log.append(None)
-                    return
+                # Include time spent waiting for the execution lock in the tier deadline.
+                _enforce_job_stop(job, job.started_at)
                 job.status = "running"
 
                 with _temporary_env(updates), contextlib.redirect_stdout(stream):
@@ -217,17 +261,15 @@ class JobManager:
                     _original_run_phase2 = main_mod._run_phase2_graph
 
                     def _instrumented_run_phase2(graph, initial_state, query2, *, stream_events=False, thread_id=None):
-                        started_at_ts = time.time()
+                        started_at_ts = job.started_at
                         event = initial_state
                         seen = set()
                         events = []
                         config_graph = main_mod.graph_config(thread_id)
                         for event in graph.stream(initial_state, config=config_graph, stream_mode="values"):
-                            if job._cancel_flag.is_set():
-                                job.status = "cancelled"
-                                job._event_log.append(None)
-                                return event, events
+                            _enforce_job_stop(job, started_at_ts)
                             for key, label in [
+                                ("_research_plan", "Research Plan"),
                                 ("rag_result", "RAG Agent"),
                                 ("web_result", "Web Agent"),
                                 ("model_result", "Model Agent"),
@@ -235,6 +277,9 @@ class JobManager:
                                 ("_arbitration", "Arbitration"),
                                 ("final_answer", "Synthesis"),
                                 ("_verified_answer", "FactCheck"),
+                                ("_factcheck_report", "Verify & Revise"),
+                                ("_verification_issues", "Verify & Revise"),
+                                ("_deep_queries", "Gap Research"),
                                 ("_deep_research", "L4 Deep Research"),
                             ]:
                                 value = event.get(key)
@@ -246,6 +291,11 @@ class JobManager:
                                         started_at=started_at_ts,
                                     )
                                     if trace_event:
+                                        if key == "final_answer" and event.get("_synthesis_status"):
+                                            trace_event.status = str(event["_synthesis_status"])
+                                            trace_event.metadata["synthesis_error"] = str(
+                                                event.get("_synthesis_error") or ""
+                                            )
                                         events.append(trace_event)
                                         job.current_stage = trace_event.stage
                                         job.progress[trace_event.stage] = trace_event.status
@@ -258,6 +308,7 @@ class JobManager:
                             query, mode=mode, output_dir=output_dir,
                             stream_events=False, trace_dir=output_dir,
                             run_id=run_id,
+                            depth=depth,
                         )
                     finally:
                         main_mod._run_phase2_graph = _original_run_phase2
@@ -269,11 +320,18 @@ class JobManager:
                 for source, p in (state.get("_source_statuses") or {}).items()
             }
             job.factcheck_status = str(state.get("_factcheck_status") or "")
+            job.pipeline = str((state.get("_run_summary") or {}).get("mode") or "")
+            job.artifacts = {
+                str(key): str(value)
+                for key, value in (state.get("_report_artifacts") or {}).items()
+                if value
+            }
 
-            if job._cancel_flag.is_set():
-                job.status = "cancelled"
-            else:
-                job.status = "completed"
+            job.status = "completed"
+        except _JobCancelled as exc:
+            _finish_without_report(job, "cancelled", str(exc))
+        except _JobTimedOut as exc:
+            _finish_without_report(job, "timed_out", str(exc))
         except SystemExit as exc:
             job.ended_at = time.time()
             job.status = "failed"
@@ -325,21 +383,26 @@ def _model_env_updates(payload: dict[str, Any]) -> dict[str, str]:
     embedding_api_key = str(payload.get("embedding_api_key") or "").strip()
     embedding_model = str(payload.get("embedding_model") or "").strip()
 
-    for preset in ("REASONING", "CHEAP"):
-        updates[f"CONFLUX_MODELS__{preset}__PROVIDER"] = "openai_compatible"
-        if base_url:
-            updates[f"CONFLUX_MODELS__{preset}__BASE_URL"] = base_url
-        if api_key:
-            updates[f"CONFLUX_MODELS__{preset}__API_KEY"] = api_key
-        if model:
-            updates[f"CONFLUX_MODELS__{preset}__MODEL"] = model
+    depth = str(payload.get("depth") or "standard").strip().lower()
+    if depth not in {"quick", "standard", "deep"}:
+        depth = "standard"
+    preset = depth.upper()
+    updates[f"CONFLUX_MODELS__{preset}__PROVIDER"] = "openai_compatible"
+    if base_url:
+        updates[f"CONFLUX_MODELS__{preset}__BASE_URL"] = base_url
+    if api_key:
+        updates[f"CONFLUX_MODELS__{preset}__API_KEY"] = api_key
+    if model:
+        updates[f"CONFLUX_MODELS__{preset}__MODEL"] = model
+    for role in ("PLANNER", "ANALYST", "RERANKER", "SYNTHESIZER", "VERIFIER"):
+        updates[f"CONFLUX_RESEARCH__PROFILES__{preset}__{role}_MODEL"] = depth
     if embedding_base_url or base_url:
         updates["CONFLUX_EMBEDDING__BASE_URL"] = embedding_base_url or base_url
     if embedding_api_key or api_key:
         updates["CONFLUX_EMBEDDING__API_KEY"] = embedding_api_key or api_key
     if embedding_model:
         updates["CONFLUX_EMBEDDING__MODEL"] = embedding_model
-    depth = str(payload.get("depth") or "standard").strip()
+    updates["CONFLUX_RESEARCH__DEPTH"] = depth
     if depth == "quick":
         updates["CONFLUX_AGENT__MAX_ITERATIONS"] = "1"
         updates["CONFLUX_RESEARCH__ENABLE_L4"] = "false"

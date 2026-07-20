@@ -16,6 +16,32 @@ let projectPlanAnalysis = null;
 let projectCharterDraft = null;
 let planAnalysisTimers = [];
 let projectRegistryDir = 'projects';
+const MODEL_TIERS = ['quick', 'standard', 'deep'];
+
+function normalizeTier(value) {
+  return MODEL_TIERS.includes(value) ? value : 'standard';
+}
+
+function tierFieldId(tier, suffix) {
+  return normalizeTier(tier) + suffix;
+}
+
+function tierModelPayload(tier) {
+  const resolved = normalizeTier(tier);
+  return {
+    base_url: $(tierFieldId(resolved, 'BaseUrl')).value.trim(),
+    model: $(tierFieldId(resolved, 'ModelName')).value.trim(),
+    api_key: $(tierFieldId(resolved, 'ApiKey')).value,
+    temperature: Number($(tierFieldId(resolved, 'Temperature')).value || 0.2),
+    depth: resolved
+  };
+}
+
+function allTierModelsPayload() {
+  const payload = {};
+  MODEL_TIERS.forEach((tier) => { payload[tier] = tierModelPayload(tier); });
+  return payload;
+}
 
 function escapeHtml(value) {
   return String(value == null ? '' : value).replace(/[&<>"']/g, (char) => ({
@@ -270,11 +296,11 @@ async function optimizeProfile() {
   const button = $('optimizeProfile');
   enterBusy(button, '优化画像');
   try {
-    const data = await api('/api/profile/optimize', Object.assign({}, source, {
-      base_url: $('baseUrl').value.trim(),
-      model: $('modelName').value.trim(),
-      api_key: $('apiKey').value
-    }));
+    const data = await api('/api/profile/optimize', Object.assign(
+      {},
+      source,
+      tierModelPayload($('depthSelect').value)
+    ));
     if (!data.ok) {
       toast(data.error || '画像优化失败', 'err');
       return;
@@ -318,14 +344,26 @@ function updatePaperSourceFields() {
   $('fixtureField').hidden = $('paperSource').value !== 'fixture';
 }
 
-function hasReasoningCredential() {
+function hasReasoningCredential(tier) {
+  const resolved = normalizeTier(tier || ($('queryDepth').value || $('depthSelect').value));
   const credentials = (statusCache && statusCache.credentials) || {};
-  return Boolean($('apiKey').value.trim() || credentials.openai_api_key || credentials.reasoning_api_key);
+  return Boolean(
+    $(tierFieldId(resolved, 'ApiKey')).value.trim() ||
+    credentials[resolved + '_api_key'] ||
+    credentials.openai_api_key
+  );
 }
 
 function hasEmbeddingCredential() {
   const credentials = (statusCache && statusCache.credentials) || {};
-  return Boolean($('embeddingApiKey').value.trim() || $('apiKey').value.trim() || credentials.embedding_api_key || credentials.openai_api_key);
+  const tier = normalizeTier($('queryDepth').value || $('depthSelect').value);
+  return Boolean(
+    $('embeddingApiKey').value.trim() ||
+    $(tierFieldId(tier, 'ApiKey')).value.trim() ||
+    credentials.embedding_api_key ||
+    credentials.openai_api_key ||
+    credentials[tier + '_api_key']
+  );
 }
 
 function webSearchState() {
@@ -389,7 +427,7 @@ function capabilityRows(credentials) {
   const profilesReady = Boolean(statusCache && (statusCache.profiles || []).length);
   const search = webSearchState();
   return [
-    { name: '推理模型', detail: '生成、仲裁与事实核查', ready: Boolean(credentials.openai_api_key || credentials.reasoning_api_key), icon: 'brain-circuit', required: true },
+    { name: '分档推理模型', detail: '当前默认档位的规划、分析与核验', ready: hasReasoningCredential($('depthSelect').value), icon: 'brain-circuit', required: true },
     { name: '向量检索', detail: '检索本地论文和文档', ready: Boolean(credentials.embedding_api_key || credentials.openai_api_key), icon: 'database', required: false },
     { name: '网络搜索', detail: search.provider === 'serpapi' ? 'SerpAPI 外部证据' : search.provider === 'bing' ? 'Bing 外部证据' : search.provider === 'google' ? 'Google 外部证据' : 'DuckDuckGo + 可用备用来源', ready: search.ready, icon: 'globe-2', required: false },
     { name: '研究画像', detail: '指导论文搜索和评分', ready: profilesReady, icon: 'user-round-search', required: true }
@@ -429,6 +467,21 @@ function syncProgressProjectPath(force = false) {
   const projectPath = selected && (selected.project_paths || [])[0];
   if (force) $('progressProjectPath').value = projectPath || '';
   else if (projectPath && !$('progressProjectPath').value.trim()) $('progressProjectPath').value = projectPath;
+}
+
+function renderPaperIngestionAudit(audit) {
+  const state = audit || {};
+  $('fullTextIndexedCount').textContent = Number(state.full_text_indexed || 0);
+  $('summaryIndexedCount').textContent = Number(state.summary_only || 0);
+  const repairs = state.repairable || [];
+  $('fullTextRepairCount').textContent = repairs.length;
+  if (!state.available) {
+    $('paperIngestionAuditDetail').textContent = '向量库状态不可用：' + (state.error || '未找到本地索引');
+    return;
+  }
+  $('paperIngestionAuditDetail').textContent = repairs.length
+    ? '待修复：' + repairs.map((item) => (item.paper_id || '') + (item.title ? ' · ' + item.title : '')).join('；')
+    : '全文策略与本地向量索引已核对，没有发现假全文状态。';
 }
 
 async function refreshStatus(options = {}) {
@@ -478,8 +531,14 @@ async function refreshStatus(options = {}) {
       $('promoteInbox').value = (nextStatus.defaults.inbox_dir || '') + '/paper_inbox.json';
       $('promoteOut').value = nextStatus.defaults.promote_dir || '';
       $('progressOut').value = nextStatus.defaults.progress_dir || 'reports/workbench/progress';
-      $('baseUrl').value = (nextStatus.defaults.reasoning || {}).base_url || '';
-      $('modelName').value = (nextStatus.defaults.reasoning || {}).model || '';
+      const tierModels = nextStatus.defaults.tier_models || {};
+      MODEL_TIERS.forEach((tier) => {
+        const model = tierModels[tier] || {};
+        $(tierFieldId(tier, 'BaseUrl')).value = model.base_url || '';
+        $(tierFieldId(tier, 'ModelName')).value = model.model || '';
+        $(tierFieldId(tier, 'Temperature')).value = Number(model.temperature == null ? 0.2 : model.temperature);
+        $(tierFieldId(tier, 'ApiKey')).value = '';
+      });
       $('embeddingBaseUrl').value = (nextStatus.defaults.embedding || {}).base_url || '';
       $('embeddingModel').value = (nextStatus.defaults.embedding || {}).model || '';
       $('webSearchProvider').value = (nextStatus.defaults.web_search || {}).provider || 'duckduckgo';
@@ -491,6 +550,7 @@ async function refreshStatus(options = {}) {
     }
 
     updateWebSearchFields();
+    renderPaperIngestionAudit(nextStatus.paper_ingestion_audit || {});
     renderCapabilities(nextStatus.credentials || {});
     syncProgressProjectPath(!initialized || options.resetDefaults);
     renderReports();
@@ -1334,15 +1394,10 @@ async function openFile(path) {
   }
 }
 
-function modelPayload() {
-  return {
-    base_url: $('baseUrl').value.trim(),
-    model: $('modelName').value.trim(),
-    api_key: $('apiKey').value,
-    prompt: $('probePrompt').value,
-    temperature: Number($('temperature').value || 0.2),
-    depth: $('depthSelect').value
-  };
+function modelPayload(tier) {
+  return Object.assign(tierModelPayload(tier || $('testTierSelect').value), {
+    prompt: $('probePrompt').value
+  });
 }
 
 async function runModelTest() {
@@ -1380,9 +1435,7 @@ async function saveModel() {
   enterBusy(button, '保存配置');
   try {
     const data = await api('/api/model/save', {
-      base_url: $('baseUrl').value,
-      api_key: $('apiKey').value,
-      model: $('modelName').value,
+      tier_models: allTierModelsPayload(),
       embedding_base_url: $('embeddingBaseUrl').value,
       embedding_api_key: $('embeddingApiKey').value,
       embedding_model: $('embeddingModel').value,
@@ -1547,6 +1600,7 @@ async function runPromotion() {
   $('promotionOutput').hidden = false;
   $('promotionOutput').textContent = '=== 入库进展 ===\n正在读取收件箱并准备写入…';
   try {
+    const defaultModel = tierModelPayload($('depthSelect').value);
     const data = await api('/api/papers/promote', {
       inbox: $('promoteInbox').value,
       out_dir: $('promoteOut').value,
@@ -1555,8 +1609,8 @@ async function runPromotion() {
       download_pdfs: $('downloadPdfs').checked,
       index: $('indexDocs').checked,
       pin: $('pinIds').value,
-      embedding_base_url: $('embeddingBaseUrl').value || $('baseUrl').value,
-      embedding_api_key: $('embeddingApiKey').value || $('apiKey').value,
+      embedding_base_url: $('embeddingBaseUrl').value || defaultModel.base_url,
+      embedding_api_key: $('embeddingApiKey').value || defaultModel.api_key,
       embedding_model: $('embeddingModel').value
     });
     $('promotionOutput').hidden = false;
@@ -1605,8 +1659,12 @@ function markCancelRequested(message) {
   refreshIcons();
 }
 
-async function requestQueryCancellation(runId) {
-  const response = await authFetch('/api/query/jobs/' + runId + '/cancel', { method: 'POST' });
+async function requestQueryCancellation(runId, reason = 'user') {
+  const response = await authFetch('/api/query/jobs/' + runId + '/cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason })
+  });
   const data = await response.json().catch(() => ({}));
   if (!response.ok && response.status !== 409) {
     throw new Error(data.error || '取消请求失败');
@@ -1630,22 +1688,29 @@ async function runQuery() {
 
   enterBusy(button, '提交任务');
   $('queryOutput').hidden = true;
+  $('queryOutput').textContent = '';
+  $('queryReportPreview').hidden = true;
+  $('queryReportPreview').removeAttribute('src');
+  $('queryResultMeta').hidden = true;
+  $('queryResultMeta').textContent = '';
   $('queryEmpty').hidden = true;
   $('queryStage').textContent = '提交研究任务...';
   $('queryStage').className = 'status-pill warn';
 
   let runId = '';
+  const queryDepth = normalizeTier($('queryDepth').value || $('depthSelect').value);
+  let runTimeoutSeconds = 300;
   try {
     const submitRes = await authFetch('/api/query/jobs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(Object.assign(modelPayload(), {
+      body: JSON.stringify(Object.assign(modelPayload(queryDepth), {
         query,
         output_dir: $('queryOut').value,
         embedding_base_url: $('embeddingBaseUrl').value,
         embedding_api_key: $('embeddingApiKey').value,
         embedding_model: $('embeddingModel').value,
-        depth: $('queryDepth').value || $('depthSelect').value
+        depth: queryDepth
       }))
     });
     const submitData = await submitRes.json();
@@ -1653,8 +1718,9 @@ async function runQuery() {
       throw new Error(submitData.error || '提交失败（HTTP ' + submitRes.status + '）');
     }
     runId = submitData.run_id;
+    runTimeoutSeconds = Math.max(1, Number(submitData.timeout_seconds || 300));
     $('queryResultBand').dataset.activeRun = runId;
-    activeQuery = { runId, cancelRequested: false, timedOut: false };
+    activeQuery = { runId, cancelRequested: false, timedOut: false, timeoutSeconds: runTimeoutSeconds };
     // The result panel owns the running state; the submit button is not a progress indicator.
     leaveBusy(button);
   } catch (error) {
@@ -1675,10 +1741,10 @@ async function runQuery() {
   const nodeStates = {};
   const nodeDetails = {};
   const updateNodeDisplay = () => {
-    const order = ['rag_agent', 'web_agent', 'model_agent', 'evidence_merge', 'arbitration', 'synthesize', 'factcheck', 'deep_research'];
-    const labels = { rag_agent:'RAG 检索', web_agent:'Web 搜索', model_agent:'模型推理', evidence_merge:'证据合并', arbitration:'三源仲裁', synthesize:'报告合成', factcheck:'事实核查', deep_research:'深化研究' };
+    const order = ['research_plan', 'rag_agent', 'web_agent', 'model_agent', 'evidence_merge', 'arbitration', 'synthesize', 'verify_revise', 'gap_research', 'factcheck', 'deep_research'];
+    const labels = { research_plan:'研究计划', rag_agent:'RAG 检索', web_agent:'Web 搜索', model_agent:'模型分析', evidence_merge:'证据合并', arbitration:'冲突仲裁', synthesize:'报告合成', verify_revise:'核验修订', gap_research:'缺口补证', factcheck:'复核完成', deep_research:'深化研究' };
     Object.keys(nodeDetails).forEach(function(k){ if (labels[k]) labels[k] += ' · ' + nodeDetails[k]; });
-    const lines = order.filter(function(k){ return nodeStates[k]; }).map(function(k){ return (nodeStates[k]==='completed'?'\u2705':nodeStates[k]==='failed'?'\u274c':nodeStates[k]==='unreviewed'?'\u26a0\ufe0f':'\u23f3') + ' ' + labels[k]; });
+    const lines = order.filter(function(k){ return nodeStates[k]; }).map(function(k){ return (nodeStates[k]==='completed'?'\u2705':nodeStates[k]==='failed'?'\u274c':(nodeStates[k]==='unreviewed'||nodeStates[k]==='fallback')?'\u26a0\ufe0f':'\u23f3') + ' ' + labels[k]; });
     if (lines.length) {
       $('queryOutput').textContent = '=== 节点状态 ===\n' + lines.join('\n');
       $('queryOutput').hidden = false;
@@ -1722,7 +1788,7 @@ async function runQuery() {
       const res = await authFetch('/api/query/jobs/' + runId);
       if (!res.ok) return;
       const job = await res.json();
-      if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
+      if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled' || job.status === 'timed_out') {
         window.clearInterval(pollInterval);
         window.clearInterval(elapsedTimer);
         window.clearTimeout(queryTimeout);
@@ -1732,16 +1798,25 @@ async function runQuery() {
         if (job.status === 'completed') {
           $('queryStage').textContent = '完成 · ' + Math.round((Date.now() - started) / 1000) + ' 秒';
           $('queryStage').className = 'status-pill ok';
-          var out = '=== 最终答案 ===\n' + (job.final_answer || '') + '\n\n';
-          if (job.final_answer_truncated) {
-            out += '\u26a0\ufe0f 答案已截断（显示前 4000 / ' + job.final_answer_total_length + ' 字符），完整内容请搜索对应 .md 报告。\n';
+          const reportPath = job.report_md_path || ((job.artifacts || {}).markdown_path || '');
+          if (reportPath) {
+            $('queryOutput').hidden = true;
+            $('queryReportPreview').src = '/api/markdown?path=' + encodeURIComponent(reportPath);
+            $('queryReportPreview').hidden = false;
+          } else {
+            $('queryOutput').textContent = job.final_answer || '任务已完成，但没有生成可显示的报告。';
+            $('queryOutput').hidden = false;
           }
-          out += '\n=== 来源状态 ===\n' + JSON.stringify(job.source_statuses || {}, null, 2) + '\n';
-          if (job.factcheck_status) out += '\nFactCheck: ' + job.factcheck_status;
-          $('queryOutput').textContent = out;
+          const meta = [
+            '研究管线：' + (job.pipeline || 'unknown'),
+            '来源状态：' + JSON.stringify(job.source_statuses || {}),
+            'FactCheck：' + (job.factcheck_status || '未记录')
+          ];
+          $('queryResultMeta').textContent = meta.join('\n');
+          $('queryResultMeta').hidden = false;
           toast('研究任务已完成', 'ok');
         } else {
-          $('queryStage').textContent = job.status === 'failed' ? '执行失败' : '已取消';
+          $('queryStage').textContent = job.status === 'failed' ? '执行失败' : job.status === 'timed_out' ? '执行超时' : '已取消';
           $('queryStage').className = 'status-pill error';
           const progress = $('queryOutput').textContent || '=== 节点状态 ===\n未收到节点事件';
           $('queryOutput').textContent = progress + '\n\n=== 执行结果 ===\n' + (job.error || JSON.stringify(job, null, 2));
@@ -1764,10 +1839,10 @@ async function runQuery() {
     $('queryStage').className = 'status-pill warn';
     markCancelRequested('正在取消');
     try {
-      const data = await requestQueryCancellation(runId);
+      const data = await requestQueryCancellation(runId, 'timeout');
       if (activeQuery !== queryContext) return;
       queryContext.cancelRequested = Boolean(data.cancel_requested);
-      toast(data.cancel_requested ? '任务运行超过 5 分钟，已请求安全取消' : '任务已结束，正在读取最终状态', 'warn');
+      toast(data.cancel_requested ? '任务超过当前档位时限，已请求系统自动终止' : '任务已结束，正在读取最终状态', 'warn');
     } catch (error) {
       if (activeQuery !== queryContext) return;
       queryContext.cancelRequested = false;
@@ -1777,7 +1852,7 @@ async function runQuery() {
       toast('自动取消失败：' + error.message, 'err');
       refreshIcons();
     }
-  }, 300000);
+  }, runTimeoutSeconds * 1000);
 
   // Show cancel button, hide run button
   if ($('cancelQuery')) { $('cancelQuery').hidden = false; }
@@ -1952,7 +2027,11 @@ function bindEvents() {
   $('runPromote').addEventListener('click', runPromotion);
   $('runQuery').addEventListener('click', runQuery);
   if ($('cancelQuery')) { $('cancelQuery').addEventListener('click', cancelQuery); }
-  $('apiKey').addEventListener('input', updateQueryReadiness);
+  MODEL_TIERS.forEach((tier) => {
+    $(tierFieldId(tier, 'ApiKey')).addEventListener('input', updateQueryReadiness);
+  });
+  $('depthSelect').addEventListener('change', updateQueryReadiness);
+  $('queryDepth').addEventListener('change', updateQueryReadiness);
   $('embeddingApiKey').addEventListener('input', updateQueryReadiness);
   ['profileFields', 'profileKeywords', 'profileDescription', 'profileNegativeKeywords'].forEach((id) => {
     $(id).addEventListener('input', () => {

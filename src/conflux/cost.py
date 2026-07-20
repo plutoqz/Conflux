@@ -19,6 +19,10 @@ PRICING = {
     # DeepSeek (per 1M tokens, approximate)
     "deepseek-v3":               {"input": 0.27, "output": 1.1},
     "deepseek-v4-flash":         {"input": 0.1, "output": 0.4},
+    "deepseek-v4-pro":           {"input": 1.0, "output": 4.0},
+    "MiniMax-M3":                {"input": 0.5, "output": 2.0},
+    "gemini-3.5-flash":          {"input": 0.2, "output": 0.8},
+    "qwen3.7-plus":              {"input": 0.6, "output": 2.4},
     # Unknown fallback
     "default":                   {"input": 1.0, "output": 5.0},
 }
