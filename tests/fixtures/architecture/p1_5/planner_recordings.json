@@ -1,0 +1,85 @@
+{
+  "recordings": [
+    {
+      "id": "method_survey_without_lexicon",
+      "query": "What methods exist for engineering a fault-tolerant quantum sensor network?",
+      "domain_lexicon": [],
+      "query_archetype": {
+        "type": "method_survey",
+        "confidence": 0.86,
+        "user_intent": "map the method space before selecting an approach",
+        "expected_research_actions": [
+          "taxonomy_discovery",
+          "mechanism_analysis",
+          "representative_implementations",
+          "applicability",
+          "limitations",
+          "maturity",
+          "combination_relations"
+        ],
+        "required_synthesis_functions": [
+          "direct_answer",
+          "dimensional_synthesis",
+          "cross_dimension_relationships",
+          "reliability_disclosure"
+        ]
+      },
+      "domain_map": {
+        "scope": "fault-tolerant quantum sensor networks from sensing hardware through network operation",
+        "key_concepts": ["distributed sensing", "calibration", "noise mitigation", "network synchronization"],
+        "terminology": ["quantum sensor network", "distributed quantum sensing", "sensor fusion"],
+        "dimensions": [
+          {"id": "hardware", "name": "sensor hardware and interfaces", "importance": "high"},
+          {"id": "calibration", "name": "calibration and drift control", "importance": "high"},
+          {"id": "noise", "name": "noise mitigation and error handling", "importance": "high"},
+          {"id": "network", "name": "synchronization and network protocols", "importance": "high"},
+          {"id": "operations", "name": "deployment, observability, and maintenance", "importance": "medium"}
+        ],
+        "dimension_relations": [
+          {"from": "calibration", "to": "noise", "relation": "constrains"},
+          {"from": "network", "to": "operations", "relation": "enables"}
+        ],
+        "disputed_boundaries": ["whether centralized sensor fusion belongs inside the network protocol layer"],
+        "discovery_sources": ["model_prior", "terminology_scan", "first_pass_evidence"]
+      },
+      "expected": {
+        "fallback_used": false,
+        "minimum_major_dimensions": 5,
+        "lexicon_independent": true
+      }
+    },
+    {
+      "id": "low_confidence_composite_archetype",
+      "query": "Why do some heat-pump retrofits underperform, and what implementation path reduces the risk?",
+      "domain_lexicon": [],
+      "query_archetype": {
+        "type": "causal_mechanism",
+        "secondary_types": ["solution_design"],
+        "confidence": 0.62,
+        "user_intent": "explain causes before proposing a bounded implementation path",
+        "expected_research_actions": ["causal_chain", "confounders", "requirements", "implementation_steps", "validation"],
+        "required_synthesis_functions": ["direct_answer", "causal_synthesis", "conditional_recommendations", "reliability_disclosure"]
+      },
+      "domain_map": {
+        "scope": "building heat-pump retrofit performance",
+        "key_concepts": ["building envelope", "system sizing", "controls", "commissioning"],
+        "terminology": ["seasonal coefficient of performance", "design heat loss", "weather compensation"],
+        "dimensions": [
+          {"id": "envelope", "name": "building envelope and heat demand", "importance": "high"},
+          {"id": "sizing", "name": "equipment sizing and emitter compatibility", "importance": "high"},
+          {"id": "controls", "name": "controls and operating temperatures", "importance": "high"},
+          {"id": "commissioning", "name": "installation and commissioning quality", "importance": "high"},
+          {"id": "behavior", "name": "occupant behavior and tariff context", "importance": "medium"}
+        ],
+        "dimension_relations": [],
+        "disputed_boundaries": [],
+        "discovery_sources": ["model_prior", "first_pass_evidence"]
+      },
+      "expected": {
+        "fallback_used": false,
+        "minimum_major_dimensions": 4,
+        "lexicon_independent": true
+      }
+    }
+  ]
+}

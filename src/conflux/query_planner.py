@@ -47,6 +47,12 @@ STOPWORDS = {
     "如何",
     "什么",
     "哪些",
+    "当前",
+    "目前",
+    "采用",
+    "各有",
+    "代表性",
+    "场景",
 }
 
 
@@ -96,6 +102,18 @@ LOW_QUALITY_DOMAINS = {
 
 
 CONCEPT_EXPANSIONS = {
+    "地理处理": ["geoprocessing", "geospatial analysis", "spatial data processing"],
+    "地理数据": ["geospatial data", "spatial data"],
+    "自动化": ["automation", "automated workflow", "workflow automation"],
+    "质量控制": ["data quality control", "quality assurance"],
+    "数据融合": ["geospatial data fusion", "multisource data fusion"],
+    "配准": ["spatial registration", "image registration"],
+    "规则引擎": ["rule-based geoprocessing", "expert system"],
+    "机器学习": ["machine learning", "GeoAI"],
+    "深度学习": ["deep learning", "remote sensing"],
+    "云原生": ["cloud-native geospatial", "cloud geoprocessing"],
+    "工作流编排": ["workflow orchestration", "geoprocessing pipeline"],
+    "评估基准": ["geospatial benchmark", "evaluation benchmark"],
     "ArcGIS": ["ArcGIS", "Esri", "ArcGIS Enterprise", "ArcGIS Pro"],
     "后量子": ["post-quantum cryptography", "PQC", "NIST", "FIPS 203"],
     "抗量子": ["post-quantum cryptography", "PQC", "NIST"],
@@ -192,9 +210,27 @@ TECHNICAL_ENTITIES = {
 
 
 BILINGUAL_TERM_MAP = {
+    "地理数据": "geospatial data",
+    "地理AI": "GeoAI",
     "地理处理": "geoprocessing",
     "地理信息系统": "geographic information system",
     "自动化": "automation",
+    "数据采集": "data acquisition",
+    "质量控制": "quality control",
+    "规则引擎": "rule engine",
+    "传统机器学习": "traditional machine learning",
+    "机器学习": "machine learning",
+    "深度学习": "deep learning",
+    "大语言模型": "large language model",
+    "云原生地理计算": "cloud-native geospatial computing",
+    "云原生": "cloud-native",
+    "工作流编排": "workflow orchestration",
+    "空间分析": "spatial analysis",
+    "遥感影像": "remote sensing imagery",
+    "配准": "registration",
+    "融合": "fusion",
+    "清洗": "cleaning",
+    "采集": "acquisition",
     "互操作性": "interoperability",
     "可移植性": "portability",
     "可重复性": "reproducibility",
@@ -232,7 +268,6 @@ BILINGUAL_TERM_MAP = {
     "评估": "evaluation",
     "方法": "methods",
     "模型": "model",
-    "算法": "algorithm",
     "数据集": "dataset",
     "论文": "paper",
     "研究": "research",

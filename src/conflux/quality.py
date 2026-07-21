@@ -72,6 +72,152 @@ def evaluate_p1_quality(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def evaluate_p15_quality(state: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate P1.5 runtime contracts without rewarding report length."""
+
+    archetype = state.get("_query_archetype") or {}
+    domain_map = state.get("_domain_map") or {}
+    budget = state.get("_research_budget") or {}
+    matrix = state.get("_coverage_matrix") or {}
+    source_plans = [item for item in state.get("_source_plans") or [] if isinstance(item, dict)]
+    contracts = [item for item in state.get("_section_contracts") or [] if isinstance(item, dict)]
+    drafts = [item for item in state.get("_section_drafts") or [] if isinstance(item, dict)]
+    report = str(state.get("final_answer") or "")
+    statuses = state.get("_source_statuses") or {}
+
+    dimensions = [item for item in domain_map.get("dimensions") or [] if isinstance(item, dict)]
+    dimension_ids = {str(item.get("id") or "") for item in dimensions if str(item.get("id") or "")}
+    high_dimension_ids = {
+        str(item.get("id") or "")
+        for item in dimensions
+        if str(item.get("id") or "") and _importance_value(item.get("importance")) >= 0.7
+    }
+    coverage_rows = [item for item in matrix.get("dimensions") or [] if isinstance(item, dict)]
+    coverage_by_id = {
+        str(item.get("dimension_id") or ""): item
+        for item in coverage_rows
+        if str(item.get("dimension_id") or "")
+    }
+    covered_high = {
+        dimension_id
+        for dimension_id in high_dimension_ids
+        if str((coverage_by_id.get(dimension_id) or {}).get("status") or "") == "covered"
+    }
+    high_coverage_ratio = (
+        len(covered_high) / len(high_dimension_ids)
+        if high_dimension_ids
+        else float(matrix.get("high_importance_coverage") or 0.0)
+    )
+
+    draft_by_section = {
+        str(item.get("section_id") or ""): item
+        for item in drafts
+        if str(item.get("section_id") or "")
+    }
+    traced_contracts = 0
+    for contract in contracts:
+        section_id = str(contract.get("id") or "")
+        linked = {str(item) for item in contract.get("dimension_ids") or [] if str(item)}
+        draft = draft_by_section.get(section_id) or {}
+        draft_dimensions = {str(item) for item in draft.get("dimension_ids") or [] if str(item)}
+        if section_id and linked and linked <= dimension_ids and linked <= draft_dimensions:
+            traced_contracts += 1
+    traceability_ratio = traced_contracts / len(contracts) if contracts else 0.0
+
+    source_plan_dimensions = {
+        str(item.get("dimension_id") or "")
+        for item in source_plans
+        if str(item.get("dimension_id") or "")
+    }
+    routing_ratio = len(dimension_ids & source_plan_dimensions) / len(dimension_ids) if dimension_ids else 0.0
+    failed_sources = {
+        source
+        for source in ("RAG", "Web")
+        if str((statuses.get(source) or {}).get("status") or "")
+        in {"failed", "no_evidence", "low_relevance", "fallback", "disabled"}
+    }
+    failed_source_leak = any(
+        marker in report
+        for source in failed_sources
+        for marker in (("[RAG:" if source == "RAG" else "[Web:"),)
+    )
+
+    section_title_hits = sum(
+        bool(str(item.get("title") or "").strip())
+        and str(item.get("title") or "").strip() in report
+        for item in contracts
+    )
+    section_report_ratio = section_title_hits / len(contracts) if contracts else 0.0
+    uncovered = [
+        item for item in coverage_rows
+        if str(item.get("status") or "") in {"partial", "evidence_scarce", "conflicting"}
+    ]
+    gap_disclosed = not uncovered or any(
+        marker in report for marker in ("未覆盖", "证据不足", "待核验", "争议", "缺口")
+    )
+
+    hard_limits = budget.get("global_hard_limits") or {}
+    budget_within_hard_limits = all(
+        int(budget.get(field) or 0) <= int(limit)
+        for field, limit in {
+            "major_dimension_limit": hard_limits.get("major_dimension_limit"),
+            "evidence_limit": hard_limits.get("evidence_limit"),
+            "max_gap_iterations": hard_limits.get("max_gap_iterations"),
+            "total_output_chars": hard_limits.get("total_output_chars"),
+        }.items()
+        if limit not in (None, "")
+    )
+
+    protocol_complete = bool(
+        archetype.get("type")
+        and dimensions
+        and budget
+        and coverage_rows
+        and contracts
+        and drafts
+    )
+    external_unavailable = failed_sources == {"RAG", "Web"}
+    coverage_target = float(matrix.get("target") or 0.6)
+    coverage_ok = high_coverage_ratio >= min(0.8, max(0.5, coverage_target)) or external_unavailable
+    scores = {
+        "协议完整性": 5 if protocol_complete else 2,
+        "维度覆盖": 5 if high_coverage_ratio >= 0.8 else 4 if coverage_ok else 2,
+        "来源路由": 5 if routing_ratio >= 1.0 and not failed_source_leak else 4 if routing_ratio >= 0.8 and not failed_source_leak else 2,
+        "章节追溯": 5 if traceability_ratio >= 1.0 else 4 if traceability_ratio >= 0.8 else 2,
+        "动态报告契约": 5 if section_report_ratio >= 0.9 and gap_disclosed else 4 if section_report_ratio >= 0.75 and gap_disclosed else 2,
+        "预算硬上限": 5 if budget_within_hard_limits else 1,
+    }
+    passed = (
+        protocol_complete
+        and coverage_ok
+        and routing_ratio >= 0.8
+        and traceability_ratio >= 0.8
+        and section_report_ratio >= 0.75
+        and gap_disclosed
+        and budget_within_hard_limits
+        and not failed_source_leak
+    )
+    notes = [f"{name}低于达标线：{score}/5" for name, score in scores.items() if score < 4]
+    if failed_source_leak:
+        notes.append("失败或无证据来源仍出现在事实引用中。")
+    if uncovered and not gap_disclosed:
+        notes.append("覆盖矩阵存在未完成维度，但主报告没有一致披露。")
+    return {
+        "scores": scores,
+        "overall": round(sum(scores.values()) / len(scores), 2),
+        "passed": passed,
+        "protocol_complete": protocol_complete,
+        "dimension_count": len(dimensions),
+        "high_importance_coverage": round(high_coverage_ratio, 3),
+        "source_routing_ratio": round(routing_ratio, 3),
+        "section_traceability_ratio": round(traceability_ratio, 3),
+        "section_report_ratio": round(section_report_ratio, 3),
+        "budget_within_hard_limits": budget_within_hard_limits,
+        "failed_source_leak": failed_source_leak,
+        "notes": notes,
+    }
+
+
 def _score_p1_process(summary: dict[str, Any]) -> int:
     stages = set(summary.get("stages") or [])
     required = {"dispatch", "research_plan", "model_analysis", "evidence_merge", "synthesize", "factcheck_revision"}
@@ -159,6 +305,17 @@ def _source_succeeded(item: dict[str, Any], statuses: dict[str, Any]) -> bool:
     if not isinstance(payload, dict):
         return True
     return str(payload.get("status") or "") == "success"
+
+
+def _importance_value(value: Any) -> float:
+    if isinstance(value, str):
+        named = {"high": 0.9, "medium": 0.6, "low": 0.3}
+        if value.strip().casefold() in named:
+            return named[value.strip().casefold()]
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.5
 
 
 def _score_p1_citations(coverage: float, invalid: int, external_nodes: list[dict]) -> int:

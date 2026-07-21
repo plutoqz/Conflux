@@ -519,7 +519,7 @@ def test_job_manager_rejects_cancelling_terminal_job():
     assert running.cancel_reason == "timeout"
 
 
-def test_frontend_has_login_and_timeout_cancellation_flow():
+def test_frontend_has_login_and_backend_owned_timeout_flow():
     html = Path("src/conflux/workbench/static/index.html").read_text(encoding="utf-8")
     app = Path("src/conflux/workbench/static/app.js").read_text(encoding="utf-8")
     timeout_start = app.index("const queryTimeout")
@@ -528,7 +528,8 @@ def test_frontend_has_login_and_timeout_cancellation_flow():
 
     assert 'id="authDialog"' in html
     assert "'/api/login'" in app
-    assert "requestQueryCancellation(runId, 'timeout')" in timeout_block
+    assert "requestQueryCancellation(runId, 'timeout')" not in timeout_block
+    assert "后端正在保存报告与 trace" in timeout_block
     assert "clearInterval(pollInterval)" not in timeout_block
     assert "300000" not in timeout_block
 
@@ -566,20 +567,61 @@ def test_timeout_and_user_cancel_have_distinct_terminal_states():
     except _JobCancelled:
         pass
 
-    deadline = ResearchJob(run_id="deadline", query="q", status="running", timeout_seconds=1)
+    deadline = ResearchJob(
+        run_id="deadline",
+        query="q",
+        status="running",
+        timeout_seconds=1,
+        deadline_at=time.time() - 1,
+    )
     try:
         _enforce_job_stop(deadline, time.time() - 2)
         raise AssertionError("backend deadline should stop the job")
     except _JobTimedOut:
         pass
 
-    assert timed_out.status == "timed_out"
-    assert timed_out.final_answer == ""
-    assert timed_out.artifacts == {}
+    assert timed_out.status == "timed_out_with_report"
+    assert timed_out.final_answer == "partial answer"
+    assert timed_out.artifacts == {"markdown_path": "partial.md"}
+    assert timed_out.has_report is True
+    assert timed_out.warnings
     assert "系统" in timed_out.error
     assert timed_out.cancel_reason == "timeout"
     assert cancelled.status == "running"
     assert deadline.cancel_reason == "timeout"
+
+
+def test_report_snapshot_survives_later_timeout(tmp_path):
+    from conflux.workbench.jobs import (
+        ResearchJob,
+        _capture_report_snapshot,
+        _finish_job,
+    )
+
+    job = ResearchJob(run_id="snapshot-timeout", query="q", status="running")
+    state = {
+        "query": "q",
+        "final_answer": "## 回答\n\n已生成报告。",
+        "_source_statuses": {},
+        "_factcheck_status": "needs_review",
+    }
+
+    _capture_report_snapshot(job, state, str(tmp_path), stage="verified")
+    _finish_job(job, "timed_out", "APITimeoutError: late verification timeout")
+
+    assert job.status == "timed_out_with_report"
+    assert job.final_answer == state["final_answer"]
+    assert Path(job.artifacts["markdown_path"]).is_file()
+    assert "已生成报告" in Path(job.artifacts["markdown_path"]).read_text(encoding="utf-8")
+
+
+def test_frontend_displays_partial_success_and_explicit_report_stages():
+    app = Path("src/conflux/workbench/static/app.js").read_text(encoding="utf-8")
+
+    assert "timed_out_with_report" in app
+    assert "completed_with_warnings" in app
+    for label in ("报告初稿", "第一轮核验", "针对性补证", "重新分析", "最终提交"):
+        assert label in app
 
 
 def test_frontend_query_failure_keeps_node_progress_visible():

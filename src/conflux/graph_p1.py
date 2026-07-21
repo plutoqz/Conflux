@@ -79,6 +79,9 @@ class P1ResearchState(TypedDict):
     _run_summary: dict
     _quality_report: dict
     _pipeline_stage: str
+    _started_at: float
+    _deadline_at: float
+    _commit_reserve_seconds: float
     _synthesis_status: str
     _synthesis_error: str
     _run_id: str
@@ -143,7 +146,8 @@ def create_p1_research_graph(
 
 
 def _dispatch_node(state: P1ResearchState, profile: ResearchModeProfile, model_trace: dict) -> dict:
-    started_at = time.time()
+    started_at = float(state.get("_started_at") or time.time())
+    deadline_at = float(state.get("_deadline_at") or (started_at + profile.timeout_seconds))
     run_id = state.get("_run_id") or new_run_id()
     thread_id = state.get("_thread_id") or run_id
     return {
@@ -151,6 +155,11 @@ def _dispatch_node(state: P1ResearchState, profile: ResearchModeProfile, model_t
         "_thread_id": thread_id,
         "_research_profile": profile.to_dict(),
         "_model_trace": model_trace,
+        "_started_at": started_at,
+        "_deadline_at": deadline_at,
+        "_commit_reserve_seconds": float(
+            state.get("_commit_reserve_seconds") or profile.commit_reserve_seconds
+        ),
         "_gap_iteration": 0,
         "_pipeline_stage": "dispatch",
         "_run_summary": {
@@ -161,6 +170,7 @@ def _dispatch_node(state: P1ResearchState, profile: ResearchModeProfile, model_t
             "checkpoint_backend": state.get("_checkpoint_backend") or "none",
             "resumed": bool(state.get("_resumed")),
             "started_at": started_at,
+            "deadline_at": deadline_at,
             "elapsed_ms": 0,
             "stages": ["dispatch"],
             "l4_enabled": profile.max_gap_iterations > 0,
@@ -188,6 +198,11 @@ governance/ethics, and application boundaries. Treat topic maturity as framing,
 not a replacement for one of those dimensions. With a smaller budget, combine
 adjacent dimensions explicitly rather than omitting them. Do not let a few
 retrieved papers redefine the scope of the whole field.
+For a broad "what methods exist" survey about geoprocessing automation, cover
+both engineering and intelligent approaches: scripts/APIs and visual or ETL
+workflows; services, cloud platforms, and workflow orchestration; rules,
+semantics, machine learning, and deep learning; and LLM/tool-using agents.
+Do not let recent agent papers displace established engineering automation.
 
 Current date: {date.today().isoformat()}
 Query: {state['query']}
@@ -232,6 +247,7 @@ under 300 Chinese characters. Close every JSON array and object.""",
             )
             plan = ResearchPlan.from_dict(payload, query=state["query"], max_subquestions=profile.max_subquestions)
             plan = _comparison_research_plan(plan, state["query"], profile.max_subquestions)
+            plan = _method_survey_research_plan(plan, state["query"], profile.max_subquestions)
             model_prior = str(payload.get("model_prior") or "").strip()
             break
         except Exception as exc:
@@ -245,6 +261,7 @@ under 300 Chinese characters. Close every JSON array and object.""",
             state["query"],
             profile.max_subquestions,
         )
+        plan = _method_survey_research_plan(plan, state["query"], profile.max_subquestions)
 
     model_claims = [_model_claim_from_draft(claim) for claim in plan.claims if claim.text]
     result = SourceResult(
@@ -337,12 +354,146 @@ def _comparison_research_plan(plan: ResearchPlan, query: str, max_subquestions: 
     return plan
 
 
+def _method_survey_research_plan(plan: ResearchPlan, query: str, max_subquestions: int) -> ResearchPlan:
+    """Keep broad geoprocessing method surveys balanced across engineering and AI."""
+
+    lowered = str(query or "").casefold()
+    geoprocessing = any(marker in lowered for marker in (
+        "地理处理", "地理空间处理", "gis", "geoprocessing", "geospatial processing",
+    ))
+    method_survey = bool(re.search(
+        r"(?:都|主要|目前|当前)?有(?:哪|什么).{0,8}方法|哪些方法|methods? (?:exist|are available)|approaches?",
+        lowered,
+        re.IGNORECASE,
+    ))
+    if not geoprocessing or not method_survey or len(_named_comparison_systems(query)) >= 2:
+        return plan
+
+    engineering = ResearchSubquestion(
+        id="subq-1",
+        question=(
+            "脚本、API、命令行及可视化/ETL工作流如何自动化重复地理处理，"
+            "代表工具包括GDAL/OGR、ArcPy/PyQGIS、ModelBuilder、QGIS Graphical Modeler与FME？"
+        ),
+        source_preferences=["Web", "RAG", "Model"],
+        importance="high",
+        stop_condition="覆盖代码式、低代码和ETL自动化及其适用边界",
+    )
+    platform = ResearchSubquestion(
+        id="subq-2",
+        question=(
+            "服务化、云原生平台与工作流编排如何支撑批量和大规模地理处理，"
+            "包括OGC WPS、GEE、Planetary Computer、Airflow/Prefect与Serverless？"
+        ),
+        source_preferences=["Web", "RAG", "Model"],
+        importance="high",
+        stop_condition="覆盖服务接口、云端计算和任务编排三类工程机制",
+    )
+    geoai = ResearchSubquestion(
+        id="subq-3",
+        question=(
+            "规则/语义推理、传统机器学习与深度学习如何自动化空间分析、"
+            "遥感分类、检测、分割和变化检测？"
+        ),
+        source_preferences=["RAG", "Web", "Model"],
+        importance="high",
+        stop_condition="覆盖规则、ML和DL方法及代表性任务",
+    )
+    agents = ResearchSubquestion(
+        id="subq-4",
+        question=(
+            "LLM与地理AI智能体如何从自然语言规划、调用GIS工具并执行多步骤工作流，"
+            "其可靠性、评估和人工复核边界是什么？"
+        ),
+        source_preferences=["RAG", "Web", "Model"],
+        importance="high",
+        stop_condition="覆盖自然语言编排、工具调用、验证与适用边界",
+    )
+    questions = [engineering, platform, geoai, agents]
+    if max_subquestions <= 3:
+        geoai.question = (
+            "规则/语义推理、机器学习、深度学习与LLM智能体分别如何自动化空间分析，"
+            "其代表任务、工具调用方式和可靠性边界是什么？"
+        )
+        geoai.stop_condition = "覆盖规则、ML/DL和LLM智能体三类智能自动化"
+        questions = [engineering, platform, geoai]
+    plan.subquestions = questions[:max(1, max_subquestions)]
+    plan.claims = [
+        ClaimDraft(
+            id="claim-1",
+            text="工程自动化包括脚本/API、命令行批处理、可视化模型和ETL数据流。",
+            claim_type="parametric_background",
+            importance="high",
+            verification_questions=["各工具的当前自动化能力与适用边界是什么？"],
+        ),
+        ClaimDraft(
+            id="claim-2",
+            text="服务接口、云地理计算和通用工作流编排用于扩展批量与分布式地理处理。",
+            claim_type="parametric_background",
+            importance="high",
+            temporal_sensitivity="medium",
+            verification_questions=["主流平台和编排框架当前支持哪些运行模式？"],
+        ),
+        ClaimDraft(
+            id="claim-3",
+            text="规则/语义推理、机器学习与深度学习分别适合确定性判定、空间预测和影像解译。",
+            claim_type="analysis",
+            importance="high",
+            verification_questions=["不同方法的任务边界和数据要求是什么？"],
+        ),
+        ClaimDraft(
+            id="claim-4",
+            text="LLM地理智能体通过自然语言规划和工具调用自动执行多步骤GIS工作流。",
+            claim_type="analysis",
+            importance="high",
+            temporal_sensitivity="high",
+            risk="medium",
+            verification_questions=["代表系统、工具调用能力和失败模式有哪些？"],
+        ),
+        ClaimDraft(
+            id="claim-5",
+            text="实际选型应依据数据形态、任务稳定性、规模、容错要求和人工复核成本组合多种方法。",
+            claim_type="recommendation",
+            importance="medium",
+            verification_questions=["不同组合在真实项目中的验证标准是什么？"],
+        ),
+    ]
+    plan.key_terms = [
+        "GDAL OGR ArcPy PyQGIS",
+        "ModelBuilder QGIS Graphical Modeler FME",
+        "OGC WPS GEE Planetary Computer",
+        "workflow orchestration Airflow Prefect serverless geoprocessing",
+        "GeoAI remote sensing deep learning",
+        "LLM geospatial agent tool calling",
+    ]
+    plan.stop_conditions = [
+        "四条方法主线均有代表机制、工具、适用场景和边界",
+        "传统工程自动化与AI/智能体方法均得到覆盖",
+        "答案给出可执行的组合选型建议",
+    ]
+    plan.question_type = "broad_method_survey"
+    return plan
+
+
 def _source_research_node(
     state: P1ResearchState,
     agent: ResearchAgent,
     source: str,
     profile: ResearchModeProfile,
 ) -> dict:
+    if _remaining_run_seconds(state, profile) <= profile.commit_reserve_seconds:
+        deferred = fallback_result(
+            source,
+            f"{source} research skipped to preserve the report commit reserve.",
+        )
+        field = "rag_result" if source == "RAG" else "web_result"
+        source_id = "builtin.rag" if source == "RAG" else "builtin.web"
+        return {
+            field: deferred.to_tool_text(),
+            "source_results": {
+                source_id: namespace_source_result(source_id, deferred).to_dict()
+            },
+        }
     plan = ResearchPlan.from_dict(
         state.get("_research_plan") or {},
         query=state["query"],
@@ -726,6 +877,7 @@ Claim assessments: {json.dumps(state.get('_claim_assessments') or [], ensure_asc
 Evidence items: {json.dumps(compact_evidence, ensure_ascii=False)}
 Citation identity registry (authoritative for comparative attribution):
 {citation_registry or 'none'}
+Model context claims: {json.dumps(_compact_evidence(_model_context_items(state)), ensure_ascii=False)}
 Model analysis: {strip_source_markers(str((state.get('_source_statuses') or {}).get('Model', {}).get('content') or state.get('model_result') or ''))}
 Source coverage: {json.dumps(state.get('_source_coverage') or [], ensure_ascii=False)}
 Conflict analysis: {state.get('_arbitration') or 'none'}"""
@@ -1021,43 +1173,114 @@ def _fallback_report(query: str, model_content: str, statuses: dict) -> str:
 
 
 def _grounded_fallback_report(state: P1ResearchState, evidence: list[dict], error: str) -> str:
-    """Return a transparent, citation-bearing result when synthesis cannot finish."""
+    """Return a structured, citation-bearing result when synthesis cannot finish."""
 
     external = []
     seen_refs: set[str] = set()
     for item in evidence:
         refs = [str(ref) for ref in item.get("evidence_refs") or [] if str(ref)]
         claim = re.sub(r"\s+", " ", str(item.get("claim") or item.get("verbatim_quote") or "")).strip()
-        if not refs or not claim or refs[0] in seen_refs:
+        if not refs or not claim or refs[0] in seen_refs or _is_index_metadata_claim(item):
             continue
         seen_refs.add(refs[0])
         external.append((item, claim[:420].rstrip(), refs[0]))
-        if len(external) >= 6:
+        if len(external) >= 8:
             break
 
-    if external:
-        answer_lines = [
-            "本轮报告综合未能在档位时限内完成。以下仅列出已获取正文能够直接确认的证据，"
-            "不把这份受限结果冒充完整综述：",
-            "",
-        ]
-        basis_lines = []
-        for item, claim, ref in external:
+    model_items = _model_context_items(state)
+    plan = state.get("_research_plan") or {}
+    subquestions = [item for item in plan.get("subquestions") or [] if isinstance(item, dict)]
+    answer_lines = [
+        "本轮报告综合未能在档位时限内完成。以下保留研究计划形成的方法框架、"
+        "模型分析和已取得的正文证据，不把搜索摘要或未核实标题当作事实依据。",
+        "",
+    ]
+    basis_lines = []
+    used_model_claims: set[str] = set()
+    used_external_refs: set[str] = set()
+
+    overview = next(
+        (
+            item for item in model_items
+            if re.search(r"维度|系统梳理|涵盖.+(?:方法|工作流|学习|智能体)", str(item.get("claim") or ""))
+        ),
+        None,
+    )
+    if overview is not None:
+        overview_claim = _clean_fallback_claim(overview)
+        if overview_claim:
+            answer_lines.extend([
+                "### 总览",
+                "",
+                "#### 模型分析与建议（非外部事实）",
+                "",
+                f"- {overview_claim}",
+                "",
+            ])
+            used_model_claims.add(overview_claim.casefold())
+
+    if subquestions:
+        for index, subquestion in enumerate(subquestions):
+            question = str(subquestion.get("question") or "").strip()
+            subquestion_id = str(subquestion.get("id") or "").strip()
+            answer_lines.extend([f"### {_fallback_dimension_heading(question, index)}", ""])
+
+            direct = [
+                item for item in external
+                if str(item[0].get("subquestion_id") or "") == subquestion_id
+            ][:2]
+            if direct:
+                answer_lines.extend(["#### 已取得的直接证据", ""])
+                for item, claim, ref in direct:
+                    title = str(item.get("document_title") or item.get("paper_id") or "未命名来源").strip()
+                    answer_lines.append(f"- 《{title}》：{claim} {ref}")
+                    basis_lines.append(f"- 《{title}》{ref}")
+                    used_external_refs.add(ref)
+                answer_lines.append("")
+
+            selected_model = _fallback_model_claims_for_question(
+                question,
+                model_items,
+                used_model_claims,
+                limit=3,
+            )
+            answer_lines.extend(["#### 模型分析与建议（非外部事实）", ""])
+            if selected_model:
+                for claim in selected_model:
+                    answer_lines.append(f"- {claim}")
+                    used_model_claims.add(claim.casefold())
+            else:
+                answer_lines.append("- 本轮模型上下文未形成足够具体的独立结论，该维度仍需补充检索。")
+            answer_lines.append("")
+
+    uncategorized_external = [item for item in external if item[2] not in used_external_refs]
+    if subquestions and uncategorized_external:
+        answer_lines.extend(["### 其他已取得的直接证据", ""])
+        for item, claim, ref in uncategorized_external[:3]:
             title = str(item.get("document_title") or item.get("paper_id") or "未命名来源").strip()
             answer_lines.append(f"- 《{title}》：{claim} {ref}")
             basis_lines.append(f"- 《{title}》{ref}")
-        answer = "\n".join(answer_lines)
-        basis = "\n".join(dict.fromkeys(basis_lines))
-    else:
+        answer_lines.append("")
+
+    if not subquestions:
+        if external:
+            answer_lines.extend(["### 已取得的直接证据", ""])
+            for item, claim, ref in external:
+                title = str(item.get("document_title") or item.get("paper_id") or "未命名来源").strip()
+                answer_lines.append(f"- 《{title}》：{claim} {ref}")
+                basis_lines.append(f"- 《{title}》{ref}")
+            answer_lines.append("")
+        model_claims = [_clean_fallback_claim(item) for item in model_items]
+        model_claims = [item for item in dict.fromkeys(model_claims) if item]
         model_content = str((state.get("_source_statuses") or {}).get("Model", {}).get("content") or "").strip()
-        answer = "\n".join([
-            "本轮报告综合未能在档位时限内完成，且没有取得可直接引用的外部正文证据。",
-            "",
-            "### 模型分析与建议（非外部事实）",
-            "",
-            model_content or f"当前材料不足以完整回答“{state['query']}”。",
-        ])
-        basis = "- 本轮没有可用于事实声明的成功外部来源。"
+        answer_lines.extend(["### 模型分析与建议（非外部事实）", ""])
+        if model_claims:
+            answer_lines.extend(f"- {claim}" for claim in model_claims[:6])
+        else:
+            answer_lines.append(model_content or f"当前材料不足以完整回答“{state['query']}”。")
+
+    answer = "\n".join(answer_lines).strip()
+    basis = "\n".join(dict.fromkeys(basis_lines)) or "- 本轮没有可用于事实声明的成功外部来源。"
 
     statuses = state.get("_source_statuses") or {}
     unavailable = [
@@ -1068,7 +1291,7 @@ def _grounded_fallback_report(state: P1ResearchState, evidence: list[dict], erro
     limitation = f"合成降级原因：{reason}。"
     if unavailable:
         limitation += f" 未作为事实证据使用的来源：{', '.join(unavailable)}。"
-    limitation += " 该结果只保留可定位证据，仍需完成正式综合与核验。"
+    limitation += " 结果已保留研究框架与模型分析；涉及具体系统、年份、性能和成熟度的事实仍需外部正文核验。"
     return f"""## 回答
 
 {answer}
@@ -1082,12 +1305,108 @@ def _grounded_fallback_report(state: P1ResearchState, evidence: list[dict], erro
 {limitation}"""
 
 
+def _model_context_items(state: P1ResearchState, limit: int = 10) -> list[dict]:
+    """Collect deduplicated Model claims without presenting them as citations."""
+
+    items = [
+        item for item in _load_evidence_table(state.get("_evidence_json") or "")
+        if str(item.get("source") or "").casefold().endswith("model") and str(item.get("claim") or "").strip()
+    ]
+    for index, claim in enumerate((state.get("_research_plan") or {}).get("claims") or []):
+        if not isinstance(claim, dict) or not str(claim.get("text") or "").strip():
+            continue
+        items.append({
+            "id": str(claim.get("id") or f"plan-claim-{index + 1}"),
+            "source": "builtin.model",
+            "claim": str(claim.get("text") or "").strip(),
+            "verbatim_quote": str(claim.get("text") or "").strip(),
+            "evidence_class": "model_inference",
+            "research_type": str(claim.get("claim_type") or "analysis"),
+            "limitations": ["model context; external verification required for factual precision"],
+        })
+    selected = []
+    seen: set[str] = set()
+    for item in items:
+        claim = _clean_fallback_claim(item)
+        key = claim.casefold()
+        if claim and key not in seen:
+            seen.add(key)
+            selected.append(item)
+        if len(selected) >= max(1, limit):
+            break
+    return selected
+
+
+def _clean_fallback_claim(item: dict) -> str:
+    return re.sub(r"\s+", " ", str(item.get("claim") or item.get("verbatim_quote") or "")).strip()[:420]
+
+
+def _fallback_dimension_heading(question: str, index: int) -> str:
+    prefix = re.split(r"[:：]", question, maxsplit=1)[0].strip()
+    if 2 <= len(prefix) <= 32:
+        return prefix
+    return f"研究维度 {index + 1}"
+
+
+def _fallback_model_claims_for_question(
+    question: str,
+    model_items: list[dict],
+    used: set[str],
+    *,
+    limit: int,
+) -> list[str]:
+    lowered = question.casefold()
+    dimensions = (
+        (("数据", "采集", "清洗", "配准", "融合", "质量", "data", "acquisition", "cleaning", "registration", "fusion"),
+         ("数据", "采集", "清洗", "配准", "融合", "质量", "data", "acquisition", "cleaning", "registration", "fusion", "gdal", "ogr", "pdal", "api", "爬虫")),
+        (("算法", "方法", "规则", "学习", "智能体", "algorithm", "method", "agent"),
+         ("算法", "方法", "规则", "机器学习", "深度学习", "algorithm", "method", "machine learning", "deep learning", "u-net", "deeplab", "transformer", "llm", "智能体", "agent", "geoai")),
+        (("系统", "平台", "云原生", "工作流", "编排", "system", "platform", "cloud", "workflow", "orchestration", "serverless"),
+         ("系统", "平台", "云", "工作流", "编排", "system", "platform", "cloud", "workflow", "orchestration", "serverless", "arcgis", "qgis", "fme", "wps", "gee", "planetary", "airflow")),
+        (("评估", "基准", "边界", "局限", "隐私", "互操作", "evaluation", "benchmark", "limitation", "privacy", "interoperability"),
+         ("评估", "基准", "边界", "局限", "挑战", "隐私", "互操作", "可信", "长尾", "evaluation", "benchmark", "limitation", "privacy", "interoperability")),
+    )
+    anchor_scores = [sum(1 for anchor in anchors if anchor in lowered) for anchors, _ in dimensions]
+    target_dimension = (
+        max(range(len(anchor_scores)), key=anchor_scores.__getitem__)
+        if max(anchor_scores) > 0
+        else -1
+    )
+    markers: tuple[str, ...] = dimensions[target_dimension][1] if target_dimension >= 0 else ()
+
+    ranked = []
+    for position, item in enumerate(model_items):
+        claim = _clean_fallback_claim(item)
+        if not claim or claim.casefold() in used:
+            continue
+        claim_lower = claim.casefold()
+        dimension_scores = [
+            sum(1 for marker in candidates if marker in claim_lower)
+            for _, candidates in dimensions
+        ]
+        score = sum(1 for marker in markers if marker in claim_lower)
+        if target_dimension >= 0 and score < max(dimension_scores):
+            continue
+        if re.search(r"维度|系统梳理|涵盖.+(?:方法|工作流|学习|智能体)", claim):
+            score -= 2
+        ranked.append((score, -position, claim))
+    ranked.sort(reverse=True)
+    return [claim for score, _, claim in ranked if score > 0][:max(1, limit)]
+
+
 def _set_generation_diagnostics(diagnostics: dict[str, str] | None, status: str, error: str) -> None:
     if diagnostics is not None:
         diagnostics.update({"status": status, "error": error})
 
 
 def _remaining_run_seconds(state: P1ResearchState, profile: ResearchModeProfile) -> float:
+    deadline_at = float(
+        state.get("_deadline_at")
+        or (state.get("_run_summary") or {}).get("deadline_at")
+        or 0.0
+    )
+    if deadline_at > 0:
+        return max(0.0, deadline_at - time.time())
     started_at = float((state.get("_run_summary") or {}).get("started_at") or 0.0)
     if started_at <= 0:
         return float("inf")
@@ -1104,6 +1423,8 @@ def _model_call_fits_budget(
     if not stage:
         required = profile.model_timeout_seconds * (1 + max(0, reserve_calls)) + 5
         return _remaining_run_seconds(state, profile) >= required
+    if stage in {"verification", "revision"} and _remaining_run_seconds(state, profile) < 45:
+        return False
     minimum = _minimum_stage_seconds(profile)
     future = {
         "analysis": minimum["synthesis"] + minimum["verification"],
@@ -1119,6 +1440,7 @@ def _minimum_stage_seconds(profile: ResearchModeProfile) -> dict[str, int]:
     return {
         name: max(8, min(profile.model_timeout_seconds, round(seconds * 0.42)))
         for name, seconds in profile.stage_budgets.items()
+        if name != "commit"
     }
 
 
@@ -1560,17 +1882,8 @@ def _verification_router(state: P1ResearchState, profile: ResearchModeProfile) -
         or str((statuses.get(source) or {}).get("status") or "") in {"failed", "no_evidence", "fallback"}
         for source in ("RAG", "Web")
     )
-    summary = state.get("_run_summary") or {}
-    started_at = float(summary.get("started_at") or time.time())
-    remaining_seconds = profile.timeout_seconds - max(0.0, time.time() - started_at)
-    minimum = _minimum_stage_seconds(profile)
-    reserve_seconds = (
-        round(profile.stage_budgets["retrieval"] * 0.35)
-        + minimum["analysis"]
-        + minimum["synthesis"]
-        + minimum["verification"]
-    )
-    has_research_budget = remaining_seconds >= reserve_seconds
+    remaining_seconds = _remaining_run_seconds(state, profile)
+    has_research_budget = remaining_seconds >= 90
     if (
         state.get("_gap_questions")
         and iteration < profile.max_gap_iterations
@@ -2009,6 +2322,23 @@ def _answer_claims(report: str) -> list[str]:
             )
         )
         if explicitly_model_derived or analytical_section and not has_citation:
+            continue
+        if not has_citation and re.search(
+            r"行业(?:通用|通识)|基于行业通识|基于模型(?:先验|知识)|"
+            r"(?:当前|现有|本轮)?证据(?:未|尚未|没有)直接覆盖|当前证据主要覆盖|"
+            r"model (?:prior|knowledge)",
+            cleaned,
+            re.IGNORECASE,
+        ):
+            continue
+        if not has_citation and re.search(
+            r"^(?:适用边界|选型边界|实践边界)\s*[:：]|"
+            r"^当.{0,28}(?:时|后).{0,20}(?:需|应|可)(?:引入|采用|组合|优先)|"
+            r"^针对.{0,28}任务.{0,20}(?:方法|路径|方案).{0,12}(?:对应|可分|取决于)|"
+            r"^(?:上述|这些|四类|各类)方法并非互斥",
+            cleaned,
+            re.IGNORECASE,
+        ):
             continue
         if not subsection and not has_citation:
             continue
@@ -2510,7 +2840,7 @@ def _drop_superseded_arxiv_versions(items: list[dict]) -> list[dict]:
 
 
 def _is_index_metadata_claim(item: dict) -> bool:
-    """Reject retrieval/index diagnostics that are not source-document claims."""
+    """Reject retrieval diagnostics and obvious page chrome as evidence claims."""
 
     text = " ".join([
         str(item.get("claim") or ""),
@@ -2518,7 +2848,9 @@ def _is_index_metadata_claim(item: dict) -> bool:
     ])
     return bool(re.search(
         r"\breusable methods\s*:|\breusable datasets\s*:|\bselection reasons\s*:|"
-        r"\bmatched research questions\s*:",
+        r"\bmatched research questions\s*:|\bestimated time\s*:|\bsoftware requirements\s*:|"
+        r"\bpurchase options?\b|\bsales team\b|\bselect a different location\b|"
+        r"\bchat online\b|\bcontact form\b",
         text,
         re.IGNORECASE,
     ))

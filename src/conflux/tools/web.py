@@ -6,10 +6,12 @@ import asyncio
 import json
 import os
 import re
+import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -38,6 +40,12 @@ from ..query_planner import (
 from ..research_modes import ResearchModeProfile
 from ..run_corpus import RunScopedCorpusProvider
 from ..source_status import AgentClaim, SourceResult
+
+
+_REQUEST_TIMEOUT_SECONDS: ContextVar[float | None] = ContextVar(
+    "conflux_web_request_timeout_seconds",
+    default=None,
+)
 
 
 _TOPIC_ANCHOR_FAMILIES = (
@@ -157,7 +165,7 @@ def _search_bing(query: str, max_results: int = 5) -> list[dict]:
         f"https://api.bing.microsoft.com/v7.0/search?{params}",
         headers={"Ocp-Apim-Subscription-Key": api_key, "User-Agent": "Conflux/0.1 research-assistant"},
     )
-    with urllib.request.urlopen(request, timeout=10) as response:
+    with urllib.request.urlopen(request, timeout=_bounded_http_timeout(10)) as response:
         payload = json.loads(response.read().decode("utf-8"))
     return [
         {
@@ -182,7 +190,7 @@ def _search_google(query: str, max_results: int = 5) -> list[dict]:
         f"https://www.googleapis.com/customsearch/v1?{params}",
         headers={"User-Agent": "Conflux/0.1 research-assistant"},
     )
-    with urllib.request.urlopen(request, timeout=10) as response:
+    with urllib.request.urlopen(request, timeout=_bounded_http_timeout(10)) as response:
         payload = json.loads(response.read().decode("utf-8"))
     return [
         {
@@ -234,7 +242,8 @@ async def _search_serpapi(query: str, max_results: int = 5) -> list[dict]:
     import aiohttp
 
     params = {"q": query, "api_key": api_key, "num": max_results, "engine": "google"}
-    async with aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(total=_bounded_http_timeout(10))
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.get("https://serpapi.com/search", params=params) as resp:
             data = await resp.json()
 
@@ -260,6 +269,8 @@ def create_web_tool(
     *,
     run_id: str = "",
     corpus_provider: RunScopedCorpusProvider | None = None,
+    deadline_at: float | None = None,
+    commit_reserve_seconds: float = 20.0,
 ):
     """Create a Web tool whose search/fetch budget follows one research depth."""
 
@@ -269,19 +280,100 @@ def create_web_tool(
         max_chunks=max(80, research_profile.web_fetch_attempts * 24),
     )
 
+    generalization = get(
+        "research", "generalization", research_profile.depth, default={}
+    ) or {}
+    if not isinstance(generalization, dict):
+        generalization = {}
+    hard_fetch_limit = max(
+        research_profile.web_fetch_limit,
+        int(generalization.get("max_web_fetches") or research_profile.web_fetch_limit),
+    )
+    hard_fetch_attempts = max(
+        hard_fetch_limit,
+        research_profile.web_fetch_attempts,
+        int(
+            generalization.get("max_web_fetch_attempts")
+            or research_profile.web_fetch_attempts
+        ),
+    )
+
     @tool("search_web")
-    def profiled_search_web(query: str) -> str:
+    def profiled_search_web(
+        query: str,
+        max_results: int | None = None,
+        max_subqueries: int | None = None,
+        fetch_limit: int | None = None,
+        fetch_attempts: int | None = None,
+        rewrite_attempts: int | None = None,
+    ) -> str:
         """Search the public web, fetch result bodies, and return citeable evidence."""
 
-        return _search_web(
-            query,
-            max_results=research_profile.web_max_results,
-            max_subqueries=research_profile.web_max_subqueries,
-            fetch_limit=research_profile.web_fetch_limit,
-            fetch_attempts=research_profile.web_fetch_attempts,
-            rewrite_attempts=research_profile.max_query_rewrites,
-            corpus_provider=run_corpus,
+        if not _deadline_has_time(deadline_at, commit_reserve_seconds):
+            return SourceResult(
+                source="Web",
+                status="fallback",
+                detail="run deadline",
+                error="Run deadline reserve reached before Web research started.",
+                content="Web research was skipped to preserve report commit time.",
+            ).to_tool_text()
+
+        resolved_fetch_limit = min(
+            hard_fetch_limit,
+            max(1, int(fetch_limit or research_profile.web_fetch_limit)),
         )
+        resolved_fetch_attempts = min(
+            hard_fetch_attempts,
+            max(
+                resolved_fetch_limit,
+                int(fetch_attempts or research_profile.web_fetch_attempts),
+            ),
+        )
+        search_kwargs = {
+            "max_results": max(
+                1,
+                min(
+                    max(research_profile.web_max_results, 10),
+                    int(max_results or research_profile.web_max_results),
+                ),
+            ),
+            "max_subqueries": max(
+                1,
+                min(
+                    max(research_profile.web_max_subqueries, 12),
+                    int(max_subqueries or research_profile.web_max_subqueries),
+                ),
+            ),
+            "fetch_limit": resolved_fetch_limit,
+            "fetch_attempts": resolved_fetch_attempts,
+            "rewrite_attempts": max(
+                0,
+                min(
+                    research_profile.max_query_rewrites,
+                    int(
+                        rewrite_attempts
+                        if rewrite_attempts is not None
+                        else research_profile.max_query_rewrites
+                    ),
+                ),
+            ),
+            "corpus_provider": run_corpus,
+        }
+        if deadline_at:
+            search_kwargs.update({
+                "deadline_at": deadline_at,
+                "commit_reserve_seconds": commit_reserve_seconds,
+            })
+        token = None
+        if deadline_at:
+            token = _REQUEST_TIMEOUT_SECONDS.set(
+                _deadline_call_timeout(deadline_at, commit_reserve_seconds, 12)
+            )
+        try:
+            return _search_web(query, **search_kwargs)
+        finally:
+            if token is not None:
+                _REQUEST_TIMEOUT_SECONDS.reset(token)
 
     return profiled_search_web
 
@@ -295,9 +387,19 @@ def _search_web(
     fetch_attempts: int | None = None,
     rewrite_attempts: int | None = None,
     corpus_provider: RunScopedCorpusProvider | None = None,
+    deadline_at: float | None = None,
+    commit_reserve_seconds: float = 20.0,
 ) -> str:
     """Execute Web research with optional run-scoped budget overrides."""
 
+    if not _deadline_has_time(deadline_at, commit_reserve_seconds):
+        return SourceResult(
+            source="Web",
+            status="fallback",
+            detail="run deadline",
+            error="Run deadline reserve reached.",
+            content="Web research stopped before starting another request.",
+        ).to_tool_text()
     provider = get("web_search", "provider", default="duckduckgo")
     max_results = max(1, int(
         max_results if max_results is not None else get("web_search", "max_results", default=5)
@@ -324,17 +426,32 @@ def _search_web(
         except Exception as exc:
             search_errors.append(f"{type(exc).__name__}: {exc}")
     results = _merge_web_results(_official_seed_results(query), academic_results)
-    if not academic_results:
-        try:
-            general_results, provider_trace, used_providers = _search_cascade(
-                plan.subqueries,
-                max_results,
-                preferred=preferred_provider,
-                required_results=max(1, min(2, max_results)),
-            )
-            results = _merge_web_results(results, general_results)
-        except Exception as exc:
-            search_errors.append(f"{type(exc).__name__}: {exc}")
+    # Scholarly APIs are discovery channels, not a substitute for general Web
+    # retrieval. They often return relevant titles whose landing pages cannot be
+    # fetched, while official documentation or repositories remain accessible.
+    general_queries = plan.subqueries
+    official_status_query = bool(standard_identifiers(query)) or bool(re.search(
+        r"\b(?:nist|nccoe|cisa|nsa|fips)\b",
+        query,
+        re.IGNORECASE,
+    ))
+    if academic_results and not official_status_query:
+        general_queries = list(dict.fromkeys([
+            *((plan.bilingual_queries or [])[:1]),
+            query.strip(),
+        ]))[:2]
+    try:
+        general_results, provider_trace, used_providers = _search_cascade(
+            general_queries,
+            max_results,
+            preferred=preferred_provider,
+            required_results=max(1, min(2, max_results)),
+            deadline_at=deadline_at,
+            commit_reserve_seconds=commit_reserve_seconds,
+        )
+        results = _merge_web_results(results, general_results)
+    except Exception as exc:
+        search_errors.append(f"{type(exc).__name__}: {exc}")
     if not results and search_errors:
         error = "; ".join(search_errors)
         if scoped_matches:
@@ -387,16 +504,16 @@ def _search_web(
     # A provider may return URLs that all fail semantic/domain filtering. Try
     # an unused configured provider before spending rewrite attempts on the
     # same backend.
-    if not academic_results and (
-        len(kept_results) < 2 or (kept_results and kept_results[0].get("_score", 0.0) < 0.55)
-    ):
+    if not kept_results:
         try:
             fallback_results, fallback_trace, fallback_used = _search_cascade(
-                plan.subqueries,
+                general_queries,
                 max_results,
                 preferred=preferred_provider,
                 excluded=set(used_providers),
                 required_results=max(1, min(2, max_results)),
+                deadline_at=deadline_at,
+                commit_reserve_seconds=commit_reserve_seconds,
             )
         except Exception as exc:
             fallback_results, fallback_trace, fallback_used = [], [], []
@@ -406,14 +523,16 @@ def _search_web(
         if fallback_results:
             results = _merge_web_results(results, fallback_results)
             kept_results, filtered_results = _filter_web_results(query, results)
-    rewrite_attempts = 0 if academic_results else max(0, int(
+    rewrite_attempts = max(0, int(
         rewrite_attempts
         if rewrite_attempts is not None
         else get("research", "max_rewrite_attempts", default=1)
     ))
     for attempt in range(1, rewrite_attempts + 1):
+        if not _deadline_has_time(deadline_at, commit_reserve_seconds):
+            break
         top_attempt = kept_results[0].get("_score", 0.0) if kept_results else 0.0
-        if len(kept_results) >= 2 and top_attempt >= 0.55:
+        if kept_results and top_attempt >= 0.55:
             break
         rewritten = rewrite_queries(query, target="web", attempt=attempt)
         retry_queries.extend(rewritten)
@@ -424,6 +543,8 @@ def _search_web(
                 preferred=preferred_provider,
                 excluded=set(used_providers),
                 required_results=max(1, min(2, max_results)),
+                deadline_at=deadline_at,
+                commit_reserve_seconds=commit_reserve_seconds,
             )
             provider_trace.extend(retry_trace)
             used_providers.extend(item for item in retry_used if item not in used_providers)
@@ -469,6 +590,8 @@ def _search_web(
         target_limit=fetch_limit,
         attempt_limit=max_fetch_attempts,
         corpus_provider=corpus_provider,
+        deadline_at=deadline_at,
+        commit_reserve_seconds=commit_reserve_seconds,
     )
     usable_results = _rerank_fetched_results(
         query,
@@ -802,14 +925,24 @@ def _claim_from_web_content(query: str, text: str, max_length: int = 500) -> str
         re.IGNORECASE,
     )
     guidance_query = bool(re.search(r"guidance|roadmap|migration|指南|指导|路线图|迁移", query, re.IGNORECASE))
-    status_query = bool(re.search(r"status|latest|current|draft|final|状态|最新|草案|最终", query, re.IGNORECASE))
+    status_query = bool(re.search(
+        r"status|latest|draft|final|as of|状态|最新|草案|最终|截至",
+        query,
+        re.IGNORECASE,
+    ))
     status_detail_pattern = re.compile(
         r"\b(expect(?:ed)? to release|awaiting approval|in development|initial public draft|"
         r"will be published|not yet (?:released|published)|remains? (?:a )?draft)\b|"
         r"预计发布|等待批准|仍在制定|尚未发布|初始公开草案",
         re.IGNORECASE,
     )
-    boilerplate_pattern = re.compile(r"TLP:CLEAR|central@|@CISA|BACKGROUND|contact us|follow us", re.IGNORECASE)
+    boilerplate_pattern = re.compile(
+        r"TLP:CLEAR|central@|@CISA|BACKGROUND|contact us|follow us|"
+        r"estimated time|software requirements|purchase options?|sales team|"
+        r"call (?:us|esri)|chat online|contact form|select a different location|"
+        r"skip to main content|table of contents|this video was created",
+        re.IGNORECASE,
+    )
     target_years = {str(year) for year in temporal_years(query)} if temporal else set()
     candidates: list[tuple[float, str]] = []
     reflowed = _reflow_web_text(str(text or ""))
@@ -846,13 +979,19 @@ def _claim_from_web_content(query: str, text: str, max_length: int = 500) -> str
             sentence,
             re.IGNORECASE,
         ) else 0.0
-        status_bonus = 0.45 if decision_pattern.search(sentence) else (0.18 if context_pattern.search(sentence) else 0.0)
+        status_bonus = (
+            0.45
+            if (status_query or guidance_query) and decision_pattern.search(sentence)
+            else 0.18
+            if (status_query or guidance_query) and context_pattern.search(sentence)
+            else 0.0
+        )
         status_detail_bonus = 0.55 if status_query and status_detail_pattern.search(sentence) else 0.0
         freshness_bonus = 0.12 if target_years and any(year in sentence for year in target_years) else 0.0
         event_penalty = 0.28 if event_pattern.search(sentence) else 0.0
         guidance_hits = len({match.casefold() for match in guidance_pattern.findall(sentence)})
         guidance_bonus = min(0.4, 0.1 * guidance_hits) if guidance_query else 0.0
-        boilerplate_penalty = 0.35 if boilerplate_pattern.search(sentence) else 0.0
+        boilerplate_penalty = 0.9 if boilerplate_pattern.search(sentence) else 0.0
         length_penalty = 0.18 if len(sentence) > max_length else 0.0
         score = (
             (0.55 * lexical)
@@ -932,11 +1071,55 @@ def _academic_query_variants(queries: list[str]) -> list[str]:
 
     variants = []
     combined = " ".join(str(query).casefold() for query in queries)
-    if (
-        any(term in combined for term in ("geoprocessing", "geospatial", "地理处理", "地理空间"))
-        and any(term in combined for term in ("automation", "agent", "自动化", "代理"))
-    ):
-        variants.append("autonomous gis agent limitations")
+    geospatial = any(
+        term in combined
+        for term in ("geoprocessing", "geospatial", "spatial data", "geoai", "gis", "地理处理", "地理空间", "地理数据")
+    )
+    data_intent = any(
+        term in combined
+        for term in ("采集", "清洗", "配准", "融合", "质量控制", "preprocessing", "registration", "fusion")
+    )
+    method_intent = any(
+        term in combined
+        for term in ("规则", "机器学习", "深度学习", "llm", "agent", "算法", "algorithm")
+    )
+    system_intent = any(term in combined for term in (
+        "工作流", "编排", "云原生", "serverless", "orchestration", "cloud-native", "arcgis", "modelbuilder", "fme", "airflow",
+    ))
+    evaluation_intent = any(
+        term in combined
+        for term in ("基准", "评估", "局限", "边界", "benchmark", "evaluation", "limitation")
+    )
+    generic_method_intent = any(term in combined for term in ("方法", "method")) and not (
+        data_intent or system_intent or evaluation_intent
+    )
+    if geospatial and data_intent:
+        variants.append(
+            "geospatial data acquisition preprocessing registration fusion quality control automation"
+        )
+    if geospatial and (method_intent or generic_method_intent):
+        method_terms = ["geospatial", "automation"]
+        if any(term in combined for term in ("规则", "rule engine", "rule-based")):
+            method_terms.extend(["rule", "based"])
+        if any(term in combined for term in ("机器学习", "machine learning")):
+            method_terms.extend(["machine", "learning"])
+        if any(term in combined for term in ("深度学习", "deep learning")):
+            method_terms.extend(["deep", "learning"])
+        if any(term in combined for term in ("llm", "large language model", "agent", "智能体")):
+            method_terms.extend(["llm", "agents"])
+        if len(method_terms) == 2:
+            method_terms.extend(["algorithms", "methods"])
+        variants.append(" ".join(dict.fromkeys([*method_terms, "review"])))
+    if geospatial and system_intent:
+        variants.append(
+            "geoprocessing workflow automation cloud platform orchestration"
+        )
+    if geospatial and evaluation_intent:
+        variants.append(
+            "geoprocessing automation benchmark evaluation limitations review"
+        )
+    if geospatial and not variants:
+        variants.append("geoprocessing automation methods review")
     for query in queries:
         tokens = re.findall(r"[A-Za-z][A-Za-z0-9.+-]*", str(query))
         normalized = " ".join(dict.fromkeys(token.casefold() for token in tokens))
@@ -948,13 +1131,13 @@ def _academic_query_variants(queries: list[str]) -> list[str]:
 
 def _fetch_json(url: str) -> dict:
     request = urllib.request.Request(url, headers={"User-Agent": "Conflux/0.1 research-assistant"})
-    with urllib.request.urlopen(request, timeout=8) as response:
+    with urllib.request.urlopen(request, timeout=_bounded_http_timeout(8)) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
 def _fetch_text(url: str) -> str:
     request = urllib.request.Request(url, headers={"User-Agent": "Conflux/0.1 research-assistant"})
-    with urllib.request.urlopen(request, timeout=8) as response:
+    with urllib.request.urlopen(request, timeout=_bounded_http_timeout(8)) as response:
         return response.read().decode("utf-8")
 
 
@@ -1040,11 +1223,20 @@ def _valid_provider_results(results: list[dict]) -> list[dict]:
     ]
 
 
-def fetch_url_content(url: str, *, title_hint: str = "") -> FetchedContent:
+def fetch_url_content(
+    url: str,
+    *,
+    title_hint: str = "",
+    timeout_seconds: float | None = None,
+) -> FetchedContent:
     """Fetch one HTML/PDF URL and normalize it into citeable body text."""
 
     retrieved_at = datetime.now(timezone.utc).isoformat()
-    timeout = float(get("web_search", "fetch_timeout_seconds", default=12))
+    timeout = float(
+        timeout_seconds
+        if timeout_seconds is not None
+        else get("web_search", "fetch_timeout_seconds", default=12)
+    )
     max_bytes = int(get("web_search", "max_fetch_bytes", default=5 * 1024 * 1024))
     request = urllib.request.Request(
         url,
@@ -1202,6 +1394,8 @@ def _fetch_web_results(
     results: list[dict],
     *,
     corpus_provider: RunScopedCorpusProvider | None = None,
+    deadline_at: float | None = None,
+    commit_reserve_seconds: float = 20.0,
 ) -> list[dict]:
     """Fetch discovered results concurrently and retain explicit failures."""
 
@@ -1221,9 +1415,26 @@ def _fetch_web_results(
 
     with ThreadPoolExecutor(max_workers=min(4, len(selected) or 1)) as executor:
         def fetch(item: dict) -> FetchedContent:
+            timeout = _deadline_call_timeout(
+                deadline_at,
+                commit_reserve_seconds,
+                float(get("web_search", "fetch_timeout_seconds", default=12)),
+            )
+            if timeout <= 0:
+                return FetchedContent(
+                    url=str(item.get("url") or ""),
+                    final_url=str(item.get("url") or ""),
+                    title=str(item.get("title") or ""),
+                    text="",
+                    content_type="",
+                    content_kind="unfetched",
+                    status="failed",
+                    error="Run deadline reserve reached before fetch.",
+                )
             invoke = lambda: fetch_url_content(
                 str(item.get("url") or ""),
                 title_hint=str(item.get("title") or ""),
+                timeout_seconds=timeout,
             )
             if corpus_provider is None:
                 return invoke()
@@ -1272,21 +1483,32 @@ def _fetch_with_backfill(
     target_limit: int,
     attempt_limit: int,
     corpus_provider: RunScopedCorpusProvider | None = None,
+    deadline_at: float | None = None,
+    commit_reserve_seconds: float = 20.0,
 ) -> tuple[list[dict], list[dict]]:
     """Fetch a bounded candidate set and replace inaccessible pages."""
 
     target_limit = max(1, int(target_limit))
     attempt_limit = max(target_limit, int(attempt_limit))
     selected = _select_results_for_fetch(query, results, min(target_limit, attempt_limit))
-    fetched = (
-        _fetch_web_results(selected, corpus_provider=corpus_provider)
-        if corpus_provider is not None
-        else _fetch_web_results(selected)
-    )
+    def fetch_batch(items: list[dict]) -> list[dict]:
+        kwargs = {}
+        if corpus_provider is not None:
+            kwargs["corpus_provider"] = corpus_provider
+        if deadline_at:
+            kwargs.update({
+                "deadline_at": deadline_at,
+                "commit_reserve_seconds": commit_reserve_seconds,
+            })
+        return _fetch_web_results(items, **kwargs)
+
+    fetched = fetch_batch(selected)
     usable_count = sum(1 for item in fetched if item["fetch"].usable)
     attempted_urls = {_result_identity(item) for item in selected}
 
     while usable_count < target_limit and len(selected) < attempt_limit:
+        if not _deadline_has_time(deadline_at, commit_reserve_seconds):
+            break
         remaining = [
             item
             for item in results
@@ -1298,11 +1520,7 @@ def _fetch_with_backfill(
         extra = _select_results_for_fetch(query, remaining, budget)
         if not extra:
             break
-        extra_fetched = (
-            _fetch_web_results(extra, corpus_provider=corpus_provider)
-            if corpus_provider is not None
-            else _fetch_web_results(extra)
-        )
+        extra_fetched = fetch_batch(extra)
         selected.extend(extra)
         fetched.extend(extra_fetched)
         attempted_urls.update(_result_identity(item) for item in extra)
@@ -1448,6 +1666,8 @@ def _search_cascade(
     preferred: str,
     excluded: set[str] | None = None,
     required_results: int = 2,
+    deadline_at: float | None = None,
+    commit_reserve_seconds: float = 20.0,
 ) -> tuple[list[dict], list[dict], list[str]]:
     """Run configured providers in order and retain an auditable trace."""
 
@@ -1456,6 +1676,9 @@ def _search_cascade(
     used: list[str] = []
     excluded = excluded or set()
     for name in _provider_chain(preferred):
+        if not _deadline_has_time(deadline_at, commit_reserve_seconds):
+            trace.append({"provider": name, "status": "skipped_deadline", "result_count": 0})
+            break
         if name in excluded:
             continue
         provider = _provider(name)
@@ -1471,7 +1694,13 @@ def _search_cascade(
             })
             continue
         try:
-            batch = _search_with_plan(name, subqueries, max_results)
+            batch = _search_with_plan(
+                name,
+                subqueries,
+                max_results,
+                deadline_at=deadline_at,
+                commit_reserve_seconds=commit_reserve_seconds,
+            )
             used.append(name)
             results = _merge_web_results(results, batch)
             valid_count = len(_valid_provider_results(batch))
@@ -1561,7 +1790,14 @@ def _search_arxiv(query: str, max_results: int) -> list[dict]:
     return results
 
 
-def _search_with_plan(provider: str, subqueries: list[str], max_results: int) -> list[dict]:
+def _search_with_plan(
+    provider: str,
+    subqueries: list[str],
+    max_results: int,
+    *,
+    deadline_at: float | None = None,
+    commit_reserve_seconds: float = 20.0,
+) -> list[dict]:
     results: list[dict] = []
     positions: dict[str, int] = {}
     per_query = max(2, max_results)
@@ -1571,10 +1807,20 @@ def _search_with_plan(provider: str, subqueries: list[str], max_results: int) ->
 
     def run(item: tuple[int, str]) -> tuple[int, str, list[dict], Exception | None]:
         query_index, subquery = item
+        if not _deadline_has_time(deadline_at, commit_reserve_seconds):
+            return query_index, subquery, [], TimeoutError("run deadline reserve reached")
+        token = None
+        if deadline_at:
+            token = _REQUEST_TIMEOUT_SECONDS.set(
+                _deadline_call_timeout(deadline_at, commit_reserve_seconds, 10)
+            )
         try:
             batch = adapter.search(subquery, per_query)
         except Exception as exc:
             return query_index, subquery, [], exc
+        finally:
+            if token is not None:
+                _REQUEST_TIMEOUT_SECONDS.reset(token)
         return query_index, subquery, batch, None
 
     workers = max(1, min(int(get("web_search", "max_parallel_queries", default=3)), len(subqueries) or 1))
@@ -1607,6 +1853,31 @@ def _search_with_plan(provider: str, subqueries: list[str], max_results: int) ->
     if not results and errors:
         raise errors[0]
     return results
+
+
+def _deadline_call_timeout(
+    deadline_at: float | None,
+    commit_reserve_seconds: float,
+    role_timeout: float,
+) -> float:
+    if not deadline_at:
+        return max(0.001, float(role_timeout))
+    remaining = float(deadline_at) - time.time() - max(0.0, float(commit_reserve_seconds))
+    return max(0.0, min(float(role_timeout), remaining))
+
+
+def _bounded_http_timeout(default: float) -> float:
+    configured = _REQUEST_TIMEOUT_SECONDS.get()
+    if configured is None:
+        return max(0.001, float(default))
+    return max(0.001, min(float(default), configured))
+
+
+def _deadline_has_time(
+    deadline_at: float | None,
+    commit_reserve_seconds: float,
+) -> bool:
+    return _deadline_call_timeout(deadline_at, commit_reserve_seconds, 1.0) > 0
 
 
 def _merge_web_results(existing: list[dict], additional: list[dict]) -> list[dict]:

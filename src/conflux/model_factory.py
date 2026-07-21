@@ -9,6 +9,7 @@
 import os
 import queue
 import threading
+import time
 from math import ceil
 from typing import Any
 
@@ -18,12 +19,27 @@ from langchain_core.language_models import BaseChatModel
 from . import config
 
 
+class RunDeadlineExceeded(TimeoutError):
+    """Raised when a model call would consume the run's commit reserve."""
+
+
 class BoundedChatModel:
     """Proxy a chat model with a hard wall-clock boundary per invocation."""
 
-    def __init__(self, model: Any, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        model: Any,
+        timeout_seconds: float,
+        *,
+        deadline_at: float | None = None,
+        commit_reserve_seconds: float = 0.0,
+        role: str = "model",
+    ) -> None:
         self._model = model
         self._timeout_seconds = max(0.001, float(timeout_seconds))
+        self._deadline_at = float(deadline_at) if deadline_at else None
+        self._commit_reserve_seconds = max(0.0, float(commit_reserve_seconds))
+        self._role = role
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._model, name)
@@ -32,24 +48,43 @@ class BoundedChatModel:
         return BoundedChatModel(
             self._model.bind_tools(tools, **kwargs),
             self._timeout_seconds,
+            deadline_at=self._deadline_at,
+            commit_reserve_seconds=self._commit_reserve_seconds,
+            role=self._role,
         )
 
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        call_timeout = self._timeout_seconds
+        if self._deadline_at is not None:
+            available = self._deadline_at - time.time() - self._commit_reserve_seconds
+            if available <= 0:
+                raise RunDeadlineExceeded(
+                    f"run deadline reserve reached before {self._role} call"
+                )
+            call_timeout = min(call_timeout, available)
         result_queue: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+        invocation_kwargs = dict(kwargs)
+        configured_timeout = invocation_kwargs.get("timeout")
+        try:
+            if configured_timeout is not None:
+                call_timeout = min(call_timeout, float(configured_timeout))
+        except (TypeError, ValueError):
+            pass
+        invocation_kwargs["timeout"] = call_timeout
 
         def run() -> None:
             try:
-                result_queue.put((True, self._model.invoke(*args, **kwargs)))
+                result_queue.put((True, self._model.invoke(*args, **invocation_kwargs)))
             except BaseException as exc:
                 result_queue.put((False, exc))
 
         thread = threading.Thread(target=run, daemon=True)
         thread.start()
         try:
-            succeeded, payload = result_queue.get(timeout=self._timeout_seconds)
+            succeeded, payload = result_queue.get(timeout=call_timeout)
         except queue.Empty as exc:
             raise TimeoutError(
-                f"model invocation exceeded {self._timeout_seconds:g}s hard deadline"
+                f"{self._role} invocation exceeded {call_timeout:g}s run-aware hard deadline"
             ) from exc
         if not succeeded:
             raise payload
@@ -206,7 +241,12 @@ def validate_runtime_credentials(
     return problems
 
 
-def create_research_models(depth: str | None = None) -> tuple[dict[str, BaseChatModel], dict]:
+def create_research_models(
+    depth: str | None = None,
+    *,
+    deadline_at: float | None = None,
+    commit_reserve_seconds: float | None = None,
+) -> tuple[dict[str, BaseChatModel], dict]:
     """Create the role models selected by one P1 research profile."""
 
     from .research_modes import research_model_diagnostics, resolve_research_profile
@@ -220,16 +260,24 @@ def create_research_models(depth: str | None = None) -> tuple[dict[str, BaseChat
         "verifier": profile.verifier_model,
     }
     budget = ResearchTokenBudget(profile.token_budget)
+    reserve = (
+        profile.commit_reserve_seconds
+        if commit_reserve_seconds is None
+        else max(0.0, float(commit_reserve_seconds))
+    )
     models = {
         role: BudgetedChatModel(
             BoundedChatModel(
                 create_chat_model(
                     preset,
                     max_tokens=profile.role_max_tokens[role],
-                    timeout=profile.model_timeout_seconds,
+                    timeout=profile.role_timeout_seconds[role],
                     max_retries=profile.max_retries,
                 ),
-                profile.model_timeout_seconds,
+                profile.role_timeout_seconds[role],
+                deadline_at=deadline_at,
+                commit_reserve_seconds=reserve,
+                role=role,
             ),
             budget,
             output_reserve=profile.role_max_tokens[role],

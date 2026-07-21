@@ -46,6 +46,20 @@ from conflux.sdk.testing import (
 from conflux.builtin.text.plugin import plugin as text_plugin
 
 
+@pytest.fixture
+def unavailable_review_model(monkeypatch):
+    """Keep no-LLM plugin tests offline and independent of local config/cache."""
+    import conflux.builtin.research.plugin as research_plugin
+    import conflux.model_factory as model_factory
+
+    monkeypatch.setattr(research_plugin, "_REVIEW_CACHE", {})
+
+    def raise_unavailable(*args, **kwargs):
+        raise ValueError("review model intentionally unavailable in offline test")
+
+    monkeypatch.setattr(model_factory, "create_chat_model", raise_unavailable)
+
+
 # ════════════════════════════════════════════════════════════════════
 # Manifest validation
 # ════════════════════════════════════════════════════════════════════
@@ -831,19 +845,17 @@ class TestM2BuiltinPlugins:
         assert result.status == StepStatus.SUCCESS
         assert result.output["reviewed_count"] == 0
 
-    def test_evidence_review_unreviewed_without_llm(self):
-        """Without API key, evidence_review marks all unreviewed."""
+    def test_evidence_review_unreviewed_without_llm(self, unavailable_review_model):
+        """When no review model is available, evidence_review marks all unreviewed."""
         from conflux.builtin.research.plugin import evidence_review
         from conflux.sdk.testing import make_plugin_context
 
         ctx = make_plugin_context()
-        # No API key set → LLM unavailable → all unreviewed.
         result = evidence_review(
             ctx,
             query="quantum computing",
             candidates=[{"text": "Paper about quantum computing"}],
         )
-        # Should be unreviewed since no valid LLM config.
         assert result.status in (StepStatus.UNREVIEWED, StepStatus.FAILED)
         assert result.output["unreviewed_count"] >= 1
 
@@ -853,7 +865,7 @@ class TestM2BuiltinPlugins:
         cap = paper_plugin.get_capability("builtin.paper.review")
         assert cap is not None
 
-    def test_paper_review_unreviewed_without_llm(self):
+    def test_paper_review_unreviewed_without_llm(self, unavailable_review_model):
         from conflux.builtin.paper.plugin import paper_review
         from conflux.sdk.testing import make_plugin_context
 
@@ -862,7 +874,6 @@ class TestM2BuiltinPlugins:
             ctx,
             papers=[{"title": "Test Paper", "abstract": "An important result."}],
         )
-        # Without API key → unreviewed.
         assert result.status in (StepStatus.UNREVIEWED, StepStatus.FAILED)
         assert result.output["unreviewed"] >= 1
 

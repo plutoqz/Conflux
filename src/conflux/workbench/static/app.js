@@ -1734,15 +1734,23 @@ async function runQuery() {
   const started = Date.now();
   const elapsedTimer = window.setInterval(() => {
     const elapsed = Math.max(1, Math.round((Date.now() - started) / 1000));
-    const timingOut = activeQuery && activeQuery.runId === runId && (activeQuery.timedOut || activeQuery.cancelRequested);
-    $('queryStage').textContent = timingOut ? '取消处理中 · ' + elapsed + ' 秒' : '已运行 ' + elapsed + ' 秒';
+    const timingOut = activeQuery && activeQuery.runId === runId && activeQuery.timedOut;
+    $('queryStage').textContent = timingOut ? '已到档位时限 · 正在提交报告 · ' + elapsed + ' 秒' : '已运行 ' + elapsed + ' 秒';
   }, 1000);
 
   const nodeStates = {};
   const nodeDetails = {};
+  const nodeLabels = {
+    research_plan:'研究计划', rag_agent:'RAG 检索', web_agent:'Web 搜索',
+    model_agent:'模型分析', evidence_merge:'证据合并', arbitration:'冲突仲裁',
+    synthesize:'报告合成', verify_revise:'核验修订', gap_research:'缺口补证',
+    factcheck:'复核完成', deep_research:'深化研究', report_draft:'报告初稿',
+    verification_round:'第一轮核验', targeted_gap_research:'针对性补证',
+    reanalysis:'重新分析', final_commit:'最终提交'
+  };
   const updateNodeDisplay = () => {
-    const order = ['research_plan', 'rag_agent', 'web_agent', 'model_agent', 'evidence_merge', 'arbitration', 'synthesize', 'verify_revise', 'gap_research', 'factcheck', 'deep_research'];
-    const labels = { research_plan:'研究计划', rag_agent:'RAG 检索', web_agent:'Web 搜索', model_agent:'模型分析', evidence_merge:'证据合并', arbitration:'冲突仲裁', synthesize:'报告合成', verify_revise:'核验修订', gap_research:'缺口补证', factcheck:'复核完成', deep_research:'深化研究' };
+    const order = ['research_plan', 'rag_agent', 'web_agent', 'model_agent', 'evidence_merge', 'arbitration', 'synthesize', 'report_draft', 'verification_round', 'verify_revise', 'targeted_gap_research', 'gap_research', 'reanalysis', 'factcheck', 'deep_research', 'final_commit'];
+    const labels = Object.assign({}, nodeLabels);
     Object.keys(nodeDetails).forEach(function(k){ if (labels[k]) labels[k] += ' · ' + nodeDetails[k]; });
     const lines = order.filter(function(k){ return nodeStates[k]; }).map(function(k){ return (nodeStates[k]==='completed'?'\u2705':nodeStates[k]==='failed'?'\u274c':(nodeStates[k]==='unreviewed'||nodeStates[k]==='fallback')?'\u26a0\ufe0f':'\u23f3') + ' ' + labels[k]; });
     if (lines.length) {
@@ -1765,9 +1773,11 @@ async function runQuery() {
           nodeDetails[evt.stage] = '有效 ' + kept + ' / 召回 ' + total;
         } else if (Array.isArray(metadata.provider_trace) && metadata.provider_trace.length) {
           nodeDetails[evt.stage] = metadata.provider_trace.map((item) => item.provider + ':' + item.status).join(', ');
+        } else if (metadata.round != null) {
+          nodeDetails[evt.stage] = '第 ' + metadata.round + ' 轮';
         }
         updateNodeDisplay();
-        $('queryStage').textContent = (evt.stage || '').replace(/_/g, ' ') + ' · ' + Math.round((Date.now() - started) / 1000) + ' 秒';
+        $('queryStage').textContent = (nodeLabels[evt.stage] || evt.stage || '').replace(/_/g, ' ') + ' · ' + Math.round((Date.now() - started) / 1000) + ' 秒';
       }
     } catch (e) { /* ignore parse errors */ }
   };
@@ -1788,17 +1798,25 @@ async function runQuery() {
       const res = await authFetch('/api/query/jobs/' + runId);
       if (!res.ok) return;
       const job = await res.json();
-      if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled' || job.status === 'timed_out') {
+      const terminalStatuses = ['completed', 'completed_with_warnings', 'timed_out_with_report', 'timed_out', 'cancelled', 'failed'];
+      if (terminalStatuses.includes(job.status)) {
         window.clearInterval(pollInterval);
         window.clearInterval(elapsedTimer);
         window.clearTimeout(queryTimeout);
         es.close();
         finalResult = job;
         $('queryOutput').hidden = false;
-        if (job.status === 'completed') {
-          $('queryStage').textContent = '完成 · ' + Math.round((Date.now() - started) / 1000) + ' 秒';
-          $('queryStage').className = 'status-pill ok';
-          const reportPath = job.report_md_path || ((job.artifacts || {}).markdown_path || '');
+        const reportPath = job.report_md_path || ((job.artifacts || {}).markdown_path || '');
+        const hasReport = Boolean(job.has_report && (reportPath || job.final_answer));
+        const warningStatus = job.status === 'completed_with_warnings' || job.status === 'timed_out_with_report';
+        if (hasReport || job.status === 'completed' || job.status === 'completed_with_warnings') {
+          const stageLabels = {
+            completed:'完成', completed_with_warnings:'完成（有警告）',
+            timed_out_with_report:'超时（报告已保留）', failed:'失败（报告已保留）',
+            cancelled:'已取消（报告已保留）'
+          };
+          $('queryStage').textContent = (stageLabels[job.status] || '报告已保留') + ' · ' + Math.round((Date.now() - started) / 1000) + ' 秒';
+          $('queryStage').className = 'status-pill ' + (warningStatus || !['completed'].includes(job.status) ? 'warn' : 'ok');
           if (reportPath) {
             $('queryOutput').hidden = true;
             $('queryReportPreview').src = '/api/markdown?path=' + encodeURIComponent(reportPath);
@@ -1810,11 +1828,13 @@ async function runQuery() {
           const meta = [
             '研究管线：' + (job.pipeline || 'unknown'),
             '来源状态：' + JSON.stringify(job.source_statuses || {}),
-            'FactCheck：' + (job.factcheck_status || '未记录')
-          ];
+            'FactCheck：' + (job.factcheck_status || '未记录'),
+            job.warning ? '警告：' + job.warning : '',
+            job.error && job.status !== 'completed' ? '终止原因：' + job.error : ''
+          ].filter(Boolean);
           $('queryResultMeta').textContent = meta.join('\n');
           $('queryResultMeta').hidden = false;
-          toast('研究任务已完成', 'ok');
+          toast(warningStatus || job.status !== 'completed' ? '报告已保留，请查看警告' : '研究任务已完成', warningStatus || job.status !== 'completed' ? 'warn' : 'ok');
         } else {
           $('queryStage').textContent = job.status === 'failed' ? '执行失败' : job.status === 'timed_out' ? '执行超时' : '已取消';
           $('queryStage').className = 'status-pill error';
@@ -1831,27 +1851,12 @@ async function runQuery() {
     } catch (e) { /* ignore poll errors */ }
   }, 1000);
 
-  const queryTimeout = window.setTimeout(async function() {
+  const queryTimeout = window.setTimeout(function() {
     if (finalResult || !activeQuery || activeQuery.runId !== runId) return;
-    const queryContext = activeQuery;
-    queryContext.timedOut = true;
-    $('queryStage').textContent = '已超时 · 正在请求取消';
+    activeQuery.timedOut = true;
+    $('queryStage').textContent = '已到档位时限 · 后端正在保存报告与 trace';
     $('queryStage').className = 'status-pill warn';
-    markCancelRequested('正在取消');
-    try {
-      const data = await requestQueryCancellation(runId, 'timeout');
-      if (activeQuery !== queryContext) return;
-      queryContext.cancelRequested = Boolean(data.cancel_requested);
-      toast(data.cancel_requested ? '任务超过当前档位时限，已请求系统自动终止' : '任务已结束，正在读取最终状态', 'warn');
-    } catch (error) {
-      if (activeQuery !== queryContext) return;
-      queryContext.cancelRequested = false;
-      const cancelButton = $('cancelQuery');
-      cancelButton.disabled = false;
-      if (cancelButton.dataset.previousHtml) cancelButton.innerHTML = cancelButton.dataset.previousHtml;
-      toast('自动取消失败：' + error.message, 'err');
-      refreshIcons();
-    }
+    toast('已到当前档位时限，等待后端提交已生成结果', 'warn');
   }, runTimeoutSeconds * 1000);
 
   // Show cancel button, hide run button

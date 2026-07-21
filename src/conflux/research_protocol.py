@@ -236,3 +236,538 @@ def _string_list(value: Any) -> list[str]:
     if isinstance(value, (list, tuple, set)):
         return [str(item).strip() for item in value if str(item).strip()]
     return [str(value).strip()] if str(value).strip() else []
+
+
+# P1.5 generalized deep-research contracts. These objects stay run-scoped and
+# deliberately use JSON-native field types so they can be persisted in traces.
+ArchetypeType = Literal[
+    "method_survey",
+    "state_and_trends",
+    "limitations_and_challenges",
+    "comparison",
+    "causal_mechanism",
+    "solution_design",
+    "evidence_review",
+    "general_exploration",
+]
+DimensionCoverageStatus = Literal[
+    "covered",
+    "partial",
+    "evidence_scarce",
+    "conflicting",
+    "out_of_scope",
+]
+
+
+@dataclass(slots=True)
+class QueryArchetype:
+    type: ArchetypeType = "general_exploration"
+    confidence: float = 0.0
+    user_intent: str = ""
+    expected_research_actions: list[str] = field(default_factory=list)
+    required_synthesis_functions: list[str] = field(default_factory=list)
+    secondary_types: list[str] = field(default_factory=list)
+    selection_reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "QueryArchetype":
+        archetype = str(payload.get("type") or "general_exploration")
+        allowed = {
+            "method_survey",
+            "state_and_trends",
+            "limitations_and_challenges",
+            "comparison",
+            "causal_mechanism",
+            "solution_design",
+            "evidence_review",
+            "general_exploration",
+        }
+        if archetype not in allowed:
+            archetype = "general_exploration"
+        return cls(
+            type=archetype,  # type: ignore[arg-type]
+            confidence=_bounded_float(payload.get("confidence"), default=0.0),
+            user_intent=str(payload.get("user_intent") or "").strip(),
+            expected_research_actions=_string_list(payload.get("expected_research_actions")),
+            required_synthesis_functions=_string_list(payload.get("required_synthesis_functions")),
+            secondary_types=_string_list(payload.get("secondary_types")),
+            selection_reason=str(payload.get("selection_reason") or payload.get("reason") or "").strip(),
+        )
+
+
+@dataclass(slots=True)
+class ResearchStrategy:
+    primary_archetype: str = "general_exploration"
+    secondary_archetypes: list[str] = field(default_factory=list)
+    rationale: str = ""
+    discovery_actions: list[str] = field(default_factory=list)
+    depth_actions: list[str] = field(default_factory=list)
+    required_synthesis_functions: list[str] = field(default_factory=list)
+    stop_policy: list[str] = field(default_factory=list)
+    breadth_first: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ResearchStrategy":
+        return cls(
+            primary_archetype=str(payload.get("primary_archetype") or "general_exploration"),
+            secondary_archetypes=_string_list(payload.get("secondary_archetypes")),
+            rationale=str(payload.get("rationale") or "").strip(),
+            discovery_actions=_string_list(payload.get("discovery_actions")),
+            depth_actions=_string_list(payload.get("depth_actions")),
+            required_synthesis_functions=_string_list(payload.get("required_synthesis_functions")),
+            stop_policy=_string_list(payload.get("stop_policy")),
+            breadth_first=_bool_value(payload.get("breadth_first"), default=True),
+        )
+
+
+@dataclass(slots=True)
+class ResearchDimension:
+    id: str
+    name: str
+    inclusion_reason: str = ""
+    parent_id: str = ""
+    child_ids: list[str] = field(default_factory=list)
+    questions_to_answer: list[str] = field(default_factory=list)
+    expected_evidence_types: list[str] = field(default_factory=list)
+    importance: float = 0.5
+    current_coverage: str = "evidence_scarce"
+    conflicts: list[str] = field(default_factory=list)
+    gaps: list[str] = field(default_factory=list)
+    stop_conditions: list[str] = field(default_factory=list)
+    terminology: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any], *, index: int = 0) -> "ResearchDimension":
+        name = str(payload.get("name") or payload.get("title") or f"dimension-{index + 1}").strip()
+        return cls(
+            id=str(payload.get("id") or f"dim-{index + 1}"),
+            name=name,
+            inclusion_reason=str(payload.get("inclusion_reason") or payload.get("reason") or "").strip(),
+            parent_id=str(payload.get("parent_id") or "").strip(),
+            child_ids=_string_list(payload.get("child_ids")),
+            questions_to_answer=_string_list(
+                payload.get("questions_to_answer") or payload.get("questions")
+            ),
+            expected_evidence_types=_string_list(
+                payload.get("expected_evidence_types") or payload.get("evidence_types")
+            ),
+            importance=_importance_float(payload.get("importance"), default=0.5),
+            current_coverage=str(payload.get("current_coverage") or "evidence_scarce"),
+            conflicts=_string_list(payload.get("conflicts")),
+            gaps=_string_list(payload.get("gaps")),
+            stop_conditions=_string_list(payload.get("stop_conditions")),
+            terminology=_string_list(payload.get("terminology")),
+        )
+
+
+@dataclass(slots=True)
+class DomainMap:
+    scope: str = ""
+    key_concepts: list[str] = field(default_factory=list)
+    terminology: list[str] = field(default_factory=list)
+    dimensions: list[ResearchDimension] = field(default_factory=list)
+    dimension_relations: list[dict[str, str]] = field(default_factory=list)
+    disputed_boundaries: list[str] = field(default_factory=list)
+    discovery_sources: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "DomainMap":
+        dimensions = [
+            ResearchDimension.from_dict(item, index=index)
+            for index, item in enumerate(payload.get("dimensions") or [])
+            if isinstance(item, dict)
+        ]
+        relations = [
+            {str(key): str(value) for key, value in item.items() if str(key)}
+            for item in payload.get("dimension_relations") or []
+            if isinstance(item, dict)
+        ]
+        return cls(
+            scope=str(payload.get("scope") or "").strip(),
+            key_concepts=_string_list(payload.get("key_concepts")),
+            terminology=_string_list(payload.get("terminology")),
+            dimensions=dimensions,
+            dimension_relations=relations,
+            disputed_boundaries=_string_list(payload.get("disputed_boundaries")),
+            discovery_sources=_string_list(payload.get("discovery_sources")),
+        )
+
+
+@dataclass(slots=True)
+class CoverageDimension:
+    dimension_id: str
+    status: DimensionCoverageStatus = "evidence_scarce"
+    body_evidence: bool = False
+    covered_actions: list[str] = field(default_factory=list)
+    missing_actions: list[str] = field(default_factory=list)
+    high_authority_source: bool = False
+    independent_source_count: int = 0
+    cross_validation_required: bool = False
+    conflicts: list[str] = field(default_factory=list)
+    temporal_conflicts: list[str] = field(default_factory=list)
+    terminology_ambiguities: list[str] = field(default_factory=list)
+    model_only: bool = False
+    evidence_ids: list[str] = field(default_factory=list)
+    source_ids: list[str] = field(default_factory=list)
+    evidence_count: int = 0
+    saturation: float = 0.0
+    gap_summary: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "CoverageDimension":
+        status = str(payload.get("status") or "evidence_scarce")
+        if status not in {"covered", "partial", "evidence_scarce", "conflicting", "out_of_scope"}:
+            status = "evidence_scarce"
+        return cls(
+            dimension_id=str(payload.get("dimension_id") or ""),
+            status=status,  # type: ignore[arg-type]
+            body_evidence=_bool_value(payload.get("body_evidence")),
+            covered_actions=_string_list(payload.get("covered_actions")),
+            missing_actions=_string_list(payload.get("missing_actions")),
+            high_authority_source=_bool_value(payload.get("high_authority_source")),
+            independent_source_count=max(0, _int_value(payload.get("independent_source_count"))),
+            cross_validation_required=_bool_value(payload.get("cross_validation_required")),
+            conflicts=_string_list(payload.get("conflicts")),
+            temporal_conflicts=_string_list(payload.get("temporal_conflicts")),
+            terminology_ambiguities=_string_list(payload.get("terminology_ambiguities")),
+            model_only=_bool_value(payload.get("model_only")),
+            evidence_ids=_string_list(payload.get("evidence_ids")),
+            source_ids=_string_list(payload.get("source_ids")),
+            evidence_count=max(0, _int_value(payload.get("evidence_count"))),
+            saturation=_bounded_float(payload.get("saturation"), default=0.0),
+            gap_summary=_string_list(payload.get("gap_summary")),
+        )
+
+
+@dataclass(slots=True)
+class CoverageMatrix:
+    dimensions: list[CoverageDimension] = field(default_factory=list)
+    iteration: int = 0
+    target: float = 0.8
+    overall_coverage: float = 0.0
+    high_importance_coverage: float = 0.0
+    saturation: float = 0.0
+    stop_reason: str = ""
+    exhausted: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "CoverageMatrix":
+        return cls(
+            dimensions=[
+                CoverageDimension.from_dict(item)
+                for item in payload.get("dimensions") or []
+                if isinstance(item, dict)
+            ],
+            iteration=max(0, _int_value(payload.get("iteration"))),
+            target=_bounded_float(payload.get("target"), default=0.8),
+            overall_coverage=_bounded_float(payload.get("overall_coverage"), default=0.0),
+            high_importance_coverage=_bounded_float(
+                payload.get("high_importance_coverage"), default=0.0
+            ),
+            saturation=_bounded_float(payload.get("saturation"), default=0.0),
+            stop_reason=str(payload.get("stop_reason") or "").strip(),
+            exhausted=_bool_value(payload.get("exhausted")),
+        )
+
+    def by_dimension(self) -> dict[str, CoverageDimension]:
+        return {item.dimension_id: item for item in self.dimensions if item.dimension_id}
+
+
+@dataclass(slots=True)
+class DynamicResearchBudget:
+    depth: str = "standard"
+    complexity_score: float = 0.5
+    major_dimension_limit: int = 8
+    breadth_query_limit: int = 10
+    depth_query_limit: int = 6
+    evidence_limit: int = 16
+    web_fetch_limit: int = 4
+    web_fetch_attempts: int = 8
+    max_gap_iterations: int = 1
+    per_dimension_min_queries: int = 1
+    per_dimension_min_evidence: int = 1
+    section_length_budgets: dict[str, int] = field(default_factory=dict)
+    total_output_chars: int = 6000
+    token_budget: int = 75000
+    timeout_seconds: int = 240
+    global_hard_limits: dict[str, int] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "DynamicResearchBudget":
+        return cls(
+            depth=str(payload.get("depth") or "standard"),
+            complexity_score=_bounded_float(payload.get("complexity_score"), default=0.5),
+            major_dimension_limit=max(1, _int_value(payload.get("major_dimension_limit"), default=8)),
+            breadth_query_limit=max(1, _int_value(payload.get("breadth_query_limit"), default=10)),
+            depth_query_limit=max(0, _int_value(payload.get("depth_query_limit"), default=6)),
+            evidence_limit=max(1, _int_value(payload.get("evidence_limit"), default=16)),
+            web_fetch_limit=max(1, _int_value(payload.get("web_fetch_limit"), default=4)),
+            web_fetch_attempts=max(1, _int_value(payload.get("web_fetch_attempts"), default=8)),
+            max_gap_iterations=max(0, _int_value(payload.get("max_gap_iterations"), default=1)),
+            per_dimension_min_queries=max(
+                0, _int_value(payload.get("per_dimension_min_queries"), default=1)
+            ),
+            per_dimension_min_evidence=max(
+                0, _int_value(payload.get("per_dimension_min_evidence"), default=1)
+            ),
+            section_length_budgets=_int_dict(payload.get("section_length_budgets")),
+            total_output_chars=max(1, _int_value(payload.get("total_output_chars"), default=6000)),
+            token_budget=max(1, _int_value(payload.get("token_budget"), default=75000)),
+            timeout_seconds=max(1, _int_value(payload.get("timeout_seconds"), default=240)),
+            global_hard_limits=_int_dict(payload.get("global_hard_limits")),
+        )
+
+
+@dataclass(slots=True)
+class SourcePlan:
+    id: str
+    dimension_id: str
+    evidence_needs: list[str] = field(default_factory=list)
+    source_types: list[str] = field(default_factory=list)
+    source_ids: list[str] = field(default_factory=list)
+    query_intents: list[str] = field(default_factory=list)
+    recency_requirement: str = "unspecified"
+    authority_threshold: float = 0.7
+    cross_check_required: bool = False
+    budget: dict[str, int] = field(default_factory=dict)
+    fallback_order: list[str] = field(default_factory=list)
+    model_role: str = "analysis_and_query_expansion"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any], *, index: int = 0) -> "SourcePlan":
+        return cls(
+            id=str(payload.get("id") or f"source-plan-{index + 1}"),
+            dimension_id=str(payload.get("dimension_id") or ""),
+            evidence_needs=_string_list(payload.get("evidence_needs")),
+            source_types=_string_list(payload.get("source_types")),
+            source_ids=_string_list(payload.get("source_ids")),
+            query_intents=_string_list(payload.get("query_intents")),
+            recency_requirement=str(payload.get("recency_requirement") or "unspecified"),
+            authority_threshold=_bounded_float(payload.get("authority_threshold"), default=0.7),
+            cross_check_required=_bool_value(payload.get("cross_check_required")),
+            budget=_int_dict(payload.get("budget")),
+            fallback_order=_string_list(payload.get("fallback_order")),
+            model_role=str(payload.get("model_role") or "analysis_and_query_expansion"),
+        )
+
+
+@dataclass(slots=True)
+class SectionClaim:
+    id: str
+    text: str
+    claim_type: str = "analysis"
+    evidence_ids: list[str] = field(default_factory=list)
+    citation_refs: list[str] = field(default_factory=list)
+    confidence: float = 0.5
+    limitations: list[str] = field(default_factory=list)
+    relationship: str = "supports"
+    externally_supported: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any], *, index: int = 0) -> "SectionClaim":
+        return cls(
+            id=str(payload.get("id") or f"section-claim-{index + 1}"),
+            text=str(payload.get("text") or payload.get("claim") or "").strip(),
+            claim_type=str(payload.get("claim_type") or payload.get("type") or "analysis"),
+            evidence_ids=_string_list(payload.get("evidence_ids")),
+            citation_refs=_string_list(payload.get("citation_refs") or payload.get("evidence_refs")),
+            confidence=_bounded_float(payload.get("confidence"), default=0.5),
+            limitations=_string_list(payload.get("limitations")),
+            relationship=str(payload.get("relationship") or "supports"),
+            externally_supported=_bool_value(payload.get("externally_supported")),
+        )
+
+
+@dataclass(slots=True)
+class SectionDraft:
+    section_id: str
+    title: str
+    dimension_ids: list[str] = field(default_factory=list)
+    research_questions: list[str] = field(default_factory=list)
+    claims: list[SectionClaim] = field(default_factory=list)
+    content: str = ""
+    coverage_status: str = "evidence_scarce"
+    conflicts: list[str] = field(default_factory=list)
+    unresolved_gaps: list[str] = field(default_factory=list)
+    suggested_length: int = 0
+    synthesis_priority: float = 0.5
+    verified: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "SectionDraft":
+        return cls(
+            section_id=str(payload.get("section_id") or payload.get("id") or ""),
+            title=str(payload.get("title") or "").strip(),
+            dimension_ids=_string_list(payload.get("dimension_ids")),
+            research_questions=_string_list(
+                payload.get("research_questions") or payload.get("questions_to_answer")
+            ),
+            claims=[
+                SectionClaim.from_dict(item, index=index)
+                for index, item in enumerate(payload.get("claims") or [])
+                if isinstance(item, dict)
+            ],
+            content=str(payload.get("content") or "").strip(),
+            coverage_status=str(payload.get("coverage_status") or "evidence_scarce"),
+            conflicts=_string_list(payload.get("conflicts")),
+            unresolved_gaps=_string_list(payload.get("unresolved_gaps")),
+            suggested_length=max(0, _int_value(payload.get("suggested_length"))),
+            synthesis_priority=_bounded_float(payload.get("synthesis_priority"), default=0.5),
+            verified=_bool_value(payload.get("verified")),
+        )
+
+
+@dataclass(slots=True)
+class SectionContract:
+    id: str
+    title: str
+    function: str
+    dimension_ids: list[str] = field(default_factory=list)
+    questions_to_answer: list[str] = field(default_factory=list)
+    required_claim_types: list[str] = field(default_factory=list)
+    evidence_requirements: list[str] = field(default_factory=list)
+    comparison_axes: list[str] = field(default_factory=list)
+    dependencies: list[str] = field(default_factory=list)
+    coverage_target: float = 0.75
+    length_budget: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any], *, index: int = 0) -> "SectionContract":
+        return cls(
+            id=str(payload.get("id") or f"section-{index + 1}"),
+            title=str(payload.get("title") or f"Section {index + 1}").strip(),
+            function=str(payload.get("function") or "direct_answer"),
+            dimension_ids=_string_list(payload.get("dimension_ids")),
+            questions_to_answer=_string_list(payload.get("questions_to_answer")),
+            required_claim_types=_string_list(payload.get("required_claim_types")),
+            evidence_requirements=_string_list(payload.get("evidence_requirements")),
+            comparison_axes=_string_list(payload.get("comparison_axes")),
+            dependencies=_string_list(payload.get("dependencies")),
+            coverage_target=_bounded_float(payload.get("coverage_target"), default=0.75),
+            length_budget=max(0, _int_value(payload.get("length_budget"))),
+        )
+
+
+@dataclass(slots=True)
+class ReportOutline:
+    query_archetype: str
+    audience: str = "researcher"
+    scope: str = ""
+    answer_strategy: str = ""
+    sections: list[SectionContract] = field(default_factory=list)
+    cross_section_synthesis: list[str] = field(default_factory=list)
+    citation_policy: str = "cite externally verifiable claims with acquired body evidence"
+    reliability_policy: str = "separate external facts from model analysis and disclose gaps"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ReportOutline":
+        return cls(
+            query_archetype=str(payload.get("query_archetype") or "general_exploration"),
+            audience=str(payload.get("audience") or "researcher"),
+            scope=str(payload.get("scope") or "").strip(),
+            answer_strategy=str(payload.get("answer_strategy") or "").strip(),
+            sections=[
+                SectionContract.from_dict(item, index=index)
+                for index, item in enumerate(payload.get("sections") or [])
+                if isinstance(item, dict)
+            ],
+            cross_section_synthesis=_string_list(payload.get("cross_section_synthesis")),
+            citation_policy=str(
+                payload.get("citation_policy")
+                or "cite externally verifiable claims with acquired body evidence"
+            ),
+            reliability_policy=str(
+                payload.get("reliability_policy")
+                or "separate external facts from model analysis and disclose gaps"
+            ),
+        )
+
+
+def _bounded_float(value: Any, *, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(0.0, min(1.0, number))
+
+
+def _importance_float(value: Any, *, default: float = 0.5) -> float:
+    if isinstance(value, str):
+        mapped = {
+            "critical": 1.0,
+            "high": 0.85,
+            "medium": 0.6,
+            "normal": 0.6,
+            "low": 0.3,
+        }.get(value.strip().casefold())
+        if mapped is not None:
+            return mapped
+    return _bounded_float(value, default=default)
+
+
+def _int_value(value: Any, *, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _bool_value(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "yes", "1", "on", "enabled"}:
+            return True
+        if normalized in {"false", "no", "0", "off", "disabled"}:
+            return False
+    return bool(value)
+
+
+def _int_dict(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, int] = {}
+    for key, item in value.items():
+        name = str(key).strip()
+        if name:
+            result[name] = _int_value(item)
+    return result

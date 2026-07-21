@@ -1,0 +1,245 @@
+{
+  "query_archetype": "comparison",
+  "domain_map": {
+    "scope": "compare three implementation approaches under operational constraints",
+    "dimensions": [
+      {"id": "performance", "name": "performance and scale", "importance": 0.95},
+      {"id": "reliability", "name": "failure recovery and reliability", "importance": 0.95},
+      {"id": "governance", "name": "governance and auditability", "importance": 0.9},
+      {"id": "excluded", "name": "consumer marketing", "importance": 0.2}
+    ]
+  },
+  "coverage_matrix": {
+    "iteration": 1,
+    "overall_coverage": 0.72,
+    "high_importance_coverage": 0.67,
+    "saturation": 0.58,
+    "stop_reason": "",
+    "exhausted": false,
+    "dimensions": [
+      {
+      "dimension_id": "performance",
+      "status": "covered",
+      "body_evidence": true,
+      "covered_actions": ["comparison_axes", "per_target_evidence"],
+      "missing_actions": [],
+      "high_authority_source": true,
+      "independent_source_count": 2,
+      "cross_validation_required": false,
+      "conflicts": [],
+      "evidence_ids": ["e-performance-a", "e-performance-b"],
+      "source_ids": ["source-performance-a", "source-performance-b"],
+      "evidence_count": 2,
+      "saturation": 0.92,
+      "gap_summary": []
+    },
+    {
+      "dimension_id": "reliability",
+      "status": "partial",
+      "body_evidence": true,
+      "covered_actions": ["comparison_axes"],
+      "missing_actions": ["per_target_evidence"],
+      "high_authority_source": true,
+      "independent_source_count": 1,
+      "cross_validation_required": true,
+      "conflicts": [],
+      "evidence_ids": ["e-reliability-a"],
+      "source_ids": ["source-reliability-a"],
+      "evidence_count": 1,
+      "saturation": 0.45,
+      "gap_summary": ["independent recovery evidence for target B"]
+    },
+    {
+      "dimension_id": "governance",
+      "status": "conflicting",
+      "body_evidence": true,
+      "covered_actions": ["comparison_axes", "per_target_evidence"],
+      "missing_actions": [],
+      "high_authority_source": true,
+      "independent_source_count": 2,
+      "cross_validation_required": true,
+      "conflicts": ["official policy and operational audit report use different scope definitions"],
+      "evidence_ids": ["e-governance-a", "e-governance-b"],
+      "source_ids": ["source-governance-a", "source-governance-b"],
+      "evidence_count": 2,
+      "saturation": 0.7,
+      "gap_summary": []
+    },
+    {
+      "dimension_id": "excluded",
+      "status": "out_of_scope",
+      "body_evidence": false,
+      "covered_actions": [],
+      "missing_actions": [],
+      "high_authority_source": false,
+      "independent_source_count": 0,
+      "cross_validation_required": false,
+      "conflicts": [],
+      "evidence_ids": [],
+      "source_ids": [],
+      "evidence_count": 0,
+      "saturation": 1.0,
+      "gap_summary": []
+    }
+    ]
+  },
+  "report_outline": {
+    "query_archetype": "comparison",
+    "audience": "technical decision maker",
+    "scope": "operational comparison, excluding marketing claims",
+    "answer_strategy": "answer first, compare by shared axes, then synthesize tradeoffs",
+    "sections": ["section-overview", "section-performance", "section-reliability", "section-governance"],
+    "cross_section_synthesis": ["tradeoffs", "dependencies", "unresolved_conflicts"],
+    "citation_policy": "numeric citations resolve to acquired body evidence",
+    "reliability_policy": "disclose partial, conflicting, and out-of-scope dimensions"
+  },
+  "section_contracts": [
+    {
+      "id": "section-overview",
+      "title": "Decision frame",
+      "function": "direct_answer",
+      "dimension_ids": ["performance", "reliability", "governance"],
+      "questions_to_answer": ["What is the main tradeoff among the approaches?"],
+      "required_claim_types": ["analysis"],
+      "evidence_requirements": ["use only claims verified in later sections"],
+      "comparison_axes": ["scale", "recovery", "auditability"],
+      "dependencies": ["section-performance", "section-reliability", "section-governance"],
+      "coverage_target": 0.75,
+      "length_budget": 350
+    },
+    {
+      "id": "section-performance",
+      "title": "Performance and scale",
+      "function": "dimension_analysis",
+      "dimension_ids": ["performance"],
+      "questions_to_answer": ["How do the approaches differ under load?"],
+      "required_claim_types": ["external_fact", "analysis"],
+      "evidence_requirements": ["body evidence for at least two targets"],
+      "comparison_axes": ["throughput", "latency", "scale"],
+      "dependencies": [],
+      "coverage_target": 1.0,
+      "length_budget": 700
+    },
+    {
+      "id": "section-reliability",
+      "title": "Recovery and reliability",
+      "function": "dimension_analysis",
+      "dimension_ids": ["reliability"],
+      "questions_to_answer": ["What failures are recoverable and what remains unverified?"],
+      "required_claim_types": ["external_fact", "limitation", "open_question"],
+      "evidence_requirements": ["identify the missing independent source for target B"],
+      "comparison_axes": ["failure isolation", "recovery point", "manual intervention"],
+      "dependencies": [],
+      "coverage_target": 0.6,
+      "length_budget": 700
+    },
+    {
+      "id": "section-governance",
+      "title": "Governance and auditability",
+      "function": "conflict_analysis",
+      "dimension_ids": ["governance"],
+      "questions_to_answer": ["Why do the sources disagree about audit scope?"],
+      "required_claim_types": ["external_fact", "conflict", "analysis"],
+      "evidence_requirements": ["retain both conflicting source definitions"],
+      "comparison_axes": ["control ownership", "audit trail", "scope"],
+      "dependencies": [],
+      "coverage_target": 0.75,
+      "length_budget": 700
+    }
+  ],
+  "section_drafts": [
+    {
+      "section_id": "section-overview",
+      "title": "Decision frame",
+      "dimension_ids": ["performance", "reliability", "governance"],
+      "research_questions": ["What is the main tradeoff among the approaches?"],
+      "claims": [],
+      "content": "The decision depends on scale, recovery requirements, and audit scope.",
+      "coverage_status": "partial",
+      "unresolved_gaps": ["recovery evidence for target B"],
+      "conflicts": ["audit scope definitions differ"],
+      "suggested_length": 350,
+      "synthesis_priority": 1.0,
+      "verified": false
+    },
+    {
+      "section_id": "section-performance",
+      "title": "Performance and scale",
+      "dimension_ids": ["performance"],
+      "research_questions": ["How do the approaches differ under load?"],
+      "claims": [
+        {
+          "id": "claim-performance",
+          "text": "The approaches have different scaling limits.",
+          "claim_type": "external_fact",
+          "evidence_ids": ["e-performance-a", "e-performance-b"],
+          "citation_refs": ["[1]", "[2]"],
+          "confidence": 0.88,
+          "externally_supported": true
+        }
+      ],
+      "content": "Verified evidence supports the performance comparison.",
+      "coverage_status": "covered",
+      "unresolved_gaps": [],
+      "conflicts": [],
+      "suggested_length": 700,
+      "synthesis_priority": 0.9,
+      "verified": true
+    },
+    {
+      "section_id": "section-reliability",
+      "title": "Recovery and reliability",
+      "dimension_ids": ["reliability"],
+      "research_questions": ["What failures are recoverable and what remains unverified?"],
+      "claims": [
+        {
+          "id": "claim-reliability",
+          "text": "Target A documents a recoverable checkpoint path.",
+          "claim_type": "external_fact",
+          "evidence_ids": ["e-reliability-a"],
+          "citation_refs": ["[3]"],
+          "confidence": 0.68,
+          "externally_supported": true
+        }
+      ],
+      "content": "Target A is supported; target B still needs independent evidence.",
+      "coverage_status": "partial",
+      "unresolved_gaps": ["independent recovery evidence for target B"],
+      "conflicts": [],
+      "suggested_length": 700,
+      "synthesis_priority": 0.95,
+      "verified": false
+    },
+    {
+      "section_id": "section-governance",
+      "title": "Governance and auditability",
+      "dimension_ids": ["governance"],
+      "research_questions": ["Why do the sources disagree about audit scope?"],
+      "claims": [
+        {
+          "id": "claim-governance",
+          "text": "The sources define audit scope differently.",
+          "claim_type": "conflict",
+          "evidence_ids": ["e-governance-a", "e-governance-b"],
+          "citation_refs": ["[4]", "[5]"],
+          "confidence": 0.8,
+          "externally_supported": true
+        }
+      ],
+      "content": "Both definitions are retained and the scope conflict is explicit.",
+      "coverage_status": "conflicting",
+      "unresolved_gaps": [],
+      "conflicts": ["official policy and operational audit report use different scope definitions"],
+      "suggested_length": 700,
+      "synthesis_priority": 0.9,
+      "verified": true
+    }
+  ],
+  "expected": {
+    "traceable_high_importance_dimensions": ["performance", "reliability", "governance"],
+    "uncovered_dimensions": ["reliability"],
+    "conflicting_dimensions": ["governance"],
+    "out_of_scope_dimensions": ["excluded"],
+    "recommendations_required": false
+  }
+}

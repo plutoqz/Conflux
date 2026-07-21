@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +34,42 @@ class ReportArtifacts:
     raw_sources_path: Path | None = None
     deep_evidence_json_path: Path | None = None
     audit_markdown_path: Path | None = None
+
+
+def write_staged_markdown_report(
+    query: str,
+    state: dict[str, Any],
+    output_dir: str | Path,
+    *,
+    run_id: str,
+    stage: str,
+) -> Path:
+    """Persist a draft or verified report without exposing a partial write."""
+
+    normalized = "verified" if stage == "verified" else "draft"
+    path = Path(output_dir) / f"{run_id}.{normalized}.md"
+    _atomic_write_text(path, build_markdown_report(query, state))
+    return path
+
+
+def promote_staged_markdown_report(staged_path: str | Path, final_path: str | Path) -> Path:
+    """Atomically promote the most recent complete staged report."""
+
+    source = Path(staged_path)
+    target = Path(final_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source.resolve() != target.resolve() and source.exists():
+        os.replace(source, target)
+    return target
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    temporary.write_text(content, encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def slugify(value: str, max_length: int = 48) -> str:
@@ -159,6 +197,41 @@ def build_p1_audit_report(query: str, state: dict[str, Any]) -> str:
         _demote_markdown_headings(factcheck) if factcheck else "未生成核验摘要。",
         _json_block(state.get("_verification_issues") or []),
     ]
+    if state.get("_query_archetype") or str(run_summary.get("mode") or "").casefold() in {
+        "p15",
+        "p1.5",
+    }:
+        sections.extend([
+            "",
+            "## P1.5 问题原型与研究策略",
+            _json_block({
+                "query_archetype": state.get("_query_archetype") or {},
+                "research_strategy": state.get("_research_strategy") or {},
+            }),
+            "",
+            "## 动态领域地图",
+            _json_block(state.get("_domain_map") or {}),
+            "",
+            "## 动态运行预算",
+            _json_block({
+                "allocated": state.get("_research_budget") or {},
+                "actual_usage": state.get("_budget_usage") or {},
+            }),
+            "",
+            "## 来源路由",
+            _json_block(state.get("_source_plans") or []),
+            "",
+            "## 维度覆盖矩阵",
+            _json_block(state.get("_coverage_matrix") or {}),
+            "",
+            "## 报告与章节契约",
+            _json_block({
+                "outline": state.get("_report_outline") or {},
+                "sections": state.get("_section_contracts") or [],
+                "drafts": state.get("_section_drafts") or [],
+                "verification": state.get("_section_verification") or {},
+            }),
+        ])
     if evidence_json:
         sections.extend(["", EVIDENCE_HEADING, _evidence_summary_markdown(evidence_json)])
     if run_summary:
@@ -263,8 +336,8 @@ def write_report_artifacts(
 
     markdown = build_markdown_report(query, state)
     html_doc = markdown_to_html(markdown)
-    markdown_path.write_text(markdown, encoding="utf-8")
-    html_path.write_text(html_doc, encoding="utf-8")
+    _atomic_write_text(markdown_path, markdown)
+    _atomic_write_text(html_path, html_doc)
     evidence_text = str(state.get("_evidence_json") or "").strip()
     if evidence_text:
         try:
@@ -272,7 +345,7 @@ def write_report_artifacts(
             evidence_text = json.dumps(evidence_payload, ensure_ascii=False, indent=2)
         except json.JSONDecodeError:
             pass
-        evidence_json_path.write_text(evidence_text + "\n", encoding="utf-8")
+        _atomic_write_text(evidence_json_path, evidence_text + "\n")
     else:
         evidence_json_path = None
 
@@ -283,20 +356,20 @@ def write_report_artifacts(
             deep_evidence_text = json.dumps(deep_payload, ensure_ascii=False, indent=2)
         except json.JSONDecodeError:
             pass
-        deep_evidence_json_path.write_text(deep_evidence_text + "\n", encoding="utf-8")
+        _atomic_write_text(deep_evidence_json_path, deep_evidence_text + "\n")
     else:
         deep_evidence_json_path = None
 
     raw_sources = _sanitize_report_text(str(state.get("_merged") or "").strip())
     if raw_sources:
-        raw_sources_path.write_text(
+        _atomic_write_text(
+            raw_sources_path,
             f"# 原始来源输出\n\n{raw_sources.rstrip()}\n",
-            encoding="utf-8",
         )
     else:
         raw_sources_path = None
     if _is_p1_state(state):
-        audit_markdown_path.write_text(build_p1_audit_report(query, state), encoding="utf-8")
+        _atomic_write_text(audit_markdown_path, build_p1_audit_report(query, state))
     else:
         audit_markdown_path = None
     return ReportArtifacts(
@@ -525,4 +598,12 @@ def _quality_report_markdown(report: dict[str, Any]) -> str:
     notes = report.get("notes") or []
     if notes:
         lines.append("- \u5907\u6ce8\uff1a" + "\uff1b".join(str(note) for note in notes))
+    generalization = report.get("generalization") or {}
+    if isinstance(generalization, dict) and generalization:
+        lines.extend([
+            f"- P1.5 泛化总分：{generalization.get('overall', 0)} / 5",
+            "- P1.5 泛化达标：是" if generalization.get("passed") else "- P1.5 泛化达标：否",
+            f"- 高重要性维度覆盖：{generalization.get('high_importance_coverage', 0):.0%}",
+            f"- 章节追溯率：{generalization.get('section_traceability_ratio', 0):.0%}",
+        ])
     return "\n".join(lines)

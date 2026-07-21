@@ -2,7 +2,7 @@
 
 Conflux 是一个本地优先的研究工作台，将论文发现、知识入库、多源证据调研和项目进度审计连接起来，并生成可追溯的 Markdown、HTML 和结构化运行产物。
 
-当前项目适合个人研究和工程能力展示，重点包括多源检索编排、Evidence Graph、FactCheck、Chunk 级引用、离线评测和结构化 Trace。可扩展 ResearchOps 架构改造已完成 M0-M2，三源研究质量闭环 P1 也已通过真实 Deep/full 验收；持久运行时 M3 尚未启动。
+当前项目适合个人研究和工程能力展示，重点包括多源检索编排、Evidence Graph、FactCheck、Chunk 级引用、离线评测和结构化 Trace。可扩展 ResearchOps 架构改造已完成 M0-M2，三源研究质量闭环 P1 已通过真实 Deep/full 验收，P1.5 泛化深度研究已完成实现和离线合同验收；跨领域真实 API 盲评仍待预算确认，P2 和持久运行时 M3 尚未启动。
 
 ## 当前技术能力
 
@@ -13,8 +13,10 @@ Conflux 是一个本地优先的研究工作台，将论文发现、知识入库
 - RAG 结果使用 `[RAG:quantum-crypto.txt#chunk-p0-c0]` 等 Chunk 级引用。
 - FactCheck 包含确定性追溯检查、独立模型核查、主答案修订和轻量复核闭环。
 - Deep 档支持六维研究计划、RunScoped 临时全文、数字引用编译、置信度附录和匿名成对盲评。
+- P1.5 支持通用问题原型、动态领域地图、覆盖矩阵、按证据需求的来源路由、动态预算、章节级/全局分层综合和动态报告契约。
+- P1.5 默认通过 `research.pipeline: p15` 启用；设置 `pipeline: p1` 或 `generalization.enabled: false` 可回退到已验收的 P1 路径。
 - Trace JSONL 和 Run Summary JSON 用于检查每次运行的阶段和来源状态。
-- 离线评测覆盖检索质量、报告验收、失败来源泄漏和 Prompt Injection。
+- 离线评测覆盖检索质量、报告验收、来源故障矩阵、预算硬上限、失败来源泄漏、Prompt Injection 和章节追溯；不包含付费真实 API 盲评。
 
 ## 为什么使用 LangGraph
 
@@ -54,7 +56,7 @@ flowchart TD
 ├── docs/
 │   ├── architecture.md
 │   ├── plans/
-│   │   └── execution_plan_v1.md  # M0-M2、P0、P1 已完成 / M3+ 未启动
+│   │   └── execution_plan_v1.md  # P1.5 已实现并完成离线验收 / 真实盲评待预算 / P2+ 未启动
 │   └── retrospectives/
 │       └── p1_execution_retrospective.md
 ├── data/documents/
@@ -83,10 +85,10 @@ flowchart TD
 - [DESIGN.md](DESIGN.md)：当前工作台视觉和交互约束。
 - [docs/README.md](docs/README.md)：项目文档索引与分类说明。
 - [docs/architecture.md](docs/architecture.md)：已批准的可扩展 ResearchOps 长期架构蓝图。
-- [docs/plans/execution_plan_v1.md](docs/plans/execution_plan_v1.md)：M0-M2、P0 与 P1 已完成验收，M3+ 尚未启动的实施方案和验收记录。
+- [docs/plans/execution_plan_v1.md](docs/plans/execution_plan_v1.md)：M0-M2、P0、P1 已完成验收，P1.5 已实现并完成离线合同验收，真实跨领域盲评待预算确认，P2/M3+ 尚未启动的实施方案和验收记录。
 - [docs/retrospectives/p1_execution_retrospective.md](docs/retrospectives/p1_execution_retrospective.md)：P1 从失败基线到最终 Deep/full 验收的执行与技术复盘。
 
-蓝图负责把握项目方向，执行方案负责实现方法和验收标准。M1/M2 已完成核心协议、第一方能力、动态来源和 YAML 工作流，P1 已完成研究质量闭环；持久 Run Store、Evidence Ledger 等内容尚未开始实施。
+蓝图负责把握项目方向，执行方案负责实现方法和验收标准。M1/M2 已完成核心协议、第一方能力、动态来源和 YAML 工作流，P1 已完成研究质量闭环，P1.5 已完成通用规划、覆盖驱动研究和报告契约的离线实现；真实跨领域质量对标以及持久 Run Store、Evidence Ledger 等后续内容尚未完成或开始实施。
 
 ## 安装
 
@@ -110,6 +112,7 @@ models:
     base_url: https://your-gateway.example/v1
 
 research:
+  pipeline: p15  # p1 或 generalization.enabled: false 可回退到 P1
   profiles:
     quick:
       planner_model: fast
@@ -264,6 +267,12 @@ python scripts/eval_retrieval.py --offline
 python scripts/eval_reports.py --offline
 ```
 
+运行 P1.5 泛化深度研究离线合同评测（不调用真实 API）：
+
+```powershell
+python scripts/eval_p1_5.py --out-dir .tmp/p15-eval
+```
+
 显式选择运行真实 API 冒烟测试：
 
 ```powershell
@@ -283,6 +292,8 @@ python scripts/eval_end_to_end.py --real
 - `reports/eval/report_eval.json`
 
 这些产物包含 recall@k、hit rate、来源覆盖、无关结果比例、验收通过率、失败来源泄漏、Prompt Injection 泄漏、延迟和成本估算。
+
+P1.5 离线测试与评测共同覆盖 7 个领域、7 类问题原型的宽窄组合，RAG/Web 来源故障矩阵，动态预算与实际调度用量，Prompt Injection 清洗，以及 `ReportOutline/SectionContract` 到章节证据的追溯。当前基线为 P1.5 定向 `75 passed`、全量 `444 passed`；真实跨领域报告运行、Token/成本/延迟记录和匿名盲评必须显式批准预算后单独执行。
 
 ## 示例
 

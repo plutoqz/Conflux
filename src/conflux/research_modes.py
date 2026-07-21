@@ -58,16 +58,55 @@ class ResearchModeProfile:
 
     @property
     def stage_budgets(self) -> dict[str, int]:
-        """Explicit wall-clock topology; values sum to the profile deadline."""
+        """Explicit wall-clock topology, including the final commit reserve."""
 
-        weights = {
-            "quick": {"planning": 0.11, "retrieval": 0.41, "analysis": 0.11, "synthesis": 0.20, "verification": 0.17},
-            "standard": {"planning": 0.10, "retrieval": 0.36, "analysis": 0.13, "synthesis": 0.23, "verification": 0.18},
-            "deep": {"planning": 0.09, "retrieval": 0.40, "analysis": 0.14, "synthesis": 0.21, "verification": 0.16},
+        defaults = {
+            "quick": {
+                "planning": 20, "retrieval": 70, "analysis": 20,
+                "synthesis": 30, "verification": 20, "commit": 20,
+            },
+            "standard": {
+                "planning": 25, "retrieval": 60, "analysis": 45,
+                "synthesis": 55, "verification": 35, "commit": 20,
+            },
+            "deep": {
+                "planning": 45, "retrieval": 190, "analysis": 65,
+                "synthesis": 90, "verification": 70, "commit": 20,
+            },
         }[self.depth]
-        budgets = {name: max(1, round(self.timeout_seconds * weight)) for name, weight in weights.items()}
+        if sum(defaults.values()) == self.timeout_seconds:
+            return defaults
+        scale = self.timeout_seconds / sum(defaults.values())
+        budgets = {name: max(1, round(seconds * scale)) for name, seconds in defaults.items()}
         budgets["retrieval"] += self.timeout_seconds - sum(budgets.values())
         return budgets
+
+    @property
+    def commit_reserve_seconds(self) -> int:
+        return self.stage_budgets["commit"]
+
+    @property
+    def role_timeout_seconds(self) -> dict[str, int]:
+        """Per-role call ceilings; the run deadline may reduce them further."""
+
+        defaults = {
+            "quick": {
+                "planner": 20, "analyst": 20, "reranker": 15,
+                "synthesizer": 30, "verifier": 20,
+            },
+            "standard": {
+                "planner": 25, "analyst": 45, "reranker": 25,
+                "synthesizer": 55, "verifier": 35,
+            },
+            "deep": {
+                "planner": 45, "analyst": 80, "reranker": 35,
+                "synthesizer": 100, "verifier": 60,
+            },
+        }[self.depth]
+        return {
+            role: max(1, min(self.model_timeout_seconds, seconds))
+            for role, seconds in defaults.items()
+        }
 
     @property
     def model_presets(self) -> tuple[str, ...]:
@@ -241,7 +280,7 @@ def research_model_diagnostics(depth: str | None = None) -> dict[str, Any]:
             "model": cfg.get("model", ""),
             "base_url": cfg.get("base_url", ""),
             "max_tokens": profile.role_max_tokens[role],
-            "timeout_seconds": profile.model_timeout_seconds,
+            "timeout_seconds": profile.role_timeout_seconds[role],
             "max_retries": profile.max_retries,
         }
     return {"profile": profile.to_dict(), "roles": roles}

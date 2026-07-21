@@ -106,12 +106,51 @@ agent:
   confidence_threshold: 0.7
 
 research:
-  pipeline: p1
+  # Set to p1 to roll back to the previously accepted three-source pipeline.
+  pipeline: p15
   depth: standard
   enable_l4: true
   max_deep_questions: 2
   max_verify_iterations: 1
   max_rewrite_attempts: 2
+  generalization:
+    enabled: true
+    min_external_evidence_per_dimension: 1
+    authority_threshold: 0.75
+    coverage_target: 0.8
+    quick:
+      narrow_dimension_target: 2
+      broad_dimension_target: 4
+      max_dimensions: 5
+      max_breadth_queries: 10
+      max_depth_queries: 4
+      max_final_evidence: 8
+      max_web_fetches: 4
+      max_web_fetch_attempts: 6
+      max_coverage_iterations: 0
+      max_report_chars: 3500
+    standard:
+      narrow_dimension_target: 4
+      broad_dimension_target: 7
+      max_dimensions: 9
+      max_breadth_queries: 20
+      max_depth_queries: 14
+      max_final_evidence: 20
+      max_web_fetches: 7
+      max_web_fetch_attempts: 14
+      max_coverage_iterations: 1
+      max_report_chars: 8000
+    deep:
+      narrow_dimension_target: 5
+      broad_dimension_target: 10
+      max_dimensions: 15
+      max_breadth_queries: 30
+      max_depth_queries: 24
+      max_final_evidence: 40
+      max_web_fetches: 10
+      max_web_fetch_attempts: 20
+      max_coverage_iterations: 2
+      max_report_chars: 16000
   profiles:
     quick:
       planner_model: flash

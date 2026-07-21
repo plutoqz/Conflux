@@ -17,7 +17,7 @@ def test_bounded_chat_model_enforces_hard_invocation_deadline():
 
     class SlowModel:
         def invoke(self, *args, **kwargs):
-            time.sleep(0.05)
+            time.sleep(0.5)
             return AIMessage(content="late")
 
     started = time.perf_counter()
@@ -27,7 +27,58 @@ def test_bounded_chat_model_enforces_hard_invocation_deadline():
         assert "hard deadline" in str(exc)
     else:
         raise AssertionError("slow model invocation should time out")
-    assert time.perf_counter() - started < 0.04
+    assert time.perf_counter() - started < 0.25
+
+
+def test_bounded_chat_model_respects_run_commit_reserve():
+    from conflux.model_factory import BoundedChatModel, RunDeadlineExceeded
+
+    class Model:
+        calls = 0
+
+        def invoke(self, *args, **kwargs):
+            self.calls += 1
+            return AIMessage(content="should not run")
+
+    model = Model()
+    bounded = BoundedChatModel(
+        model,
+        70,
+        deadline_at=time.time() + 10,
+        commit_reserve_seconds=20,
+        role="verifier",
+    )
+
+    try:
+        bounded.invoke([])
+    except RunDeadlineExceeded as exc:
+        assert "verifier" in str(exc)
+    else:
+        raise AssertionError("call should not start inside the commit reserve")
+    assert model.calls == 0
+
+
+def test_bounded_chat_model_passes_remaining_timeout_to_http_model():
+    from conflux.model_factory import BoundedChatModel
+
+    class Model:
+        timeout = None
+
+        def invoke(self, *args, **kwargs):
+            self.timeout = kwargs.get("timeout")
+            return AIMessage(content="ok")
+
+    model = Model()
+    result = BoundedChatModel(
+        model,
+        70,
+        deadline_at=time.time() + 30,
+        commit_reserve_seconds=20,
+        role="synthesizer",
+    ).invoke([])
+
+    assert result.content == "ok"
+    assert 0 < model.timeout <= 10
 
 
 def test_research_models_share_an_enforced_token_budget():
@@ -137,7 +188,7 @@ def test_depth_aliases_and_budgets_are_real():
 
     diagnostics = research_model_diagnostics("quick")
     assert diagnostics["roles"]["planner"]["max_tokens"] == low.planner_max_tokens == 4000
-    assert diagnostics["roles"]["planner"]["timeout_seconds"] == low.model_timeout_seconds
+    assert diagnostics["roles"]["planner"]["timeout_seconds"] == low.role_timeout_seconds["planner"]
     assert diagnostics["roles"]["reranker"]["preset"] == low.reranker_model
     assert diagnostics["roles"]["reranker"]["model"]
 
@@ -409,6 +460,34 @@ def test_web_uses_fetched_body_not_generic_search_snippet(monkeypatch):
     assert "Generic discovery text" not in result.claims[0].verbatim_quote
     assert result.claims[0].content_kind == "html"
     assert result.metadata["fetched_count"] == 1
+
+
+def test_current_method_survey_prefers_workflow_content_over_page_chrome():
+    from conflux.tools.web import _claim_from_web_content
+
+    query = (
+        "系统与工程层自动化：GIS平台、云原生地理计算、工作流编排与Serverless架构"
+        "如何支撑大规模地理处理自动化？"
+    )
+    body = """Skip to main content Table of Contents
+    A model is a visual representation of a workflow in which several geoprocessing tools are run in sequence.
+    You can use models for many purposes, such as the following:
+    Automating repetitive tasks
+    Exploring alternative outcomes with different datasets and tool parameters
+    Visually documenting your geoprocessing methodology
+    Incrementally developing and improving workflows.
+    Estimated time: 60 minutes
+    Software requirements: ArcGIS Pro Basic
+    Explore purchase options. Connect with our sales team. Select a different location."""
+
+    claim = _claim_from_web_content(
+        query + "\nArcGIS ModelBuilder geoprocessing workflow automation",
+        body,
+    )
+
+    assert "Automating repetitive tasks" in claim or "visual representation of a workflow" in claim
+    assert "Estimated time" not in claim
+    assert "sales team" not in claim
 
 
 def test_generic_snippet_without_body_is_not_evidence(monkeypatch):
@@ -999,6 +1078,32 @@ def test_comparison_plan_creates_one_direct_research_question_per_system():
     assert "genuinely shared" in questions[-1]
 
 
+def test_geoprocessing_method_survey_plan_preserves_engineering_and_ai_tracks():
+    from conflux.graph_p1 import _method_survey_research_plan
+    from conflux.research_protocol import ResearchPlan, ResearchSubquestion
+
+    query = "地理处理的自动化目前都有哪些方法？"
+    plan = ResearchPlan(
+        original_query=query,
+        subquestions=[ResearchSubquestion(id="subq-1", question="LLM智能体有哪些方法？")],
+    )
+
+    normalized = _method_survey_research_plan(plan, query, 4)
+    questions = "\n".join(item.question for item in normalized.subquestions)
+
+    assert normalized.question_type == "broad_method_survey"
+    assert len(normalized.subquestions) == 4
+    assert "GDAL/OGR" in questions
+    assert "ModelBuilder" in questions
+    assert "OGC WPS" in questions
+    assert "GEE" in questions
+    assert "Airflow/Prefect" in questions
+    assert "机器学习与深度学习" in questions
+    assert "LLM与地理AI智能体" in questions
+    assert any("工程自动化" in claim.text for claim in normalized.claims)
+    assert any("LLM地理智能体" in claim.text for claim in normalized.claims)
+
+
 def test_evidence_selection_drops_superseded_arxiv_versions():
     from conflux.graph_p1 import _select_evidence
 
@@ -1060,6 +1165,38 @@ def test_answer_claims_exclude_explicit_evidence_boundary_synthesis():
     assert _answer_claims(report) == [
         "Autonomous GIS 的单条错误代码可导致程序崩溃 [RAG:paper:2305.06453v4#fulltext-15]。"
     ]
+
+
+def test_answer_claims_exclude_explicitly_qualified_industry_background():
+    from conflux.graph_p1 import _answer_claims
+
+    report = """## 回答
+
+### 工程方法
+
+- GDAL、PyQGIS 与 FME 可用于批量处理（行业通用方案，当前证据未直接覆盖）。
+- 适用边界：脚本灵活但需要编程能力，可视化建模更适合稳定流程。
+- 当处理规模超出单机时，应引入云端计算与通用任务编排。
+- 针对影像解译任务，三类方法对应不同的问题性质和数据条件。
+- 四类方法并非互斥，而是可以按任务风险组合使用。
+- 某具体平台在 2026 年已经成为整个地理处理行业的事实标准，而且这里没有提供任何引用。
+
+## 研究依据
+
+无。
+
+## 可靠性与缺口
+
+第一条已明确标注证据边界。"""
+
+    claims = _answer_claims(report)
+
+    assert not any("GDAL" in claim for claim in claims)
+    assert not any("适用边界" in claim for claim in claims)
+    assert not any("超出单机" in claim for claim in claims)
+    assert not any("影像解译任务" in claim for claim in claims)
+    assert not any("并非互斥" in claim for claim in claims)
+    assert any("事实标准" in claim for claim in claims)
 
 
 def test_citation_subject_check_uses_each_citations_local_clause():
@@ -1516,6 +1653,117 @@ def test_synthesis_timeout_returns_grounded_fallback_and_excludes_low_relevance_
     assert findings["verified_claim_ratio"] == 1.0
 
 
+def test_geoprocessing_method_survey_timeout_preserves_all_planned_dimensions():
+    from conflux.graph_p1 import _generate_report
+    from conflux.research_modes import resolve_research_profile
+
+    query = "地理处理的自动化目前都有哪些方法？"
+    subquestions = [
+        {"id": "subq-1", "question": "数据层自动化：地理数据采集、清洗、配准、融合和质量控制有哪些方法？"},
+        {"id": "subq-2", "question": "算法与方法层自动化：规则、机器学习、深度学习和LLM智能体有哪些方法？"},
+        {"id": "subq-3", "question": "系统与工程层自动化：GIS平台、云计算和工作流编排有哪些方法？"},
+        {"id": "subq-4", "question": "评估基准与应用边界：当前基准、互操作、隐私和可信度问题有哪些？"},
+    ]
+    model_claims = [
+        "地理处理自动化可从数据、算法、系统、评估四个维度系统梳理",
+        "数据层自动化依赖GDAL/OGR、PDAL及开放API",
+        "传统自动化包括ArcGIS ModelBuilder、QGIS Graphical Modeler、FME和OGC WPS",
+        "遥感影像自动化广泛采用U-Net、DeepLab和Transformer类深度学习模型",
+        "LLM与地理AI智能体支持自然语言驱动的工具调用和空间分析",
+        "云原生平台包括GEE和Planetary Computer",
+        "公开基准、跨平台互操作、隐私和可信度仍需要持续评估",
+    ]
+    nodes = [
+        {
+            "id": f"model-{index}",
+            "source": "builtin.model",
+            "claim": claim,
+            "verbatim_quote": claim,
+            "evidence_refs": [],
+            "evidence_class": "model_inference",
+        }
+        for index, claim in enumerate(model_claims)
+    ]
+    nodes.extend([
+        {
+            "id": "web-good",
+            "source": "builtin.web",
+            "subquestion_id": "subq-3",
+            "claim": "ModelBuilder connects tools and data to establish the run order of a geoprocessing workflow.",
+            "verbatim_quote": "ModelBuilder connects tools and data to establish the run order of a geoprocessing workflow.",
+            "document_title": "Use ModelBuilder",
+            "url": "https://example.com/modelbuilder",
+            "evidence_refs": ["[Web:https://example.com/modelbuilder]"],
+            "evidence_class": "authoritative_document",
+            "relevance": 0.9,
+            "directness": 0.9,
+            "authority": 0.9,
+        },
+        {
+            "id": "web-noise",
+            "source": "builtin.web",
+            "subquestion_id": "subq-3",
+            "claim": "Explore purchase options and contact our sales team.",
+            "verbatim_quote": "Explore purchase options and contact our sales team.",
+            "document_title": "Product page",
+            "url": "https://example.com/sales",
+            "evidence_refs": ["[Web:https://example.com/sales]"],
+            "evidence_class": "community_content",
+            "relevance": 0.8,
+            "directness": 0.9,
+            "authority": 0.4,
+        },
+    ])
+    state = {
+        "query": query,
+        "_research_plan": {"original_query": query, "subquestions": subquestions, "claims": []},
+        "_evidence_json": json.dumps({"nodes": nodes}, ensure_ascii=False),
+        "_source_statuses": {
+            "Model": {"status": "success", "content": "模型分析"},
+            "RAG": {"status": "low_relevance"},
+            "Web": {"status": "success"},
+        },
+        "_claim_assessments": [],
+        "_source_coverage": [],
+        "_arbitration": "",
+    }
+    class TimeoutModel:
+        def invoke(self, _messages):
+            raise TimeoutError("synthesis deadline")
+
+    report = _generate_report(state, TimeoutModel(), resolve_research_profile("standard"))
+
+    assert "### 数据层自动化" in report
+    assert "### 算法与方法层自动化" in report
+    assert "### 系统与工程层自动化" in report
+    assert "### 评估基准与应用边界" in report
+    assert "GDAL/OGR" in report
+    assert "U-Net" in report
+    assert "GEE" in report
+    assert "跨平台互操作" in report
+    assert "[Web:https://example.com/modelbuilder]" in report
+    assert "sales team" not in report
+
+
+def test_primary_retrieval_does_not_start_inside_commit_reserve():
+    from conflux.graph_p1 import _source_research_node
+    from conflux.research_modes import resolve_research_profile
+    from conflux.source_status import parse_source_results
+
+    profile = resolve_research_profile("standard")
+    state = {
+        "query": "q",
+        "_research_plan": {"query": "q", "subquestions": []},
+        "_deadline_at": time.time() + profile.commit_reserve_seconds - 1,
+    }
+
+    result = _source_research_node(state, object(), "Web", profile)
+    source_result = parse_source_results(result["web_result"])[-1]
+
+    assert source_result.status == "fallback"
+    assert "commit reserve" in source_result.error
+
+
 def test_model_call_budget_reserves_later_pipeline_calls():
     from conflux.graph_p1 import _model_call_fits_budget
     from conflux.research_modes import resolve_research_profile
@@ -1917,7 +2165,7 @@ def test_real_eval_unreviewed_blind_judge_is_not_reported_as_one_point():
             "id": "p1_geo_deep_001",
             "query": "当前地理处理自动化研究存在哪些局限性？",
             "required_dimensions": ["数据", "治理"],
-            "reference_report": "reports/workbench/deep-research-report.md",
+            "reference_report": "tests/fixtures/architecture/p1_reference_report.md",
         },
         {
             "query": "当前地理处理自动化研究存在哪些局限性？",
@@ -2199,11 +2447,34 @@ def test_academic_query_variants_remove_mixed_language_noise():
         max_subqueries=6,
     )
     variants = _academic_query_variants(plan.bilingual_queries or [])
-    assert variants[0] == "autonomous gis agent limitations"
-    assert variants[1] == (
+    assert variants[0] == "geospatial automation algorithms methods review"
+    assert variants[1] == "geoprocessing automation benchmark evaluation limitations review"
+    assert (
         "current geoprocessing automation algorithm efficiency scalability "
         "generalization limitations"
-    )
+    ) in variants
+
+
+def test_geoprocessing_method_survey_academic_variants_cover_each_dimension():
+    from conflux.query_planner import plan_queries
+    from conflux.tools.web import _academic_query_variants
+
+    cases = {
+        "地理数据采集、清洗、配准、融合和质量控制有哪些自动化方法？":
+            "geospatial data acquisition preprocessing registration fusion quality control automation",
+        "地理处理自动化从规则引擎、机器学习、深度学习到LLM智能体有哪些方法？":
+            "geospatial automation rule based machine learning deep llm agents review",
+        "GIS平台、云原生地理处理和工作流编排如何实现自动化？":
+            "geoprocessing workflow automation cloud platform orchestration",
+        "地理处理自动化有哪些评估基准、局限和应用边界？":
+            "geoprocessing automation benchmark evaluation limitations review",
+    }
+
+    for query, expected in cases.items():
+        plan = plan_queries(query, target="web", max_subqueries=6)
+        variants = _academic_query_variants([*(plan.bilingual_queries or []), query])
+        assert expected in variants
+        assert "autonomous gis agent limitations" not in variants
 
 
 def test_academic_source_search_interleaves_queries_and_providers(monkeypatch):
@@ -2231,7 +2502,7 @@ def test_academic_source_search_interleaves_queries_and_providers(monkeypatch):
     assert all(item.get("matched_query") in {"data", "governance"} for item in results)
 
 
-def test_academic_search_bypasses_general_provider_when_results_exist(monkeypatch):
+def test_academic_search_still_runs_general_provider_for_fetchable_source_breadth(monkeypatch):
     from conflux.source_status import parse_source_results
     from conflux.tools import web
 
@@ -2255,7 +2526,11 @@ def test_academic_search_bypasses_general_provider_when_results_exist(monkeypatc
         status="success",
     )
     general_calls = []
-    monkeypatch.setattr(web, "_search_cascade", lambda *args, **kwargs: general_calls.append(True))
+    monkeypatch.setattr(
+        web,
+        "_search_cascade",
+        lambda subqueries, *args, **kwargs: (general_calls.append(list(subqueries)) or ([], [], [])),
+    )
     monkeypatch.setattr(web, "_search_academic_sources", lambda *args, **kwargs: [academic])
     monkeypatch.setattr(web, "_filter_web_results", lambda query, results: (results, []))
     monkeypatch.setattr(web, "_fetch_with_backfill", lambda *args, **kwargs: ([{**academic, "fetch": fetched}], [academic]))
@@ -2273,7 +2548,8 @@ def test_academic_search_bypasses_general_provider_when_results_exist(monkeypatc
     assert result.status == "success"
     assert len(result.claims) == 1
     assert result.claims[0].paper_id == "arxiv:2501.00001"
-    assert general_calls == []
+    assert len(general_calls) == 1
+    assert len(general_calls[0]) <= 2
 
 
 def test_external_source_metrics_deduplicate_arxiv_versions():
@@ -2638,7 +2914,8 @@ def test_research_profiles_expose_complete_stage_budget_topology():
     for depth in ("quick", "standard", "deep"):
         profile = resolve_research_profile(depth)
         assert sum(profile.stage_budgets.values()) == profile.timeout_seconds
-        assert set(profile.stage_budgets) == {"planning", "retrieval", "analysis", "synthesis", "verification"}
+        assert set(profile.stage_budgets) == {"planning", "retrieval", "analysis", "synthesis", "verification", "commit"}
+        assert profile.stage_budgets["commit"] >= 15
 
 
 def test_budget_deferred_revision_preserves_existing_complete_report():

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -46,10 +48,19 @@ def event_from_state_key(
         return None
     mapping = {
         "_research_plan": ("research_plan", "Model"),
+        "_query_archetype": ("query_archetype", "Model"),
+        "_domain_map": ("domain_map", "Model"),
+        "_research_budget": ("dynamic_budget", None),
+        "_budget_usage": ("budget_usage", None),
+        "_source_plans": ("source_routing", None),
         "rag_result": ("rag_agent", "RAG"),
         "web_result": ("web_agent", "Web"),
         "model_result": ("model_agent", "Model"),
         "_merged": ("evidence_merge", None),
+        "_coverage_matrix": ("coverage_review", None),
+        "_section_contracts": ("section_contracts", None),
+        "_section_drafts": ("section_synthesis", None),
+        "_section_verification": ("section_verification", "FactCheck"),
         "_arbitration": ("arbitration", None),
         "final_answer": ("synthesize", None),
         "_verified_answer": ("factcheck", "FactCheck"),
@@ -132,9 +143,13 @@ def events_from_source_results(
 def write_trace_jsonl(events: list[TraceEvent], path: str | Path) -> Path:
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8") as handle:
+    temporary = out_path.with_name(
+        f".{out_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    with temporary.open("w", encoding="utf-8") as handle:
         for event in events:
             handle.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+    os.replace(temporary, out_path)
     return out_path
 
 
@@ -151,7 +166,11 @@ def read_trace_jsonl(path: str | Path) -> list[dict[str, Any]]:
 def write_run_summary(summary: dict[str, Any], path: str | Path) -> Path:
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary = out_path.with_name(
+        f".{out_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    temporary.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporary, out_path)
     return out_path
 
 

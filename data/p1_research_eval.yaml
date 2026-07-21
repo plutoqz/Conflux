@@ -7,7 +7,7 @@
   required_dimensions: [数据, 算法与方法, 系统工程, 评估与基准, 治理与伦理, 应用边界]
   temporal_sensitivity: medium
   risk: medium
-  reference_report: reports/workbench/deep-research-report.md
+  reference_report: tests/fixtures/architecture/p1_reference_report.md
   require_all_dimensions: true
   minimum_external_evidence: 8
   minimum_independent_sources: 5

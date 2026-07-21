@@ -47,21 +47,31 @@ plan:
     - src/conflux/builtin/
     - tests/fixtures/architecture/workflows/
     - M2 集成测试
+  - id: p2-project-paper-radar
+    title: P2 项目驱动论文雷达
+    status: planned
+    description: 先完成项目绑定、Track 搜索扩面、项目论文关联、全文证据分析和审批建议的文件模式闭环，再交由 M3 统一持久化。
+    deliverables:
+    - ProjectResearchConfig 与 SearchIntent 等类型化契约
+    - 项目级论文状态和报告目录
+    - Workbench 项目 Research 视图
+    - P2 人工标注集和验收报告
   - id: m3-persistent-runs
     title: M3 持久运行与初始化迁移
     status: planned
-    description: 在确认存储迁移边界后引入 SQLite Run Store、事件和审批持久化。
+    description: 在 P2 文件模式闭环验证后，引入 SQLite Run Store，并迁移论文身份、项目关联、搜索意图、事件和审批状态。
     deliverables: []
   next_actions:
-  - 用离线夹具和真实 API 各复测 M0-M2，记录质量、延迟、成本和失败降级。
-  - 修复画像优化、项目文档发现和研究查询超时等已知体验问题。
-  - 在 M3 启动前单独确认 SQLite Run Store、初始化和迁移方案。
+  - 定义 ProjectResearchConfig、ProjectResearchContext、SearchIntent、ProjectPaperLink 和 ProjectImpactSuggestion 契约。
+  - 让论文 inbox 接受 project_id，并按项目隔离画像、输出、缓存和已见状态。
+  - 为研究画像增加兼容的 Track/QuerySpec，优先扩大 arXiv 与 Semantic Scholar 搜索面。
+  - 在项目页增加 Research 视图，并以审批方式处理项目行动和知识入库建议。
   source_documents:
   - docs/plans/execution_plan_v1.md
   - docs/architecture.md
   - docs/reports/m0_baseline_report.md
   - PRODUCT.md
-  updated_at: '2026-07-18'
+  updated_at: '2026-07-20'
 refresh:
   mode: manual
   schedule_enabled: false

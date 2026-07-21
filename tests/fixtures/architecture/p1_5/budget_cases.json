@@ -1,0 +1,73 @@
+{
+  "hard_caps": {
+    "max_dimensions": 15,
+    "max_final_evidence": 40,
+    "max_gap_iterations": 2,
+    "max_web_fetches": 24,
+    "max_output_tokens": 24000
+  },
+  "cases": [
+    {
+      "id": "narrow_stable_healthy",
+      "depth": "deep",
+      "breadth": "narrow",
+      "dimension_count": 3,
+      "conflicting_dimensions": 0,
+      "evidence_scarce_dimensions": 0,
+      "rag_status": "success",
+      "web_status": "success",
+      "expected": {
+        "max_dimensions": 6,
+        "max_final_evidence": 20,
+        "max_gap_iterations": 1,
+        "must_not_expand_to_hard_cap": true
+      }
+    },
+    {
+      "id": "broad_current_conflicted",
+      "depth": "deep",
+      "breadth": "broad",
+      "dimension_count": 11,
+      "conflicting_dimensions": 3,
+      "evidence_scarce_dimensions": 2,
+      "rag_status": "no_evidence",
+      "web_status": "success",
+      "expected": {
+        "min_dimensions": 10,
+        "min_final_evidence": 20,
+        "min_gap_iterations": 1,
+        "web_budget_increases": true
+      }
+    },
+    {
+      "id": "broad_external_outage",
+      "depth": "deep",
+      "breadth": "broad",
+      "dimension_count": 9,
+      "conflicting_dimensions": 0,
+      "evidence_scarce_dimensions": 9,
+      "rag_status": "failed",
+      "web_status": "failed",
+      "expected": {
+        "respect_hard_caps": true,
+        "completion_mode": "model_analysis_only",
+        "must_report_uncovered_dimensions": true
+      }
+    },
+    {
+      "id": "quick_broad_is_bounded",
+      "depth": "quick",
+      "breadth": "broad",
+      "dimension_count": 8,
+      "conflicting_dimensions": 1,
+      "evidence_scarce_dimensions": 2,
+      "rag_status": "success",
+      "web_status": "success",
+      "expected": {
+        "respect_hard_caps": true,
+        "shall_not_match_deep_budget": true,
+        "must_preserve_high_importance_dimensions": true
+      }
+    }
+  ]
+}

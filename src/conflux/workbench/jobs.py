@@ -85,9 +85,12 @@ class ResearchJob:
     query: str
     started_at: float = field(default_factory=time.time)
     ended_at: float | None = None
-    status: str = "pending"  # pending | running | completed | failed | cancelled | timed_out
+    status: str = "pending"
     timeout_seconds: int = 300
+    deadline_at: float = 0.0
+    commit_reserve_seconds: float = 20.0
     final_answer: str = ""
+    has_report: bool = False
     source_statuses: dict[str, str] = field(default_factory=dict)
     factcheck_status: str = ""
     pipeline: str = ""
@@ -96,34 +99,131 @@ class ResearchJob:
     current_stage: str = ""
     progress: dict[str, str] = field(default_factory=dict)
     cancel_reason: str = ""
+    warnings: list[str] = field(default_factory=list)
     thread: threading.Thread | None = None
     _cancel_flag: threading.Event = field(default_factory=threading.Event)
     _event_log: _EventLog = field(default_factory=_EventLog)
+
+    def __post_init__(self) -> None:
+        if self.deadline_at <= 0:
+            self.deadline_at = self.started_at + max(1, self.timeout_seconds)
+        self.has_report = bool(self.has_report or self.final_answer)
 
     @property
     def active(self) -> bool:
         return self.status in ("pending", "running")
 
 
-def _enforce_job_stop(job: ResearchJob, started_at: float) -> None:
+def _deadline_exceeded(job: ResearchJob) -> bool:
+    return time.time() >= job.deadline_at
+
+
+def _enforce_job_stop(job: ResearchJob, started_at: float | None = None) -> None:
     if job._cancel_flag.is_set():
         if job.cancel_reason == "timeout":
             raise _JobTimedOut(
                 f"系统在 {job.timeout_seconds} 秒档位时限后自动终止研究任务"
             )
         raise _JobCancelled("用户取消了研究任务")
-    if time.time() - started_at >= job.timeout_seconds:
+    if _deadline_exceeded(job):
         job.cancel_reason = "timeout"
         raise _JobTimedOut(f"研究任务超过 {job.timeout_seconds} 秒档位时限")
 
 
-def _finish_without_report(job: ResearchJob, status: str, error: str) -> None:
+def _finish_job(
+    job: ResearchJob,
+    status: str,
+    error: str,
+    *,
+    preserve_report: bool = True,
+) -> None:
     job.ended_at = time.time()
-    job.status = status
-    job.final_answer = ""
-    job.artifacts = {}
-    job.factcheck_status = ""
-    job.error = f"{error}，未生成正式报告。"
+    has_report = bool(
+        preserve_report
+        and (job.has_report or job.final_answer or job.artifacts.get("markdown_path"))
+    )
+    job.has_report = has_report
+    if status == "timed_out" and has_report:
+        job.status = "timed_out_with_report"
+        warning = "后续研究或核验超时，已保留当前报告。"
+    else:
+        job.status = status
+        warning = ""
+    job.error = str(error)
+    if warning:
+        job.warnings.append(warning)
+    elif not has_report:
+        job.error = f"{error}，未生成正式报告。"
+
+
+def _finish_without_report(job: ResearchJob, status: str, error: str) -> None:
+    """Compatibility wrapper; completed report data is intentionally preserved."""
+
+    _finish_job(job, status, error, preserve_report=True)
+
+
+def _capture_report_snapshot(
+    job: ResearchJob,
+    state: dict[str, Any],
+    output_dir: str,
+    *,
+    stage: str,
+) -> None:
+    from conflux.report import write_staged_markdown_report
+
+    answer = str(state.get("final_answer") or state.get("_verified_answer") or "")
+    if not answer.strip():
+        return
+    job.final_answer = answer
+    job.has_report = True
+    job.factcheck_status = str(state.get("_factcheck_status") or job.factcheck_status)
+    try:
+        path = write_staged_markdown_report(
+            job.query,
+            state,
+            output_dir,
+            run_id=job.run_id,
+            stage=stage,
+        )
+    except Exception as exc:
+        job.warnings.append(
+            f"{stage} report snapshot failed: {type(exc).__name__}: {exc}"
+        )
+        return
+    key = "verified_markdown_path" if stage == "verified" else "draft_markdown_path"
+    job.artifacts[key] = str(path.resolve())
+    job.artifacts["markdown_path"] = str(path.resolve())
+
+
+def _persist_trace_snapshot(job: ResearchJob, events: list[Any], output_dir: str) -> None:
+    if not events:
+        return
+    from conflux.trace import write_trace_jsonl
+
+    path = Path(output_dir) / f"{job.run_id}.trace.jsonl"
+    try:
+        write_trace_jsonl(events, path)
+    except Exception as exc:
+        job.warnings.append(f"trace snapshot failed: {type(exc).__name__}: {exc}")
+        return
+    job.artifacts["trace_path"] = str(path.resolve())
+
+
+def _state_warnings(state: dict[str, Any]) -> list[str]:
+    findings = state.get("_factcheck_findings") or {}
+    if not isinstance(findings, dict):
+        findings = {}
+    candidates = [
+        state.get("_synthesis_error"),
+        findings.get("verifier_error"),
+        findings.get("recheck_verifier_error"),
+        findings.get("revision_error"),
+    ]
+    warnings = [str(value).strip() for value in candidates if str(value or "").strip()]
+    factcheck_status = str(state.get("_factcheck_status") or "")
+    if factcheck_status and factcheck_status != "passed":
+        warnings.append(f"FactCheck status: {factcheck_status}")
+    return list(dict.fromkeys(warnings))
 
 
 # ── JobManager ─────────────────────────────────────────────
@@ -150,10 +250,22 @@ class JobManager:
         try:
             from conflux.research_modes import resolve_research_profile
 
-            timeout_seconds = resolve_research_profile(depth).timeout_seconds
+            profile = resolve_research_profile(depth)
+            timeout_seconds = profile.timeout_seconds
+            commit_reserve_seconds = profile.commit_reserve_seconds
         except Exception:
             timeout_seconds = 300
-        job = ResearchJob(run_id=run_id, query=query, timeout_seconds=max(1, int(timeout_seconds)))
+            commit_reserve_seconds = 20
+        started_at = time.time()
+        timeout_seconds = max(1, int(timeout_seconds))
+        job = ResearchJob(
+            run_id=run_id,
+            query=query,
+            started_at=started_at,
+            timeout_seconds=timeout_seconds,
+            deadline_at=started_at + timeout_seconds,
+            commit_reserve_seconds=commit_reserve_seconds,
+        )
         with self._lock:
             if len(self._jobs) >= self.MAX_JOBS:
                 raise RuntimeError(f"Job limit reached ({self.MAX_JOBS}). Wait for older jobs to expire.")
@@ -171,6 +283,8 @@ class JobManager:
             "events_url": f"/api/query/jobs/{run_id}/events",
             "status_url": f"/api/query/jobs/{run_id}",
             "timeout_seconds": job.timeout_seconds,
+            "deadline_at": job.deadline_at,
+            "commit_reserve_seconds": job.commit_reserve_seconds,
         }
 
     def get(self, run_id: str) -> dict[str, Any] | None:
@@ -187,6 +301,8 @@ class JobManager:
             "started_at": job.started_at,
             "ended_at": job.ended_at,
             "timeout_seconds": job.timeout_seconds,
+            "deadline_at": job.deadline_at,
+            "commit_reserve_seconds": job.commit_reserve_seconds,
             "final_answer": full_answer[:4000],
             "final_answer_truncated": answer_len > 4000,
             "final_answer_total_length": answer_len,
@@ -199,6 +315,9 @@ class JobManager:
             "current_stage": job.current_stage,
             "progress": dict(job.progress),
             "cancel_reason": job.cancel_reason,
+            "has_report": job.has_report,
+            "warning": " ".join(job.warnings),
+            "warnings": list(job.warnings),
         }
 
     def event_log(self, run_id: str) -> _EventLog | None:
@@ -246,6 +365,7 @@ class JobManager:
         depth = str(payload.get("depth") or "standard")
 
         stream = io.StringIO()
+        live_events: list[Any] = []
         try:
             with _EXECUTION_LOCK:
                 # Include time spent waiting for the execution lock in the tier deadline.
@@ -254,26 +374,121 @@ class JobManager:
 
                 with _temporary_env(updates), contextlib.redirect_stdout(stream):
                     from conflux.__main__ import query_command
-                    from conflux.trace import event_from_state_key
+                    from conflux.trace import TraceEvent, event_from_state_key
 
                     # ── Patch _run_phase2_graph for real-time events ──
                     import conflux.__main__ as main_mod
                     _original_run_phase2 = main_mod._run_phase2_graph
 
+                    def emit_stage(
+                        events: list[Any],
+                        stage: str,
+                        status: str,
+                        summary: str,
+                        metadata: dict[str, Any] | None = None,
+                    ) -> None:
+                        if job.progress.get(stage) == status:
+                            return
+                        trace_event = TraceEvent(
+                            stage=stage,
+                            status=status,
+                            elapsed_ms=round((time.time() - job.started_at) * 1000, 2),
+                            summary=summary,
+                            run_id=run_id,
+                            thread_id=run_id,
+                            metadata=metadata or {},
+                        )
+                        events.append(trace_event)
+                        job.current_stage = stage
+                        job.progress[stage] = status
+                        job._event_log.append(trace_event.to_dict())
+
                     def _instrumented_run_phase2(graph, initial_state, query2, *, stream_events=False, thread_id=None):
                         started_at_ts = job.started_at
                         event = initial_state
                         seen = set()
-                        events = []
+                        events = live_events
+                        last_draft = ""
+                        last_verified = ""
                         config_graph = main_mod.graph_config(thread_id)
                         for event in graph.stream(initial_state, config=config_graph, stream_mode="values"):
-                            _enforce_job_stop(job, started_at_ts)
+                            final_answer = str(event.get("final_answer") or "")
+                            verified_answer = str(event.get("_verified_answer") or "")
+                            if final_answer and final_answer != last_draft:
+                                snapshot_stage = (
+                                    "verified"
+                                    if verified_answer and final_answer == verified_answer
+                                    else "draft"
+                                )
+                                _capture_report_snapshot(
+                                    job, event, output_dir, stage=snapshot_stage
+                                )
+                                last_draft = final_answer
+                                if snapshot_stage == "verified":
+                                    last_verified = verified_answer
+                            if verified_answer and verified_answer != last_verified:
+                                _capture_report_snapshot(
+                                    job,
+                                    {**event, "final_answer": verified_answer},
+                                    output_dir,
+                                    stage="verified",
+                                )
+                                last_verified = verified_answer
+
+                            pipeline_stage = str(event.get("_pipeline_stage") or "")
+                            gap_round = max(
+                                int(event.get("_gap_iteration") or 0),
+                                int(event.get("_coverage_iteration") or 0),
+                            )
+                            if pipeline_stage in {"synthesized", "dynamically_synthesized"}:
+                                emit_stage(events, "report_draft", "completed", "报告初稿已生成")
+                                emit_stage(events, "verification_round", "running", "第一轮核验")
+                            elif pipeline_stage in {"verified_revised", "p15_verified_revised"}:
+                                emit_stage(events, "verification_round", "completed", "第一轮核验完成")
+                                statuses = event.get("_source_statuses") or {}
+                                external_available = any(
+                                    str((statuses.get(source) or {}).get("status") or "")
+                                    in {"success", "low_relevance"}
+                                    for source in ("RAG", "Web")
+                                )
+                                if (
+                                    event.get("_gap_questions")
+                                    and external_available
+                                    and job.deadline_at - time.time() >= 90
+                                ):
+                                    emit_stage(
+                                        events,
+                                        "targeted_gap_research",
+                                        "running",
+                                        f"针对性补证 · 第 {gap_round + 1} 轮",
+                                        {"round": gap_round + 1},
+                                    )
+                                else:
+                                    emit_stage(events, "final_commit", "running", "最终提交")
+                            elif pipeline_stage in {"gap_researched", "targeted_gap_researched"}:
+                                emit_stage(
+                                    events,
+                                    "targeted_gap_research",
+                                    "completed",
+                                    f"针对性补证 · 第 {max(1, gap_round)} 轮完成",
+                                    {"round": max(1, gap_round)},
+                                )
+                                emit_stage(events, "reanalysis", "running", "重新分析")
+                            elif pipeline_stage in {"model_analyzed", "generalized_model_analyzed"} and gap_round:
+                                emit_stage(events, "reanalysis", "completed", "重新分析完成")
+                            elif pipeline_stage == "completed":
+                                emit_stage(events, "final_commit", "running", "最终提交")
+
                             for key, label in [
                                 ("_research_plan", "Research Plan"),
+                                ("_domain_map", "Domain Map"),
                                 ("rag_result", "RAG Agent"),
                                 ("web_result", "Web Agent"),
                                 ("model_result", "Model Agent"),
                                 ("_merged", "Evidence Merge"),
+                                ("_coverage_matrix", "Coverage Review"),
+                                ("_section_contracts", "Section Contracts"),
+                                ("_section_drafts", "Section Synthesis"),
                                 ("_arbitration", "Arbitration"),
                                 ("final_answer", "Synthesis"),
                                 ("_verified_answer", "FactCheck"),
@@ -300,6 +515,8 @@ class JobManager:
                                         job.current_stage = trace_event.stage
                                         job.progress[trace_event.stage] = trace_event.status
                                         job._event_log.append(trace_event.to_dict())
+                            _persist_trace_snapshot(job, events, output_dir)
+                            _enforce_job_stop(job, started_at_ts)
                         return event, events
 
                     main_mod._run_phase2_graph = _instrumented_run_phase2
@@ -309,37 +526,80 @@ class JobManager:
                             stream_events=False, trace_dir=output_dir,
                             run_id=run_id,
                             depth=depth,
+                            started_at=job.started_at,
+                            deadline_at=job.deadline_at,
+                            commit_reserve_seconds=job.commit_reserve_seconds,
                         )
                     finally:
                         main_mod._run_phase2_graph = _original_run_phase2
 
-            job.ended_at = time.time()
-            job.final_answer = str(state.get("final_answer") or "")
+            _capture_report_snapshot(
+                job,
+                state,
+                output_dir,
+                stage="verified" if state.get("_verified_answer") else "draft",
+            )
             job.source_statuses = {
                 source: p.get("status") if isinstance(p, dict) else str(p)
                 for source, p in (state.get("_source_statuses") or {}).items()
             }
             job.factcheck_status = str(state.get("_factcheck_status") or "")
             job.pipeline = str((state.get("_run_summary") or {}).get("mode") or "")
-            job.artifacts = {
+            job.artifacts.update({
                 str(key): str(value)
                 for key, value in (state.get("_report_artifacts") or {}).items()
                 if value
-            }
+            })
 
-            job.status = "completed"
+            final_markdown = job.artifacts.get("markdown_path")
+            staged_markdown = (
+                job.artifacts.get("verified_markdown_path")
+                or job.artifacts.get("draft_markdown_path")
+            )
+            if final_markdown and staged_markdown:
+                from conflux.report import promote_staged_markdown_report
+
+                promote_staged_markdown_report(staged_markdown, final_markdown)
+                if job.artifacts.get("verified_markdown_path") == staged_markdown:
+                    job.artifacts["verified_markdown_path"] = final_markdown
+                if job.artifacts.get("draft_markdown_path") == staged_markdown:
+                    job.artifacts["draft_markdown_path"] = final_markdown
+            emit_stage(live_events, "final_commit", "completed", "最终提交完成")
+            _persist_trace_snapshot(job, live_events, output_dir)
+            job.warnings.extend(
+                warning for warning in _state_warnings(state) if warning not in job.warnings
+            )
+            if _deadline_exceeded(job):
+                job.cancel_reason = "timeout"
+                _finish_job(
+                    job,
+                    "timed_out",
+                    "Run completed report commit after the absolute deadline.",
+                    preserve_report=True,
+                )
+            else:
+                job.ended_at = time.time()
+                job.status = "completed_with_warnings" if job.warnings else "completed"
         except _JobCancelled as exc:
-            _finish_without_report(job, "cancelled", str(exc))
+            _finish_job(job, "cancelled", str(exc), preserve_report=True)
         except _JobTimedOut as exc:
-            _finish_without_report(job, "timed_out", str(exc))
+            _finish_job(job, "timed_out", str(exc), preserve_report=True)
         except SystemExit as exc:
-            job.ended_at = time.time()
-            job.status = "failed"
-            job.error = f"SystemExit code={exc.code}: {stream.getvalue()[-500:]}"
+            error = f"SystemExit code={exc.code}: {stream.getvalue()[-500:]}"
+            if job.cancel_reason == "timeout" or _deadline_exceeded(job):
+                job.cancel_reason = "timeout"
+                _finish_job(job, "timed_out", error, preserve_report=True)
+            else:
+                _finish_job(job, "failed", error, preserve_report=True)
         except Exception as exc:
-            job.ended_at = time.time()
-            job.status = "failed"
-            job.error = f"{type(exc).__name__}: {exc}"
+            error = f"{type(exc).__name__}: {exc}"
+            if job.cancel_reason == "timeout" or _deadline_exceeded(job):
+                job.cancel_reason = "timeout"
+                _finish_job(job, "timed_out", error, preserve_report=True)
+            elif job.cancel_reason == "user":
+                _finish_job(job, "cancelled", error, preserve_report=True)
+            else:
+                _finish_job(job, "failed", error, preserve_report=True)
 
         job._event_log.append(None)  # sentinel
 

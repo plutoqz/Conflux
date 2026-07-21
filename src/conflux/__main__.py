@@ -16,6 +16,7 @@ from .config import load as load_config
 from .graph import create_graph
 from .graph_v2 import create_multi_agent_graph
 from .graph_p1 import create_p1_research_graph
+from .graph_p15 import create_p15_research_graph
 from .model_factory import (
     create_chat_model,
     create_research_models,
@@ -125,6 +126,9 @@ def _empty_multi_agent_state(
     thread_id: str | None = None,
     checkpoint_backend: str = "none",
     resumed: bool = False,
+    started_at: float | None = None,
+    deadline_at: float | None = None,
+    commit_reserve_seconds: float = 20.0,
 ) -> dict:
     run_id = run_id or new_run_id()
     thread_id = thread_id or run_id
@@ -149,10 +153,28 @@ def _empty_multi_agent_state(
         "_thread_id": thread_id,
         "_checkpoint_backend": checkpoint_backend,
         "_resumed": resumed,
+        "_started_at": float(started_at or time.time()),
+        "_deadline_at": float(deadline_at or 0.0),
+        "_commit_reserve_seconds": max(0.0, float(commit_reserve_seconds)),
         "_review_status": "",
         "_research_plan": {},
         "_research_profile": {},
         "_model_trace": {},
+        "_query_archetype": {},
+        "_research_strategy": {},
+        "_domain_map": {},
+        "_coverage_matrix": {},
+        "_research_budget": {},
+        "_source_plans": [],
+        "_report_outline": {},
+        "_section_contracts": [],
+        "_section_drafts": [],
+        "_section_verification": [],
+        "_coverage_iteration": 0,
+        "_coverage_gap_questions": [],
+        "_coverage_gaps": [],
+        "_coverage_stop": False,
+        "_budget_usage": {},
         "_claim_assessments": [],
         "_source_coverage": [],
         "_research_gaps": [],
@@ -176,14 +198,30 @@ def query_command(
     trace_dir: str | None = None,
     run_id: str | None = None,
     depth: str | None = None,
+    started_at: float | None = None,
+    deadline_at: float | None = None,
+    commit_reserve_seconds: float | None = None,
 ) -> dict:
     """Run one research query."""
 
     loaded_config = load_config()
     research_profile = resolve_research_profile(depth)
+    started_at = float(started_at or time.time())
+    deadline_at = float(deadline_at or (started_at + research_profile.timeout_seconds))
+    commit_reserve_seconds = float(
+        research_profile.commit_reserve_seconds
+        if commit_reserve_seconds is None
+        else max(0.0, commit_reserve_seconds)
+    )
     run_id = run_id or new_run_id()
-    pipeline = str(loaded_config.get("research", {}).get("pipeline") or "p1").casefold()
-    use_p1_roles = mode == "phase2" and pipeline == "p1"
+    research_config = loaded_config.get("research", {}) or {}
+    pipeline = str(research_config.get("pipeline") or "p1").casefold()
+    generalization_config = research_config.get("generalization", {}) or {}
+    if pipeline == "p15" and isinstance(generalization_config, dict):
+        enabled = generalization_config.get("enabled", True)
+        if str(enabled).strip().casefold() in {"0", "false", "no", "off"}:
+            pipeline = "p1"
+    use_p1_roles = mode == "phase2" and pipeline in {"p1", "p15"}
     credential_problems = validate_runtime_credentials(
         research_profile.depth,
         include_legacy_presets=not use_p1_roles,
@@ -198,8 +236,12 @@ def query_command(
     vector_store = create_vector_store()
     retriever = HybridRetriever(vector_store)
     print("-> Initializing models...")
-    if mode == "phase2" and pipeline == "p1":
-        role_models, model_trace = create_research_models(research_profile.depth)
+    if mode == "phase2" and pipeline in {"p1", "p15"}:
+        role_models, model_trace = create_research_models(
+            research_profile.depth,
+            deadline_at=deadline_at,
+            commit_reserve_seconds=commit_reserve_seconds,
+        )
         set_model(role_models["analyst"])
         rag_tool = create_rag_tool(
             retriever,
@@ -207,7 +249,12 @@ def query_command(
             SemanticReranker(role_models["reranker"], batch_size=research_profile.candidate_limit),
             research_profile,
         )
-        web_tool = create_web_tool(research_profile, run_id=run_id)
+        web_tool = create_web_tool(
+            research_profile,
+            run_id=run_id,
+            deadline_at=deadline_at,
+            commit_reserve_seconds=commit_reserve_seconds,
+        )
         reasoning_model = role_models["synthesizer"]
         cheap_model = role_models["verifier"]
     else:
@@ -242,10 +289,11 @@ def query_command(
             "iteration_count": 0,
         }
         final_state, trace_events = _run_phase1_graph(graph, initial_state, query)
-    elif pipeline == "p1":
+    elif pipeline in {"p1", "p15"}:
         rag_agent = create_sub_agent("rag", role_models["reranker"], rag_tool)
         web_agent = create_sub_agent("web", role_models["reranker"], web_tool)
-        graph = create_p1_research_graph(
+        graph_factory = create_p15_research_graph if pipeline == "p15" else create_p1_research_graph
+        graph = graph_factory(
             rag_agent,
             web_agent,
             planner_model=role_models["planner"],
@@ -262,6 +310,9 @@ def query_command(
             thread_id=effective_thread_id,
             checkpoint_backend=checkpoint.backend,
             resumed=bool(resume),
+            started_at=started_at,
+            deadline_at=deadline_at,
+            commit_reserve_seconds=commit_reserve_seconds,
         )
         final_state, trace_events = _run_phase2_graph(
             graph,
@@ -288,6 +339,9 @@ def query_command(
             thread_id=effective_thread_id,
             checkpoint_backend=checkpoint.backend,
             resumed=bool(resume),
+            started_at=started_at,
+            deadline_at=deadline_at,
+            commit_reserve_seconds=commit_reserve_seconds,
         )
         final_state, trace_events = _run_phase2_graph(
             graph,

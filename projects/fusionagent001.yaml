@@ -1,7 +1,7 @@
 version: 1
 id: fusionagent001
 name: FusionAgent地理数据融合智能体
-path: E:\code\FusionAgent
+path: D:\code\FusionAgent
 description: ''
 enabled: true
 documents:

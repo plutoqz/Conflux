@@ -1,0 +1,142 @@
+{
+  "scenarios": [
+    {
+      "id": "rag_success_web_success",
+      "statuses": {"RAG": "success", "Web": "success", "Model": "success"},
+      "evidence": [
+        {
+          "id": "rag-1",
+          "source": "RAG",
+          "dimension_id": "mechanism",
+          "claim": "The local review describes the mechanism and its boundary conditions.",
+          "verbatim_quote": "The mechanism weakens when the boundary condition is absent.",
+          "evidence_ref": "[RAG:fixture#chunk-1]",
+          "content_kind": "full_text",
+          "authority": 0.86,
+          "directness": 0.91
+        },
+        {
+          "id": "web-1",
+          "source": "Web",
+          "dimension_id": "current_status",
+          "claim": "The official page reports the current implementation status.",
+          "verbatim_quote": "The implementation entered its current phase in 2026.",
+          "evidence_ref": "[Web:https://official.example/status]",
+          "content_kind": "html_body",
+          "authority": 0.94,
+          "directness": 0.93
+        }
+      ],
+      "expected": {
+        "completion_mode": "evidence_backed",
+        "allowed_fact_sources": ["RAG", "Web"],
+        "failed_source_leakage": 0,
+        "invalid_citations": 0
+      }
+    },
+    {
+      "id": "rag_no_evidence_web_success",
+      "statuses": {"RAG": "no_evidence", "Web": "success", "Model": "success"},
+      "evidence": [
+        {
+          "id": "web-2",
+          "source": "Web",
+          "dimension_id": "current_status",
+          "claim": "An official document directly supports the current status.",
+          "verbatim_quote": "The program is active and publishes quarterly status updates.",
+          "evidence_ref": "[Web:https://official.example/program]",
+          "content_kind": "pdf_body",
+          "authority": 0.95,
+          "directness": 0.95
+        }
+      ],
+      "expected": {
+        "completion_mode": "evidence_backed",
+        "allowed_fact_sources": ["Web"],
+        "must_disclose_sources": ["RAG"],
+        "rag_absence_confidence_penalty": false,
+        "failed_source_leakage": 0,
+        "invalid_citations": 0
+      }
+    },
+    {
+      "id": "rag_failed_web_success",
+      "statuses": {"RAG": "failed", "Web": "success", "Model": "success"},
+      "evidence": [
+        {
+          "id": "web-3",
+          "source": "Web",
+          "dimension_id": "implementation",
+          "claim": "The maintained repository documents the implementation behavior.",
+          "verbatim_quote": "The implementation retries an interrupted operation from its last durable checkpoint.",
+          "evidence_ref": "[Web:https://repository.example/docs]",
+          "content_kind": "html_body",
+          "authority": 0.82,
+          "directness": 0.92
+        }
+      ],
+      "expected": {
+        "completion_mode": "evidence_backed",
+        "allowed_fact_sources": ["Web"],
+        "must_disclose_sources": ["RAG"],
+        "failed_source_leakage": 0,
+        "invalid_citations": 0
+      }
+    },
+    {
+      "id": "rag_success_web_failed",
+      "statuses": {"RAG": "success", "Web": "failed", "Model": "success"},
+      "evidence": [
+        {
+          "id": "rag-2",
+          "source": "RAG",
+          "dimension_id": "stable_mechanism",
+          "claim": "The paper provides direct evidence for the stable mechanism.",
+          "verbatim_quote": "The measured effect is mediated by the documented mechanism.",
+          "evidence_ref": "[RAG:fixture#chunk-2]",
+          "content_kind": "full_text",
+          "authority": 0.89,
+          "directness": 0.9
+        }
+      ],
+      "expected": {
+        "completion_mode": "evidence_backed",
+        "allowed_fact_sources": ["RAG"],
+        "must_disclose_sources": ["Web"],
+        "failed_source_leakage": 0,
+        "invalid_citations": 0
+      }
+    },
+    {
+      "id": "both_external_failed",
+      "statuses": {"RAG": "failed", "Web": "failed", "Model": "success"},
+      "evidence": [],
+      "expected": {
+        "completion_mode": "model_analysis_only",
+        "allowed_fact_sources": [],
+        "must_disclose_sources": ["RAG", "Web"],
+        "model_analysis_must_be_labeled": true,
+        "failed_source_leakage": 0,
+        "invalid_citations": 0
+      }
+    },
+    {
+      "id": "web_snippet_without_body",
+      "statuses": {"RAG": "no_evidence", "Web": "low_relevance", "Model": "success"},
+      "evidence": [],
+      "discovery_only": [
+        {
+          "title": "Search result title",
+          "url": "https://search.example/result",
+          "snippet": "A search snippet mentions a possible result, but the body fetch failed."
+        }
+      ],
+      "expected": {
+        "completion_mode": "model_analysis_only",
+        "allowed_fact_sources": [],
+        "snippets_are_evidence": false,
+        "invalid_citations": 0
+      }
+    }
+  ]
+}

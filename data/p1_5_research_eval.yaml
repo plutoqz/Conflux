@@ -1,0 +1,171 @@
+# P1.5 generalized deep-research evaluation set.
+# The cases form a covering set, not a full Cartesian product. Real API runs
+# may select a stratified subset; offline validation must cover every row.
+
+- id: p15_materials_method_broad
+  domain: materials_science
+  query: "What methods are used to recycle lithium-ion batteries, and where does each method fit?"
+  archetype: method_survey
+  breadth: broad
+  temporality: stable
+  rag_coverage: covered
+  source_scenario: rag_success_web_success
+  requires_recommendation: false
+  expected_research_actions: [taxonomy_discovery, mechanism_analysis, representative_implementations, applicability, limitations, maturity, combination_relations]
+  expected_dimensions: [mechanical_pretreatment, pyrometallurgy, hydrometallurgy, direct_recycling, safety, economics_and_environment]
+
+- id: p15_software_method_narrow
+  domain: software_engineering
+  query: "What rollback methods are available for relational database schema migrations?"
+  archetype: method_survey
+  breadth: narrow
+  temporality: stable
+  rag_coverage: none
+  source_scenario: rag_no_evidence_web_success
+  requires_recommendation: false
+  expected_research_actions: [taxonomy_discovery, mechanism_analysis, representative_implementations, applicability, limitations, maturity, combination_relations]
+  expected_dimensions: [expand_contract, backward_compatible_deployment, shadow_writes, backup_restore, validation]
+
+- id: p15_security_status_broad
+  domain: cybersecurity
+  query: "As of 2026, what is the state of post-quantum cryptography migration across standards, products, and operations?"
+  archetype: state_and_trends
+  breadth: broad
+  temporality: current
+  rag_coverage: none
+  source_scenario: rag_failed_web_success
+  requires_recommendation: false
+  expected_research_actions: [baseline_state, recent_changes, adoption_drivers, trajectory, uncertainty_analysis]
+  expected_dimensions: [standards, vendor_support, cryptographic_inventory, hybrid_deployment, interoperability, compliance, open_gaps]
+
+- id: p15_medicine_status_narrow
+  domain: medicine
+  query: "As of 2026, what is the implementation status of adult RSV vaccination programs?"
+  archetype: state_and_trends
+  breadth: narrow
+  temporality: current
+  rag_coverage: covered
+  source_scenario: rag_success_web_failed
+  requires_recommendation: false
+  expected_research_actions: [baseline_state, recent_changes, adoption_drivers, trajectory, uncertainty_analysis]
+  expected_dimensions: [authorizations_and_guidelines, eligibility, effectiveness, safety, uptake_and_equity, surveillance]
+
+- id: p15_software_limitations_broad
+  domain: software_engineering
+  query: "What currently limits autonomous coding agents in production software engineering?"
+  archetype: limitations_and_challenges
+  breadth: broad
+  temporality: current
+  rag_coverage: covered
+  source_scenario: rag_success_web_success
+  requires_recommendation: false
+  expected_research_actions: [scope_definition, failure_modes, root_causes, impacts, mitigations, open_questions]
+  expected_dimensions: [task_scope, context_management, correctness, evaluation, security, operations, human_oversight]
+
+- id: p15_law_limitations_narrow
+  domain: law_and_policy
+  query: "What are the main limitations of algorithmic impact assessments as an accountability mechanism?"
+  archetype: limitations_and_challenges
+  breadth: narrow
+  temporality: stable
+  rag_coverage: none
+  source_scenario: rag_no_evidence_web_success
+  requires_recommendation: false
+  expected_research_actions: [scope_definition, failure_modes, root_causes, impacts, mitigations, open_questions]
+  expected_dimensions: [scope_and_trigger, measurement_validity, transparency, enforcement, affected_group_participation]
+
+- id: p15_energy_comparison_broad
+  domain: energy_systems
+  query: "Compare major grid-scale energy storage technologies for multi-hour and long-duration service."
+  archetype: comparison
+  breadth: broad
+  temporality: current
+  rag_coverage: none
+  source_scenario: rag_failed_web_success
+  requires_recommendation: false
+  expected_research_actions: [comparison_axes, per_target_evidence, tradeoffs, boundary_conditions, conflict_analysis]
+  expected_dimensions: [round_trip_efficiency, discharge_duration, cost, supply_chain, safety, maturity, siting]
+
+- id: p15_materials_comparison_narrow
+  domain: materials_science
+  query: "How do sodium-ion and lithium iron phosphate batteries differ for stationary storage?"
+  archetype: comparison
+  breadth: narrow
+  temporality: stable
+  rag_coverage: covered
+  source_scenario: rag_success_web_failed
+  requires_recommendation: false
+  expected_research_actions: [comparison_axes, per_target_evidence, tradeoffs, boundary_conditions, conflict_analysis]
+  expected_dimensions: [energy_density, cycle_life, raw_materials, safety, cost, temperature_performance]
+
+- id: p15_medicine_causal_broad
+  domain: medicine
+  query: "Why does antimicrobial resistance persist across hospitals, communities, agriculture, and the environment?"
+  archetype: causal_mechanism
+  breadth: broad
+  temporality: stable
+  rag_coverage: covered
+  source_scenario: rag_success_web_success
+  requires_recommendation: false
+  expected_research_actions: [causal_chain, mechanism_analysis, confounders, counterevidence, boundary_conditions]
+  expected_dimensions: [selection_pressure, transmission, environmental_reservoirs, diagnostic_delays, economic_incentives, feedback_loops]
+
+- id: p15_climate_causal_narrow
+  domain: climate_and_environment
+  query: "Through which mechanisms do cool roofs reduce urban heat exposure, and where can the effect weaken?"
+  archetype: causal_mechanism
+  breadth: narrow
+  temporality: stable
+  rag_coverage: none
+  source_scenario: both_external_failed
+  requires_recommendation: false
+  expected_research_actions: [causal_chain, mechanism_analysis, confounders, counterevidence, boundary_conditions]
+  expected_dimensions: [albedo_and_radiation, building_energy, urban_canopy, humidity, rebound_and_boundary_effects]
+
+- id: p15_software_solution_broad
+  domain: software_engineering
+  query: "Design a regulated multi-region event-processing platform with recoverable operations and auditable data flows."
+  archetype: solution_design
+  breadth: broad
+  temporality: stable
+  rag_coverage: covered
+  source_scenario: rag_success_web_success
+  requires_recommendation: true
+  expected_research_actions: [requirements, architecture, alternatives, implementation_steps, risks, validation]
+  expected_dimensions: [requirements, topology, consistency, observability, disaster_recovery, security_and_audit, rollout_and_validation]
+
+- id: p15_law_solution_narrow
+  domain: law_and_policy
+  query: "Design an implementation path for the documentation duties of one high-risk AI system under the EU AI Act."
+  archetype: solution_design
+  breadth: narrow
+  temporality: current
+  rag_coverage: none
+  source_scenario: rag_no_evidence_web_success
+  requires_recommendation: true
+  expected_research_actions: [requirements, architecture, alternatives, implementation_steps, risks, validation]
+  expected_dimensions: [system_classification, quality_management, data_governance, technical_documentation_and_logs, human_oversight, post_market_monitoring]
+
+- id: p15_climate_evidence_broad
+  domain: climate_and_environment
+  query: "What does current evidence show about marine carbon dioxide removal, including consensus, uncertainty, and disagreement?"
+  archetype: evidence_review
+  breadth: broad
+  temporality: current
+  rag_coverage: none
+  source_scenario: rag_failed_web_success
+  requires_recommendation: false
+  expected_research_actions: [evidence_hierarchy, consensus, disagreement, study_quality, evidence_gaps]
+  expected_dimensions: [pathways, permanence, measurement_reporting_and_verification, ecosystem_impacts, scale_and_cost, governance, evidence_quality]
+
+- id: p15_medicine_evidence_narrow
+  domain: medicine
+  query: "What is the evidence that resistance exercise lowers blood pressure in adults with hypertension?"
+  archetype: evidence_review
+  breadth: narrow
+  temporality: stable
+  rag_coverage: covered
+  source_scenario: rag_success_web_failed
+  requires_recommendation: false
+  expected_research_actions: [evidence_hierarchy, consensus, disagreement, study_quality, evidence_gaps]
+  expected_dimensions: [randomized_outcomes, exercise_dose, adherence, subgroups, safety, certainty]

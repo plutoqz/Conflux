@@ -1,14 +1,14 @@
 # Conflux 执行方案 v1
 
-> 文档状态：已批准；M0-M2、P0 与 P1 已完成验收；M3+ 尚未启动
+> 文档状态：已批准；M0-M2、P0 与 P1 已完成验收；P1.5 已实现并完成离线合同验收，跨领域真实 API 盲评待预算确认；P2、M3+ 尚未启动
 >
-> 版本：1.5
+> 版本：1.8
 >
 > 日期：2026-07-20
 >
 > 上位蓝图：[docs/architecture.md](../architecture.md)
 >
-> 状态：M0 基线、M1 扩展协议、M2 第一方能力/工作流、P0 研究质量修复和 P1 三源研究质量闭环均已完成验收。P1 最终 Deep/full 代表运行在质量、六维覆盖、证据、引用、FactCheck、盲评和 480 秒延迟闸门上全部通过。Gemini 因成本原因继续暂停；具体模型仍由用户配置。尚未启动 M3 数据库、持久运行或初始化迁移。
+> 状态：M0 基线、M1 扩展协议、M2 第一方能力/工作流、P0 研究质量修复和 P1 三源研究质量闭环均已完成验收。P1.5 的通用问题规划、动态领域地图、覆盖驱动检索、动态预算、来源路由、分层综合和动态报告契约已完成实现及离线合同验收；真实跨领域代表运行、与 P1 基线的匿名盲评和真实成本/延迟记录仍待预算确认，因此 P2 启动闸门尚未解除。Gemini 因成本原因继续暂停；具体模型仍由用户配置。尚未启动 P2、M3 数据库、持久运行或初始化迁移。
 
 ## 1. 使用方式
 
@@ -83,12 +83,14 @@ LLM 评审必须输出 `relevance`、`research_value`、`evidence_quality`、`re
 | M2 | 第一方能力和 YAML 工作流 | 动态结果、工作流编译、LLM 评审 | 已完成 |
 | P0 | 研究质量与可用性修复 | 评审容错、Web 降级、跨语言 RAG、回答先行 | 已完成验收 |
 | P1 | 三源研究质量闭环 | 分层模型、全文 RAG、Web 正文、声明融合、修订闭环、消融评测 | 已完成验收 |
-| M3 | 持久运行和初始化迁移 | SQLite Run Store、Job、Event、Approval | 待启动（P1 闸门已通过） |
+| P1.5 | 泛化深度研究与内容扩展 | 问题原型、动态领域地图、覆盖矩阵、分层综合、来源路由、泛化报告契约 | 已实现并完成离线合同验收；真实跨领域盲评待预算确认 |
+| P2 | 项目驱动论文雷达 | 项目研究配置、扩展搜索意图、项目论文关联、证据化影响建议 | 待启动（P1.5 后实施） |
+| M3 | 持久运行和初始化迁移 | SQLite Run Store、Job、Event、Approval | 待启动（P2 后实施） |
 | M4 | Evidence Ledger 和验证闭环 | 来源版本、声明关系、影响分析 | 待启动 |
 | M5 | LLM 评审评测和示例扩展 | 标注集、消融报告、互补扩展 | 待启动 |
 | M6 | 可选服务化 | Postgres、Worker、隔离插件 | 条件触发 |
 
-依赖顺序：M0 -> M1 -> M2 -> P0 -> P1 -> M3 -> M4 -> M5；M6 不得提前启动。P1 是 M3 的启动闸门，优先完成研究查询的质量闭环；P1 不引入数据库、持久 Job 或服务化运行时。
+依赖顺序：M0 -> M1 -> M2 -> P0 -> P1 -> P1.5 -> P2 -> M3 -> M4 -> M5；M6 不得提前启动。P1.5 先把 P1 的单题高质量能力提升为跨领域、跨问题类型的稳定深度研究能力；P2 再以文件产物和现有 Workbench 能力完成项目级论文研究最小闭环，不提前建设数据库、持久 Job 或后台调度；M3 最后统一持久化运行状态、论文身份、项目关联和搜索记录，避免 P2 单独形成第二套长期存储。
 
 ## 4. M0：基线与实施准备
 
@@ -927,11 +929,523 @@ P1 未完成或验收不通过时，不进入 M3 的 SQLite Run Store、持久 J
 - `reports/workbench/query/20260719-190832-当前地理处理自动化研究存在哪些局限性.md`
 - `reports/workbench/query/20260719-190832-当前地理处理自动化研究存在哪些局限性.audit.md`
 
+## P1.5：泛化深度研究与内容扩展（实现及离线验收完成；真实对标待预算）
+
+### P1.5.1 阶段目标与成功定义
+
+P1.5 位于已验收的 P1 与 P2 之间。P1 已证明三源研究链路可以在代表性问题上形成结构完整、证据可追溯的回答，但后续真实使用表明：单个领域特例达到预期，不等于系统已经具备跨领域、跨问题类型的稳定深度研究能力；报告结构正确，也不等于内容广度、细节密度和主动补缺能力已经达到成熟深度研究智能体水平。
+
+P1.5 的首要目标是：**将 P1 的单题高质量能力泛化为由问题原型、动态领域地图、覆盖矩阵和分层综合共同驱动的深度研究能力，并保证 RAG 缺失时仍可由 Web 正文证据与明确标注的 Model 分析形成可信报告。**
+
+成功不能由某个领域的专用规则、固定章节模板、单次真实报告或单一引用率证明。P1.5 完成后必须同时具备：
+
+- 面对不同领域的宽泛综述、现状趋势、局限挑战、技术比较、因果机制、方案设计和证据综述问题，能够先建立问题地图，再按覆盖缺口持续检索。
+- 本地 RAG 为 `no_evidence`、`failed` 或没有相关语料时，只要 Web 取得可用正文证据，研究流程仍能完成事实充分、引用有效的报告；不得把 RAG 缺失误判为整个研究失败。
+- Deep 档不再受固定少量子问题、固定 8 条最终证据或一次整体综合的结构性限制；预算根据问题广度、维度数量、证据稀缺度和冲突程度动态分配。
+- 最终报告的章节标题、顺序和内容要求由问题原型、用户意图与动态研究维度生成，不为地理处理、医学、法律、材料、软件工程或任何单一领域写死模板。
+- 报告每个主要章节都能回溯到研究问题、覆盖目标、证据要求和完成状态；不能以篇幅增长、来源堆叠或模型常识扩写冒充研究深度。
+
+### P1.5.2 范围原则与非目标
+
+P1.5 遵循以下原则：
+
+1. **问题类型优先于领域特例。** 允许配置领域词表、来源适配器和术语别名，但不得在核心研究图中为单个主题硬编码方法分类或固定答案章节。
+2. **RAG 是可选证据源，不是流程前置条件。** Model、RAG、Web 保持不同证据角色和独立状态；一个来源缺失不应阻断其他来源继续研究。
+3. **先覆盖、再深挖、后综合。** 宽泛问题先建立领域地图和覆盖矩阵，再对关键维度进行深度检索；不得由最先返回的少数论文重新定义整个问题范围。
+4. **丰富度来自证据化展开。** 增加章节和篇幅必须伴随新的机制、案例、比较、边界或证据，不允许重复改写同一观点填充长度。
+5. **报告结构是动态契约。** 系统只规定回答完整性、证据追踪和可靠性等功能要求，不规定某个领域必须出现哪些标题。
+
+P1.5 不提前实施 P2 的项目论文关联、审批写回和论文雷达界面，不实施 M3 的持久 Job、SQLite Repository 或跨进程调度，也不把临时领域分类自动写入永久知识库。
+
+### P1.5.3 关键建设项 1：通用问题类型规划器
+
+将当前主要依赖自由生成子问题和少量领域归一化规则的规划方式，升级为显式 `QueryArchetype` 与 `ResearchStrategy` 协议。首版至少识别：
+
+- 方法、技术或方案综述。
+- 现状、进展与趋势分析。
+- 局限、挑战与开放问题。
+- 对象、技术或观点比较。
+- 因果关系、作用机制与影响分析。
+- 解决方案、架构或实施路径设计。
+- 证据综述、共识与争议评估。
+
+每种问题原型只定义通用研究动作，不携带领域章节。例如“方法综述”要求发现分类维度、机制、代表实现、适用条件、优势、限制、成熟度和组合关系；具体分类名称必须由查询、Model prior、术语发现和首轮证据共同生成。
+
+新增或扩展以下运行内协议：
+
+```text
+QueryArchetype
+  type
+  confidence
+  user_intent
+  expected_research_actions[]
+  required_synthesis_functions[]
+
+DomainMap
+  scope
+  key_concepts[]
+  terminology[]
+  dimensions[]
+  dimension_relations[]
+  disputed_boundaries[]
+  discovery_sources[]
+```
+
+低置信问题类型允许形成主类型与次类型组合，但必须记录选择理由。规划失败时退回通用探索流程，不能退回到某个领域专用模板。
+
+### P1.5.4 关键建设项 2：广度扫描与深度追踪循环
+
+宽泛问题采用“领域地图 -> 广度扫描 -> 维度筛选 -> 逐维深挖 -> 覆盖复核”的循环，不再直接把固定 4-6 个子问题作为最终研究边界。
+
+目标流程：
+
+```text
+Query + QueryArchetype
+  -> exploratory terminology and taxonomy discovery
+  -> DomainMap / ResearchDimension[]
+  -> breadth queries for every major dimension
+  -> CoverageMatrix
+  -> prioritize important, weak, conflicting, or evidence-poor dimensions
+  -> targeted depth queries
+  -> update evidence and coverage
+  -> repeat until coverage, saturation, budget, or explicit evidence scarcity stop
+```
+
+`ResearchDimension` 至少包含：维度名称、纳入理由、父子关系、需要回答的问题、期望证据类型、重要性、当前覆盖、冲突、缺口和停止条件。首轮发现的新维度必须经过相关性和去重判断后才能进入计划，不能无限扩张。
+
+`CoverageMatrix` 不只记录“是否有结果”，还要记录：
+
+- 是否取得正文证据，而非仅有搜索标题或摘要片段。
+- 是否覆盖定义、机制、代表实现、适用条件、局限、比较或其他由问题原型要求的研究动作。
+- 是否存在至少一个高权威来源，以及是否需要第二个独立来源交叉验证。
+- 是否存在来源冲突、时间冲突、术语歧义或只有 Model 分析没有外部证据。
+- 当前维度是已覆盖、部分覆盖、证据稀缺、相互冲突还是超出范围。
+
+停止条件改为覆盖和证据饱和联合判断。达到固定搜索次数或结果数量不能单独结束 Deep 研究。
+
+### P1.5.5 关键建设项 3：动态证据与运行预算
+
+将 `max_subquestions`、`final_evidence_limit`、Web 抓取数、报告长度和缺口迭代次数从固定档位上限升级为“档位基础预算 + 问题复杂度调整 + 全局硬上限”。复杂度至少参考：
+
+- 问题原型及其要求的研究动作数量。
+- 动态领域地图中的主要维度和子维度数量。
+- 时间范围、比较对象数量和用户要求的细节层级。
+- 已取得证据的权威性、多样性、冲突和稀缺程度。
+- RAG、Web、学术 API 和官方来源的实际健康状态。
+
+Deep 档的初始工程建议是：宽泛问题允许约 8-15 个主要研究维度、20-40 条进入最终综合的高价值证据，以及按章节分配的输出预算；这些数字是可配置起点，不是所有问题必须填满的质量指标。窄问题应主动收缩，证据稀缺问题应明确停止并报告缺口。
+
+预算分配必须满足：
+
+- 先为每个高重要性维度保留最低检索和证据预算，再把剩余预算投入冲突、缺口和关键细节。
+- 同一来源或同一观点不能通过重复条目挤占证据预算。
+- 报告长度随已验证内容增长，而不是随用户问题字数或固定档位机械增长。
+- 超时降级仍按 `DomainMap` 和 `CoverageMatrix` 输出已完成维度、未完成维度和下一步检索，不退化为少量链接或无结构摘要。
+
+### P1.5.6 关键建设项 4：章节级研究与分层综合
+
+将“一次性把全部证据交给单个综合器”调整为章节级综合和全局综合两层流程：
+
+```text
+ResearchDimension + scoped evidence
+  -> SectionDraft / SectionClaim[]
+  -> section-level citation and completeness verification
+  -> cross-section comparison, deduplication, and conflict analysis
+  -> complete report synthesis
+  -> global factcheck and gap review
+```
+
+每个章节先独立完成本维度的回答、机制展开、代表证据、适用边界和未解决问题，再由全局综合器处理跨维度关系、共同模式、差异、组合方案和总体结论。全局综合不得压缩掉已经通过章节核验的关键机制或限制，也不得简单拼接多个小报告。
+
+章节级产物至少记录：`dimension_id`、研究问题、关键声明、证据引用、内容覆盖、冲突、未解决缺口、建议篇幅和综合优先级。FactCheck 发现单个章节不足时，优先生成针对该章节的检索问题，而不是重写整篇报告后再次丢失其他章节细节。
+
+### P1.5.7 关键建设项 5：来源类型路由与 RAG 空库降级
+
+来源路由从“所有问题统一搜三源”升级为按维度和证据需求生成 `SourcePlan`。通用来源类型至少包括：
+
+- 学术综述、原始研究、预印本和基准评测。
+- 官方文档、标准、规范、政策和版本说明。
+- 开源仓库、技术文档和可复现实验材料。
+- 权威机构报告、数据集说明和高质量案例研究。
+- Model parametric knowledge，用于概念框架、查询扩展、机制分析和建议，但不伪装成外部引用。
+
+不同领域可以注册来源适配器和权威域规则，但核心路由只依赖证据需求、来源类型、时效性和权威性，不依赖硬编码领域答案。
+
+RAG 空库或无相关内容时必须满足：
+
+1. RAG 返回明确的 `no_evidence` 或 `low_relevance`，不得伪装成功，也不得阻断 Web 和 Model。
+2. Web 继续执行学术 API、官方来源和通用正文检索；取得正文证据后按正常外部事实参与综合和核验。
+3. RAG 缺失本身不降低 Web 已充分支持声明的置信度，只作为来源覆盖状态披露。
+4. Web 也无法取得正文时，允许输出明确标注的 Model 分析、已发现线索和待核验问题，但不得把搜索摘要、URL 或模型记忆包装成已证实事实。
+5. 增加 `RAG=empty/Web=success`、`RAG=failed/Web=success`、`RAG=success/Web=failed`、双外部源失败等独立回归场景。
+
+### P1.5.8 关键建设项 6：泛化深度研究报告契约
+
+P1.5 不定义任何领域专用的“标准报告目录”。报告由 `QueryArchetype + DomainMap + CoverageMatrix + UserIntent` 动态生成 `ReportOutline`，再为每一节生成 `SectionContract`：
+
+```text
+ReportOutline
+  query_archetype
+  audience
+  scope
+  answer_strategy
+  sections[]
+  cross_section_synthesis[]
+  citation_policy
+  reliability_policy
+
+SectionContract
+  id
+  title
+  function
+  dimension_ids[]
+  questions_to_answer[]
+  required_claim_types[]
+  evidence_requirements[]
+  comparison_axes[]
+  dependencies[]
+  coverage_target
+  length_budget
+```
+
+`SectionContract.function` 使用通用功能角色，例如直接回答、范围界定、分类展开、机制解释、证据比较、时间演化、适用边界、实施建议、争议与缺口；标题必须根据实际问题和研究维度生成。系统不得要求所有报告包含固定数量的章节，也不得把某个领域的工具、方法、机构或术语写入默认结构。
+
+无论最终章节如何生成，完整报告必须满足以下功能要求：
+
+- 开头直接回答用户问题并交代必要的范围和时间边界。
+- 主体覆盖所有高重要性研究维度，并在适用时展开机制、证据、代表实现、比较、限制和成熟度。
+- 对跨维度关系进行综合，说明互补、替代、依赖、冲突或演化关系，而不是只列清单。
+- 仅在用户问题需要时生成选型、行动或实施建议，不强迫所有研究报告输出建议。
+- 结尾披露证据边界、争议、未覆盖维度、来源状态和需要继续研究的问题。
+- 参考文献与声明引用可回溯，Model 分析与外部事实在正文和置信度评价中保持可区分。
+
+报告丰富度评价采用“维度覆盖、机制展开、证据密度、比较综合、案例或实现细节、边界条件、洞察增量和表达连贯性”，不得使用章节数量或字符数单独评分。
+
+### P1.5.9 实施顺序、评测与退出标准
+
+实施顺序保持关键建设项 1-6，不倒置为先扩写报告：
+
+1. 建立 `QueryArchetype`、`DomainMap`、`ResearchDimension` 和 `CoverageMatrix` 协议及离线夹具。
+2. 实现广度扫描、维度去重、优先级计算和覆盖驱动的深度追踪循环。
+3. 引入动态证据、抓取、缺口迭代和章节篇幅预算，同时保留全局成本与超时硬上限。
+4. 实现章节级研究、章节核验、全局去重和分层综合。
+5. 实现按证据需求的来源路由及完整 RAG 空库/来源故障矩阵。
+6. 实现动态 `ReportOutline/SectionContract`、泛化质量评审和跨领域真实对标。
+
+评测集不得继续以单个地理处理问题作为主要证明。首版至少覆盖 6 个差异明显的领域、上述 7 类问题原型、宽泛与窄问题、近期状态与稳定知识、RAG 有覆盖与完全无覆盖等组合。真实 API 采用分层代表样本控制预算，离线测试覆盖协议、路由、预算、覆盖矩阵、降级和引用边界。
+
+P1.5 退出必须同时满足：
+
+- 跨领域评测中不存在依赖领域硬编码才能通过的代表问题；移除任一领域词表后仍可通过通用探索恢复主要维度。
+- 宽泛问题能够生成合理的动态领域地图，并在报告中实质覆盖高重要性维度；不能只形成结构完整但内容单薄的提纲式回答。
+- RAG 完全无相关内容且 Web 可用时，报告的事实正确性、维度覆盖、有效引用和来源披露达到与 RAG 可用场景相同的最低质量门槛。
+- Deep 报告相对 P1 基线在盲评的广度、深度、实现或案例细节、比较综合和洞察增量上均有可测提升，且无效引用、失败来源泄漏和 Prompt Injection 泄漏保持为 0。
+- 每个主要章节均能回溯到 `SectionContract`、研究维度和证据；未覆盖维度在报告与审计产物中一致披露。
+- 动态预算在窄问题上不会无条件扩大成本，在宽泛问题上不会因旧的固定证据和子问题上限提前停止。
+- P1/P0 现有回归全部通过，并保留显式功能开关以回退到 P1 已验收路径。
+
+P1.5 完成并验收前不启动 P2。回滚时关闭泛化深度研究开关，保留 P1 已验收的三源研究链路；新增运行内协议和报告产物必须向后兼容，不修改永久知识库和项目权威文档。
+
+### P1.5.10 实施状态、离线验收与待完成真实验证（2026-07-20）
+
+本节是 P1.5 的执行台账。当前状态必须区分“实现和离线合同已通过”与“真实跨领域内容质量已证明”：前者已经完成，后者需要用户明确批准真实 API 预算后再执行。因此本节不把 P1.5 标记为完全退出，也不解除 P2 启动闸门。
+
+#### 已完成并有离线证据的实现
+
+1. `research_protocol.py` 增加并保持 JSON 可序列化的 `QueryArchetype`、`ResearchStrategy`、`ResearchDimension`、`DomainMap`、`CoverageMatrix`、`DynamicResearchBudget`、`SourcePlan`、`SectionDraft`、`SectionContract` 和 `ReportOutline`。
+2. `research_generalization.py` 实现七类问题原型、宽窄判断、领域地图生成和去重、动态预算、证据需求来源路由、覆盖矩阵、缺口优先级、覆盖/饱和联合停止、动态报告生成和内容丰富度质量门。
+3. `graph_p15.py` 接通“规划 -> RAG/Web SourcePlan 检索 -> Model 分析 -> 证据合并 -> 覆盖复核与定向深挖 -> 章节准备 -> 分层综合 -> FactCheck 定向补证 -> 质量合并”，并记录阶段、来源状态、章节契约、证据和运行预算用量。
+4. `config.yaml` 默认使用 `research.pipeline: p15`；`pipeline: p1` 与 `research.generalization.enabled: false` 均可回退到已验收的 P1 路径。
+5. 离线评测集覆盖 7 个差异领域、7 类问题原型各自的宽/窄样本，近期/稳定知识、RAG 有覆盖/无覆盖和 5 类来源故障场景，并包含 Prompt Injection、报告追溯和回滚夹具。
+
+#### 离线验收
+
+- P1.5 定向协议、规划、预算路由、报告和管线测试为 `75 passed`；预算测试同时检查跨来源累计查询、Web 抓取/尝试和共享缺口轮次不超过运行硬上限。
+- `python scripts/eval_p1_5.py --out-dir .tmp/p15-eval` 的六个闸门全部通过：数据集覆盖、规划录制、动态预算、来源降级矩阵、Prompt Injection 清洗和报告追溯。该评测明确为 `real_api: false`。
+- P0/P1 核心回归为 `150 passed`；插件协议测试包含在全量套件中，原先受本机 `.env` 和全局评审缓存影响的两个“无 LLM”用例已显式隔离模型工厂和缓存。
+- 最终全量测试为 `444 passed`；Python `py_compile`、离线 P1.5 评测和 `git diff --check` 均通过。差异检查仅报告工作树现有 LF/CRLF 转换提示，没有空白错误。
+
+#### 待真实 API 预算确认的验证
+
+以下事项不能由离线录制响应或协议测试替代：
+
+1. 运行分层代表性跨领域样本，覆盖宽/窄问题、近期/稳定问题、RAG 有覆盖/完全无覆盖及至少多个不同问题原型。
+2. 对同题 P1 基线执行匿名成对盲评，验证广度、深度、案例或实现细节、比较综合和洞察增量的可测提升。
+3. 对比真实 `RAG=empty/Web=success` 与 RAG 可用场景的事实正确性、维度覆盖、有效引用和来源披露，记录 provider/model、Token、成本、延迟、限流和 fallback。
+4. 验证宽题 DomainMap 的高重要性维度有实质内容覆盖，而不是只有结构、标题或录制响应；同时确认移除领域词表后仍能通过通用探索恢复主要维度。
+
+在上述真实验证完成前，P1.5 保持“实现及离线验收完成、真实对标待预算确认”，P2 不启动。临时关闭 `generalization.enabled` 或切换 `pipeline: p1` 时，保留 P1 已验收的三源研究链路。
+
+## P2：项目驱动论文雷达（P1.5 后实施）
+
+### P2.1 阶段目标与成功定义
+
+P2 将论文发现从独立的画像工具升级为项目管理的一部分。项目目标、研究问题、当前里程碑、下一步行动、审计风险和证据缺口共同驱动论文搜索；论文筛选和全文分析结果再以可审查建议的形式回到项目，而不是停留在全局论文 inbox 或自动改写项目计划。
+
+本阶段直接借鉴 AcademyHunter 的有效经验：人工设计的研究 Track、多条布尔查询、时间窗口、分层过滤、项目化分析结构和高信息密度日报。同时保留 Conflux 已有边界：LLM 负责语义判断，确定性规则只承担召回和门禁；深度结论必须基于摘要或全文证据；计划写入和知识晋升必须经用户确认。
+
+P2 成功后，用户应能从一个已登记项目直接启动论文雷达，并回答以下问题：
+
+- 当前项目为什么搜索这些论文，搜索意图来自哪个目标、里程碑、风险或研究问题。
+- 每篇论文与哪个项目节点相关，能提供方法、数据集、基线、指标、背景、反例还是竞争信息。
+- 哪些分析仅由摘要支持，哪些已经由全文章节、页码和 Chunk 支持。
+- 论文是否建议加入项目资料库、关联里程碑、形成实验建议、登记风险或创建下一步行动。
+- 哪些建议尚未确认，且项目 YAML、知识库和历史报告没有被自动改写。
+
+### P2.2 优先级与范围边界
+
+| 优先级 | 工作包 | 目标 | 启动条件 |
+|---|---|---|---|
+| 最高 | A. 项目绑定与状态隔离 | `project_id` 贯穿论文发现、报告、已见状态和入库建议 | P2 启动即实施 |
+| 最高 | B. Track 化搜索扩面 | 使用人工可审查的 Track/QuerySpec 扩大 arXiv 和 Semantic Scholar 搜索面 | 与 A 并行 |
+| 高 | C. 项目上下文与搜索意图 | 从计划、当前里程碑、下一步行动和审计风险生成有来源的 SearchIntent | A/B 稳定后 |
+| 高 | D. 全文证据化项目影响分析 | 高价值论文先获取全文，再生成带来源定位的项目影响和行动建议 | P1 全文链路可复用 |
+| 高 | E. Workbench 项目研究视图与审批 | 在项目页处理论文、覆盖缺口和写回建议 | A-D 的用户闭环 |
+| 中 | F. 持久调度与引用图扩展 | 周期运行、引用链、相似论文、学者追踪和跨运行增量 | M3 持久化完成后 |
+
+P2 明确不包含：
+
+- 不在 P2 提前建设 SQLite Repository、持久队列、后台 Worker 或跨进程调度。
+- 不以增加爬虫数量为成功；首期只要求把现有 arXiv 和 Semantic Scholar 做实，OpenAlex、Crossref、DBLP 等在有明确覆盖收益和维护预算后增加。
+- 不把关键词或向量相似度直接包装成项目结论。
+- 不要求模型填满摘要无法支持的方法、数据集、基线、结果或章节字段；证据不足时必须返回 `unknown` 或 `needs_full_text`。
+- 不允许论文分析自动修改项目目标、里程碑状态、下一步行动或权威项目文档。
+
+### P2.3 目标工作流
+
+```text
+ProjectDefinition + ResearchProfile
+  -> ProjectResearchContext
+     - 稳定上下文：目标、研究问题、领域、长期 Track、关注学者/会议
+     - 动态上下文：进行中里程碑、下一步行动、最新风险、文档变化、证据缺口
+  -> SearchIntent[]
+     - core_topic / milestone / blocker / evidence_gap / competitor / dataset_metric
+  -> QuerySpec[]
+     - source / query / category / date_window / budget / provenance
+  -> multi-source discovery
+  -> identity dedup + project-scoped seen filtering + negative gate
+  -> embedding coarse rank + batch LLM semantic review
+  -> shortlist
+  -> PDF/full-text extraction for deep candidates
+  -> ProjectPaperAnalysis + ProjectImpactSuggestion[]
+  -> project Research view
+  -> user-approved project or knowledge writeback
+```
+
+固定研究方向和已批准查询可以自动周期执行；由项目变化临时生成的新查询必须保留来源和生成版本，首期默认先进入可审查查询计划，不静默扩大搜索范围。
+
+### P2.4 项目研究配置
+
+在 `ProjectDefinition` 增加类型化 `ProjectResearchConfig`，项目 YAML 只保存配置和引用，不保存高频论文状态。建议结构：
+
+```yaml
+research:
+  profile: profiles/example_gis_agent.yaml
+  sources:
+    - arxiv
+    - semantic_scholar
+  cadence: manual
+  max_candidates: 100
+  deep_read_limit: 5
+  auto_generate_queries: true
+  require_query_review: true
+  require_plan_writeback_approval: true
+  track_overrides: []
+```
+
+配置规则：
+
+- `ResearchProfile` 继续保存跨项目可复用的研究领域、研究问题、关键词、排除词、学者和会议。
+- `ProjectResearchConfig` 只描述该项目使用哪个画像、启用哪些来源、预算、运行频率和审批策略。
+- 项目文档和进展审计生成动态上下文，不复制回画像形成双向同步。
+- P2 文件模式下的动态状态写入 `reports/workbench/projects/{project_id}/papers/`；M3 迁移后由 SQLite 保存，原文件作为可导入 Artifact 保留。
+
+### P2.5 搜索扩面与 QuerySpec
+
+将当前从平铺关键词自动生成少量查询的方式升级为“人工 Track 为主、自动补充为辅”。每个 Track 至少包括：
+
+```yaml
+- id: runtime_reliability
+  name: 智能体可靠性、审计与可复现性
+  description: 错误分类、恢复、重规划、运行证据和实验复现
+  related_rqs: [RQ2, RQ3]
+  queries:
+    - terms: "agent recovery OR replanning OR self-healing"
+      suffix: "workflow OR execution"
+      categories: [cs.AI, cs.SE]
+    - terms: "audit trail OR provenance"
+      suffix: "agent OR AI workflow"
+      categories: [cs.AI, cs.SE, cs.DB]
+```
+
+`QuerySpec` 至少记录：`id`、`track_id`、`source`、`query`、`categories`、`date_window`、`max_results`、`priority`、`provenance`、`profile_version` 和 `project_context_version`。
+
+来源优先顺序：
+
+1. arXiv：近期预印本、分类和日期窗口，补齐 User-Agent、重试、指数退避、分页、查询级失败隔离和限速诊断。
+2. Semantic Scholar：标题/摘要搜索、引用信息、相似论文和引用链；首期先稳定现有搜索，再开放图扩展。
+3. OpenAlex：只有在 arXiv/Semantic Scholar 对期刊、会议或历史论文覆盖不足的标注集上证明有收益后加入。
+4. Crossref：优先作为 DOI、出版物和期刊元数据补全源，不直接承担主要语义搜索。
+
+搜索预算按用途分配，建议初始比例为：长期核心 Track 60%、当前里程碑和阻塞问题 30%、探索性/竞争情报 10%。比例是可配置起点，必须通过 M5 标注集评测调整，不写死为领域真理。
+
+### P2.6 SearchIntent 与动态项目上下文
+
+新增 JSON 可序列化协议：
+
+```text
+ProjectResearchContext
+  project_id
+  project_revision
+  profile_id/profile_version
+  overall_goal
+  research_questions
+  active_milestones
+  next_actions
+  current_risks
+  evidence_gaps
+  source_refs
+
+SearchIntent
+  id
+  project_id
+  type
+  summary
+  query_terms
+  expected_evidence_types
+  related_rq_ids
+  related_milestone_ids
+  related_risk_ids
+  priority
+  source_refs
+  context_version
+```
+
+动态意图生成遵循以下规则：
+
+- 只从项目 YAML、已配置 Markdown 文档、最近进展审计和用户明确输入中提取上下文。
+- 每个意图必须能回到项目目标、里程碑、下一步行动、风险或证据缺口，不能只记录模型生成理由。
+- 项目文档中的提示词、网页内容和论文内容均是不可信数据，不能指示系统修改项目或扩大权限。
+- 同一意图在项目上下文未变化时使用内容哈希去重；画像、Prompt、模型或项目修订变化时允许重新评审。
+- 自动生成的新意图首期默认 `proposed`；用户批准后才能成为稳定周期查询。阻塞问题的临时查询可以在明确预算内单次运行，但必须显示来源和范围。
+
+### P2.7 论文身份、项目关联和已见状态
+
+论文元数据是全局实体，项目相关性是项目级实体。不得继续使用单一全局“已见”状态决定所有项目是否跳过某篇论文。
+
+P2 文件模式先定义兼容协议，M3 再迁入 Repository：
+
+```text
+PaperIdentity
+  source / canonical_id / version / doi / title_hash
+
+ProjectPaperLink
+  project_id / paper_identity
+  status: discovered | shortlisted | rejected | saved | promoted | needs_review
+  matched_intent_ids
+  matched_track_ids
+  matched_rq_ids
+  matched_milestone_ids
+  evidence_utility
+  relevance / urgency / novelty / review_confidence
+  profile_version / project_context_version / prompt_version / model_version
+```
+
+去重规则：
+
+- DOI、来源 ID 和规范化标题用于硬身份合并；arXiv 基础 ID 与版本分别记录，不能把新版本永久当作已处理旧内容。
+- 语义去重用于发现近似工作、扩展版和重复发布，不取代来源身份。
+- 同一论文可以对项目 A 已拒绝、对项目 B 待精读；项目状态互不覆盖。
+- 所有已处理候选均记录状态，避免低相关论文每天重复消耗 Embedding 和 LLM；项目上下文或评审版本变化时允许受控重评。
+- 多条查询命中同一论文时合并全部 Track、意图和查询来源，不保留“先命中的唯一 Track”。
+
+### P2.8 分层评分与全文分析
+
+候选筛选采用多轴结果，不把所有判断压成一个不可解释的总分：
+
+- `project_relevance`：与总体目标和研究问题的相关性。
+- `milestone_relevance`：与当前阶段、下一步行动或阻塞问题的相关性。
+- `evidence_utility`：method、dataset、baseline、metric、background、counterexample、competitor 或 none。
+- `novelty`：相对项目已有论文和知识库的新增信息。
+- `urgency`：是否直接影响当前里程碑或风险处置。
+- `review_confidence`：模型对上述判断的置信度，不表示论文结论为真。
+
+执行顺序：确定性负向门禁和身份去重 -> Embedding 粗排 -> 批量 LLM 语义评审 -> 边界候选深评。Embedding 应批量计算并缓存，避免去重和 L1 排序为同一候选重复请求。
+
+高价值候选进入深度分析前必须先尝试获取全文。分析字段至少包括：问题、方法、实验、局限、项目对比、关联 RQ、关联里程碑、可复用资源、引用位置建议和后续行动建议；每个事实性字段必须附带 `evidence_scope`、`evidence_refs` 和 `confidence`。只有摘要时不得给出摘要未包含的具体模型、数据集、基线、数值结果或章节号。
+
+### P2.9 项目影响建议与审批写回
+
+新增 `ProjectImpactSuggestion`：
+
+```text
+id
+project_id
+paper_identity
+type: link_evidence | create_next_action | create_risk | propose_experiment | update_search_intent
+target_id
+summary
+rationale
+evidence_refs
+confidence
+status: proposed | accepted | rejected | applied
+created_by_run
+```
+
+允许自动执行的操作仅限于生成项目级论文关联、更新覆盖矩阵和保存待审查建议。以下操作必须复用现有计划分析的“预览 diff -> 用户选择 -> 应用”模式：
+
+- 新增或修改下一步行动。
+- 新增风险、实验或里程碑建议。
+- 修改稳定搜索 Track 或周期查询。
+- 将论文永久晋升到知识库。
+- 修改项目 YAML、项目文档或历史报告。
+
+写回失败时建议保留为 `proposed/needs_review`，不得因为 UI 或文件写入失败丢失论文证据和用户已做出的选择。
+
+### P2.10 Workbench 项目研究视图
+
+在项目详情增加 `Research` 页签，优先完成以下工作流：
+
+- 从选中项目直接运行论文雷达，不再重复选择画像和项目路径。
+- 显示本次搜索意图、来源、预算、命中数量、去重数量、已见跳过和失败查询。
+- 显示“今日发现”“当前里程碑相关”“待全文分析”“已保存”“已拒绝”和“待审批建议”。
+- 提供 RQ/里程碑 x method/dataset/baseline/metric/background/counterexample 覆盖矩阵。
+- 论文行提供熟悉的命令操作：保存、忽略、精读、关联到项目节点、提出实验、加入知识库；不使用解释性大段帮助文本。
+- 项目 Overview 显示研究缺口和待处理建议数量，但不把论文数量或模型评分包装成真实项目进展。
+
+### P2.11 实施顺序、验收与回滚
+
+实施顺序：
+
+1. 定义 `ProjectResearchConfig`、`ProjectResearchContext`、`SearchIntent`、`ProjectPaperLink` 和 `ProjectImpactSuggestion` 契约及离线夹具。
+2. 让 `/api/papers/inbox` 和对应服务入口接受 `project_id`，解析项目绑定画像，并将产物、已见状态和缓存按项目隔离。
+3. 为研究画像增加 Track/QuerySpec 兼容字段；现有平铺关键词转换成默认 Track，保持旧 Profile 可用。
+4. 稳定 arXiv/Semantic Scholar 的分页、时间窗口、批量处理、失败隔离、诊断和查询来源合并。
+5. 从项目计划和审计生成可审查 SearchIntent，并建立多轴语义评审和项目关联。
+6. 将 P1 全文提取和章节定位接入高价值论文分析，生成证据化 ProjectImpactSuggestion。
+7. 增加项目 Research 页签和审批写回流程。
+8. 完成离线标注、真实来源冒烟、跨项目状态隔离和安全回归后关闭 P2；随后进入 M3 持久化迁移。
+
+P2 退出标准：
+
+- 已登记项目可以直接运行论文雷达，项目、画像、输出和状态关联明确。
+- 至少两个 Track 可以各使用多条人工 QuerySpec，并能报告查询级召回和失败情况。
+- arXiv 与 Semantic Scholar 任一来源失败时另一来源仍可完成，失败不会伪装为空结果。
+- 同一论文在两个项目中拥有独立状态；同一项目重复运行不会无条件重复评审稳定拒绝项。
+- 候选能关联至少一个 SearchIntent，并在适用时关联 RQ、里程碑、风险或证据缺口。
+- 高价值论文的深度事实字段来自摘要或全文 EvidenceRef；无证据字段保持未知，不强制补全。
+- 项目影响建议可以预览、接受和拒绝；未确认建议不会修改项目计划或永久知识库。
+- 项目 Research 视图不出现嵌套卡片、文本溢出或状态混淆，桌面和移动视口均通过浏览器截图验证。
+- 离线测试覆盖跨项目已见状态、查询合并、来源失败、模型失败、全文缺失、Prompt Injection、审批绕过和兼容 Profile。
+- 建立至少 100 篇候选的人工标注集，报告 `recall@k`、`precision@k`、重复处理率、无依据分析率、Token、延迟和来源错误率；P2 的搜索扩面不能以显著增加无依据结论为代价。
+
+回滚策略：P2 通过显式功能开关启用。旧的全局 Profile 论文 inbox 和 promote 入口继续可用一个兼容周期；项目级产物均为新增目录和可导入 JSON，不覆盖旧 inbox。若项目上下文生成或项目写回不稳定，关闭动态意图和写回，只保留人工 Track、项目隔离和论文关联。M3 迁移验证通过前不删除文件状态。
+
 ## 7. M3：持久运行时与初始化迁移
 
 ### 7.1 目标
 
-任务、事件、审批和 Checkpoint 在进程重启后可恢复，运行数据与源码目录解耦，同时保持本地单机体验。
+任务、事件、审批和 Checkpoint 在进程重启后可恢复，运行数据与源码目录解耦，同时保持本地单机体验。P2 已验证的项目研究配置继续由 YAML 管理；论文身份、项目论文关联、搜索意图、搜索运行和候选状态在 M3 迁入 SQLite，P2 的文件状态只作为单项目/单进程过渡方案。
 
 ### 7.2 本地目录
 
@@ -961,8 +1475,15 @@ CONFLUX_HOME/
 - `workflow_versions`
 - `plugin_versions`
 - `index_versions`
+- `papers`
+- `paper_versions`
+- `project_papers`
+- `project_research_snapshots`
+- `search_intents`
+- `search_runs`
+- `search_run_candidates`
 
-新增 `RunStore`、`EventStore`、`ApprovalStore`、`ArtifactStore`、`JobQueue` 和 `CheckpointAdapter`。项目/画像在本地模式继续由 YAML Repository 管理，SQLite 只保存路径、哈希和运行关联，不做双向同步。
+新增 `RunStore`、`EventStore`、`ApprovalStore`、`ArtifactStore`、`PaperStore`、`ProjectPaperStore`、`SearchIntentStore`、`SearchRunStore`、`JobQueue` 和 `CheckpointAdapter`。项目/画像及其研究配置在本地模式继续由 YAML Repository 管理，SQLite 保存论文、动态关联、状态、路径、哈希、版本和运行关系，不反向复制项目配置形成双写。
 
 ### 7.4 运行时改造
 
@@ -971,6 +1492,8 @@ CONFLUX_HOME/
 - 使用 SQLite 租约队列记录状态、取消、重试、幂等键和心跳。
 - SSE 从 EventStore 读取，不依赖进程内 `_EventLog`。
 - Artifact 使用内容哈希和来源 Run/Step 关联。
+- P2 文件模式的项目论文关联、SearchIntent 和已见状态通过 Repository 适配器迁移；同一论文的全局身份与各项目状态分离。
+- 周期论文雷达复用持久 Job、租约、幂等键、心跳和审批，不单独建设第二套调度器。
 - Checkpoint 接入 SQLite；若 LangGraph 版本不兼容，先实现可恢复快照并记录限制。
 
 ### 7.5 初始化、迁移和诊断
@@ -993,6 +1516,8 @@ conflux import-legacy [--source <path>] [--dry-run]
 - `migrate --dry-run` 显示版本和对象变化。
 - `doctor` 识别权限、数据库、模型、Embedding 和索引版本问题。
 - Legacy 导入保留路径、哈希、来源和用户确认状态。
+- P2 项目级论文状态迁移后，跨项目关联数量、接受/拒绝状态、SearchIntent 来源和审批状态与迁移前一致。
+- 同一项目同一上下文版本的周期任务具备幂等性；进程中断后不会重复提交论文入库或项目写回。
 - 本地模式不需要 Postgres、Redis 或对象存储。
 
 ### 7.7 回滚
@@ -1044,7 +1569,9 @@ conflux import-legacy [--source <path>] [--dry-run]
 ### 9.2 评测方法
 
 - 建立小规模人工标注集：查询、候选论文/搜索结果、相关性、研究价值和证据质量。
+- 在 P2 的项目级候选集中标注 SearchIntent 命中、里程碑/RQ 关联、证据用途、无依据分析和项目行动建议可接受性。
 - 计算 `precision@k`、`recall@k`、`NDCG@k`、边界候选一致性和理由完整性。
+- 计算搜索面增益、稳定拒绝项重复处理率、跨项目状态隔离正确率、全文分析证据覆盖率和无依据字段率。
 - 对比旧确定性评分、LLM 批量评审、LLM 深评和混合策略。
 - 记录模型、Prompt、画像、候选哈希、缓存、Token、延迟和成本。
 - 对工作流、插件和模型做最小消融矩阵。
@@ -1058,6 +1585,7 @@ conflux import-legacy [--source <path>] [--dry-run]
 - LLM 评审结构化输出成功率 100%；失败样本必须为 `unreviewed`。
 - 人工标注集上主要指标相对 M0 不下降；下降时必须记录适用场景和调整方案。
 - 高价值、无关和边界样本都有可解释输出。
+- 相对 P2 基线扩大搜索面后，目标 Track 的召回有可测提升，且无依据分析率不升高。
 - 至少两个互补扩展通过 SDK 契约测试，其中至少一个不是纯数据源连接器。
 - 默认使用离线 FakeModel 或录制响应；真实 API 评测必须显式开启。
 - 评测同时报告质量、成本和延迟，不以报告长度或 Agent 数量判定成功。
@@ -1138,7 +1666,7 @@ conflux import-legacy [--source <path>] [--dry-run]
 
 执行方案在启动 M1 前需要确认：
 
-1. 是否同意 M1 -> M2 -> P0 -> P1 -> M3 -> M4 -> M5 的顺序，M6 只条件触发。
+1. 是否同意 M1 -> M2 -> P0 -> P1 -> P1.5 -> P2 -> M3 -> M4 -> M5 的顺序，M6 只条件触发。
 2. 是否接受 Pydantic v2 只作为 SDK 边界依赖，核心内部保留现有轻量类型。
 3. 是否接受 LLM 评审失败使用 `unreviewed`，不回退为确定性评分自动入库。
 4. 是否接受 M3 使用本地 SQLite，不提前引入 Postgres/Redis。
@@ -1146,7 +1674,7 @@ conflux import-legacy [--source <path>] [--dry-run]
 6. 是否接受 M5 使用人工标注集和消融评测判断 LLM 评审收益。
 7. 是否接受每阶段保留显式回滚、问题分类和轻量架构复盘。
 
-M1/M2/P0/P1 已完成验收。M3 的启动闸门已经通过，但本轮未开始 SQLite、持久 Job、初始化或迁移，也未提前实施 M4-M6。每完成一个阶段，更新本文档状态、验收结果和下一阶段范围。
+M1/M2/P0/P1 已完成验收。本轮已按确认范围完成 P1.5 的实现和离线合同验收；真实跨领域内容对标仍待预算确认，完成后再决定是否解除 P2 启动闸门，随后由 M3 统一持久化。当前未开始 P2、SQLite、持久 Job、初始化或迁移，也未提前实施 M4-M6。每完成一个阶段，更新本文档状态、验收结果和下一阶段范围。
 
 P0 启动前确认（已完成）：
 
@@ -1164,3 +1692,18 @@ P1 启动前确认（已完成）：
 16. 是否接受 P1 优先修复全文/RAG、Web 正文、声明融合、FactCheck 修订和三源消融，M3 持久化继续暂缓。
 17. 是否接受 P1 的首要目标是依靠 Model、RAG、Web 三源，使 Deep 档回答质量、广度和深度向 GPT Deep Research 看齐；置信度、成本和延迟是约束与解释层，不能通过删减核心内容来换取达标。
 18. 是否接受正文只使用 `[1]`、`[2]`、`[1,3]` 等数字引用，完整来源、定位和实际引用内容统一进入正文后的“参考文献与证据”，且“置信度附录”必须是报告最后一个顶层章节。
+
+P1.5 启动前确认（已完成；本轮实施范围按以下确认执行）：
+
+19. 已接受并实现：P1.5 以通用问题原型和动态领域地图替代继续增加领域专用查询与报告模板；离线规划和无领域词表夹具通过。
+20. 已接受并实现：Deep 档根据问题复杂度动态扩大或收缩研究维度、正文证据、抓取、缺口迭代和章节预算，同时保留全局成本与超时硬上限；动态预算及实际调度硬上限离线通过。
+21. 已接受并实现：RAG 为空时由 Web 正文证据和明确标注的 Model 分析继续完成报告，并以独立来源故障矩阵作为退出闸门；来源降级和引用边界离线通过。
+22. 已接受并实现：报告章节由 `ReportOutline/SectionContract` 动态生成，并以追溯和丰富度质量门验收；跨领域真实盲评仍待预算批准，不能在本轮标记为已通过。
+
+P2 启动前确认（P1.5 验收后实施）：
+
+23. 是否接受 P2 在 P1.5 后、M3 前完成项目绑定、Track 搜索扩面、项目级论文关联和审批建议的文件模式最小闭环。
+24. 是否接受项目 YAML 只保存研究配置，论文身份、搜索运行和项目论文状态在 P2 暂存为项目级 JSON Artifact，并在 M3 单向迁入 SQLite。
+25. 是否接受人工批准的 Track/QuerySpec 作为稳定搜索主干，模型生成的动态 SearchIntent 默认需要审查且必须保留项目来源。
+26. 是否接受论文深度分析必须区分摘要与全文证据，缺少证据时保留未知，不照搬“字段必须充实填写”的摘要推断方式。
+27. 是否接受论文可以自动关联项目和生成覆盖矩阵，但修改计划、创建正式行动、登记风险和永久知识入库仍需明确审批。
