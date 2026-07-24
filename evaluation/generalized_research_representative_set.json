@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "rubric_scale": "1-5",
+  "cases": [
+    {"id":"gis-limitations","query":"GIS处理自动化研究目前有哪些瓶颈？","domain":"GIS/GeoAI","category":"broad_review_or_limitations","rag_condition":"available"},
+    {"id":"software-agent-limitations","query":"当前自主编码智能体进入生产软件工程的主要瓶颈是什么？","domain":"software_engineering","category":"broad_review_or_limitations","rag_condition":"available"},
+    {"id":"policy-ai-governance","query":"高影响公共决策中的生成式AI治理目前存在哪些主要制度与实施缺口？","domain":"policy_governance","category":"broad_review_or_limitations","rag_condition":"available"},
+    {"id":"gis-architecture-design","query":"如何设计一个可审计、可恢复的LLM驱动GIS自动化架构？","domain":"GIS/GeoAI","category":"technical_comparison_or_design","rag_condition":"available"},
+    {"id":"materials-method-comparison","query":"材料发现中图神经网络与等变神经网络的证据、适用边界和计算取舍有何差异？","domain":"materials_energy","category":"technical_comparison_or_design","rag_condition":"available"},
+    {"id":"data-lakehouse-comparison","query":"湖仓一体、数据网格与传统数据仓库在治理和实时分析上的机制与取舍是什么？","domain":"data_systems","category":"technical_comparison_or_design","rag_condition":"available"},
+    {"id":"clinical-ai-causality","query":"临床决策支持中的自动化偏差通过哪些机制影响医生判断，现有证据强度如何？","domain":"medicine_life_science","category":"causal_mechanism_or_evidence_review","rag_condition":"available"},
+    {"id":"battery-degradation-causality","query":"快充通过哪些机制加速锂离子电池退化，不同实验条件下的证据是否一致？","domain":"materials_energy","category":"causal_mechanism_or_evidence_review","rag_condition":"available"},
+    {"id":"recent-geoai-agents","query":"截至2026年，GeoAI智能体在真实地理处理任务上的验证进展和未决问题是什么？","domain":"GIS/GeoAI","category":"recent_status","rag_condition":"available"},
+    {"id":"recent-clinical-agents","query":"截至2026年，临床LLM智能体的前瞻性验证与监管状态如何？","domain":"medicine_life_science","category":"recent_status","rag_condition":"available"},
+    {"id":"empty-rag-policy","query":"当前主要司法辖区对基础模型透明度义务有哪些可核验差异？","domain":"policy_governance","category":"rag_empty_web_available","rag_condition":"empty"},
+    {"id":"empty-rag-security","query":"当前软件供应链签名与构建溯源标准的实施差异和剩余缺口是什么？","domain":"software_engineering","category":"rag_empty_web_available","rag_condition":"empty"}
+  ]
+}
