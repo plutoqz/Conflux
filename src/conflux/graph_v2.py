@@ -673,7 +673,37 @@ def synthesize_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
     sections = [SectionResult.from_dict(item) for item in section_results_raw]
 
     if not sections:
-        return {"_pipeline_stage": "synthesize_skipped", "_direct_answer": "", "_cross_synthesis": ""}
+        # No sections were generated (all timed out or evidence was empty).
+        # Produce a direct answer from model background knowledge, clearly
+        # marked as analysis judgment.
+        fallback_answer = ""
+        if _model_available(state, minimum=15.0):
+            fallback_prompt = (
+                f"请基于你的背景知识，直接回答以下研究问题。\n\n"
+                f"研究问题：{core_question}\n\n"
+                f"注意：本次检索未获得有引用价值的证据。请用（分析判断）标注你的回答，"
+                f"诚实地说明哪些结论有不确定性，不要编造引用。\n\n"
+                f"请用 300-600 字给出当前已知的最佳答案。"
+            )
+            try:
+                fallback_answer = _invoke_text(
+                    model,
+                    "你是一名研究分析师。检索失败时，基于背景知识给出诚实的分析判断。",
+                    fallback_prompt,
+                )
+            except Exception:
+                pass
+            if not fallback_answer:
+                fallback_answer = (
+                    f'对"{core_question}"的回答涉及多个方面，'
+                    '但本轮检索未能取得足以形成外部事实结论的正文证据。'
+                    '建议补充检索或调整查询词后重新提问。（分析判断）'
+                )
+        return {
+            "_pipeline_stage": "synthesize",
+            "_direct_answer": fallback_answer or "",
+            "_cross_synthesis": "",
+        }
 
     # 构建更丰富的输入：每节前 500 字正文 + 结构化摘要
     summary_parts = []
