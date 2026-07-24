@@ -1,0 +1,89 @@
+[
+  {
+    "case_id": "gis-limitations",
+    "query": "GIS处理自动化研究目前有哪些瓶颈？",
+    "scores": {
+      "factual_citation_match": 3.5,
+      "scope_and_coverage": 3.0,
+      "mechanism_rigor": 4.0,
+      "quantitative_and_implementation_detail": 2.0,
+      "comparative_synthesis": 3.5,
+      "decision_value": 3.5
+    },
+    "p1_comparison": {
+      "breadth": 2,
+      "depth": 2,
+      "evidence_correctness": 2,
+      "synthesis_insight": 2
+    },
+    "p1_scores": {
+      "factual_citation_match": 2.0,
+      "scope_and_coverage": 1.5,
+      "mechanism_rigor": 1.5,
+      "quantitative_and_implementation_detail": 1.0,
+      "comparative_synthesis": 1.5,
+      "decision_value": 1.5
+    },
+    "overall_winner": "A",
+    "v2_advantage": "报告A对GIS自动化瓶颈的机制分析（如泛化能力、可解释性、小样本学习的系统性根源）深入且结构化，引用了多篇相关文献，提供了可操作的洞察。",
+    "p15_advantage": "报告B在置信度评估和证据边界说明上较为规范，但内容过于简略，缺乏实质性分析。"
+  },
+  {
+    "case_id": "software-agent-limitations",
+    "query": "当前自主编码智能体进入生产软件工程的主要瓶颈是什么？",
+    "scores": {
+      "factual_citation_match": 3.5,
+      "scope_and_coverage": 3.0,
+      "mechanism_rigor": 4.0,
+      "quantitative_and_implementation_detail": 3.0,
+      "comparative_synthesis": 3.5,
+      "decision_value": 3.5
+    },
+    "p1_comparison": {
+      "breadth": 2,
+      "depth": 2,
+      "evidence_correctness": 2,
+      "synthesis_insight": 2
+    },
+    "p1_scores": {
+      "factual_citation_match": 1.0,
+      "scope_and_coverage": 1.5,
+      "mechanism_rigor": 1.0,
+      "quantitative_and_implementation_detail": 1.0,
+      "comparative_synthesis": 1.5,
+      "decision_value": 1.0
+    },
+    "overall_winner": "A",
+    "v2_advantage": "报告A对跨文件上下文建模、遗留代码隐式契约、语义依赖等核心瓶颈进行了有引用支撑的机制性分析，提供了可操作的洞察。",
+    "p15_advantage": "报告B明确标注了证据不足和待核验项，在方法论上诚实透明，但未能产出实质性内容。"
+  },
+  {
+    "case_id": "empty-rag-policy",
+    "query": "当前主要司法辖区对基础模型透明度义务有哪些可核验差异？",
+    "scores": {
+      "factual_citation_match": 1.0,
+      "scope_and_coverage": 1.0,
+      "mechanism_rigor": 1.0,
+      "quantitative_and_implementation_detail": 1.0,
+      "comparative_synthesis": 1.0,
+      "decision_value": 1.0
+    },
+    "p1_comparison": {
+      "breadth": -2,
+      "depth": -2,
+      "evidence_correctness": 0,
+      "synthesis_insight": -2
+    },
+    "p1_scores": {
+      "factual_citation_match": 1.5,
+      "scope_and_coverage": 3.0,
+      "mechanism_rigor": 2.5,
+      "quantitative_and_implementation_detail": 1.5,
+      "comparative_synthesis": 2.0,
+      "decision_value": 2.0
+    },
+    "overall_winner": "B",
+    "v2_advantage": "报告A结构更简洁，但内容几乎完全缺失，无实质分析价值。",
+    "p15_advantage": "报告B系统性地识别了多个比较维度（如触发阈值、执法机制、披露对象），并提供了初步的跨辖区分析框架，尽管缺乏外部证据支撑，但分析思路更完整。"
+  }
+]
