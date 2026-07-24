@@ -430,7 +430,11 @@ def _search_web(
             academic_results = _search_academic_sources(academic_queries, max_results=max_results)
         except Exception as exc:
             search_errors.append(f"{type(exc).__name__}: {exc}")
-    results = _merge_web_results(_official_seed_results(query), academic_results)
+    results: list[dict] = []
+    if bool(get("research.deterministic_seeds")):
+        results = _merge_web_results(_official_seed_results(query), academic_results)
+    else:
+        results = list(academic_results)
     # Scholarly APIs are discovery channels, not a substitute for general Web
     # retrieval. They often return relevant titles whose landing pages cannot be
     # fetched, while official documentation or repositories remain accessible.

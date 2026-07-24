@@ -111,6 +111,8 @@ research:
   enable_l4: true
   max_deep_questions: 2
   max_rewrite_attempts: 2
+  # Deterministic seed URLs — false in V2 main path, true to re-enable for P1.5 fallback.
+  deterministic_seeds: false
   generalization:
     enabled: true
     min_external_evidence_per_dimension: 1

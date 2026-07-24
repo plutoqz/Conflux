@@ -1023,40 +1023,6 @@ def discover_sub_questions(report: str, model) -> list[str]:
 
 # ── L5 Goal Loop ──────────────────────────────────────────
 
-def process_user_feedback(
-    query: str,
-    report: str,
-    feedback: str,
-    model: BaseChatModel,
-) -> str:
-    """L5 Goal Loop：用户反馈驱动的再调研
-
-    用户对报告不满意 → 提取反馈中的修正点 → 生成改进版报告。
-    对应架构文档 L5 — 用户反馈 → 修正/深化 → 继续。
-    """
-    if not feedback.strip():
-        return report
-
-    prompt = f"""用户对以下调研报告提出了反馈。请根据反馈修正报告。
-
-原始问题：{query}
-
-原报告：
-{report[:3000]}
-
-用户反馈：
-{feedback}
-
-请输出改进后的完整报告（保持原格式）。"""
-
-    messages = [
-        SystemMessage(content="你是调研报告编辑。根据用户反馈修正报告，保持客观准确。"),
-        HumanMessage(content=prompt),
-    ]
-    response = model.invoke(messages)
-    return str(response.content)
-
-
 def deeper_research_node(
     state: MultiAgentState,
     *,
