@@ -167,6 +167,9 @@ class CitationEntry:
     number: int
     title: str
     source_type: str
+    authors: list[str] = field(default_factory=list)
+    organization: str = ""
+    publication_year: str = ""
     identifier: str = ""
     url: str = ""
     location: str = ""
@@ -257,6 +260,47 @@ DimensionCoverageStatus = Literal[
     "conflicting",
     "out_of_scope",
 ]
+ActionCoverageStatus = Literal[
+    "covered",
+    "model_analysis",
+    "conflicting",
+    "gap",
+    "out_of_scope",
+]
+
+
+@dataclass(slots=True)
+class ScopeContract:
+    """Stable research-object boundary carried through every P1.5 stage."""
+
+    subject: str
+    task: str = ""
+    scope_inclusions: list[str] = field(default_factory=list)
+    scope_exclusions: list[str] = field(default_factory=list)
+    time_scope: str = "unspecified"
+    audience: str = "researcher"
+    required_entities: list[str] = field(default_factory=list)
+    ambiguities: list[str] = field(default_factory=list)
+    original_query: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any], *, query: str = "") -> "ScopeContract":
+        original_query = str(payload.get("original_query") or query or "").strip()
+        subject = str(payload.get("subject") or original_query).strip()
+        return cls(
+            subject=subject,
+            task=str(payload.get("task") or "").strip(),
+            scope_inclusions=_string_list(payload.get("scope_inclusions")),
+            scope_exclusions=_string_list(payload.get("scope_exclusions")),
+            time_scope=str(payload.get("time_scope") or "unspecified").strip(),
+            audience=str(payload.get("audience") or "researcher").strip(),
+            required_entities=_string_list(payload.get("required_entities")),
+            ambiguities=_string_list(payload.get("ambiguities")),
+            original_query=original_query,
+        )
 
 
 @dataclass(slots=True)
@@ -335,6 +379,8 @@ class ResearchDimension:
     child_ids: list[str] = field(default_factory=list)
     questions_to_answer: list[str] = field(default_factory=list)
     expected_evidence_types: list[str] = field(default_factory=list)
+    required_actions: list[str] = field(default_factory=list)
+    cross_validation_required: bool | None = None
     importance: float = 0.5
     current_coverage: str = "evidence_scarce"
     conflicts: list[str] = field(default_factory=list)
@@ -359,6 +405,12 @@ class ResearchDimension:
             ),
             expected_evidence_types=_string_list(
                 payload.get("expected_evidence_types") or payload.get("evidence_types")
+            ),
+            required_actions=_string_list(payload.get("required_actions")),
+            cross_validation_required=(
+                None
+                if payload.get("cross_validation_required") is None
+                else _bool_value(payload.get("cross_validation_required"))
             ),
             importance=_importance_float(payload.get("importance"), default=0.5),
             current_coverage=str(payload.get("current_coverage") or "evidence_scarce"),
@@ -406,12 +458,44 @@ class DomainMap:
 
 
 @dataclass(slots=True)
+class CoverageAction:
+    action: str
+    status: ActionCoverageStatus = "gap"
+    evidence_ids: list[str] = field(default_factory=list)
+    external_evidence_ids: list[str] = field(default_factory=list)
+    model_evidence_ids: list[str] = field(default_factory=list)
+    citation_refs: list[str] = field(default_factory=list)
+    high_risk: bool = False
+    gap_reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "CoverageAction":
+        status = str(payload.get("status") or "gap")
+        if status not in {"covered", "model_analysis", "conflicting", "gap", "out_of_scope"}:
+            status = "gap"
+        return cls(
+            action=str(payload.get("action") or "").strip(),
+            status=status,  # type: ignore[arg-type]
+            evidence_ids=_string_list(payload.get("evidence_ids")),
+            external_evidence_ids=_string_list(payload.get("external_evidence_ids")),
+            model_evidence_ids=_string_list(payload.get("model_evidence_ids")),
+            citation_refs=_string_list(payload.get("citation_refs")),
+            high_risk=_bool_value(payload.get("high_risk")),
+            gap_reason=str(payload.get("gap_reason") or "").strip(),
+        )
+
+
+@dataclass(slots=True)
 class CoverageDimension:
     dimension_id: str
     status: DimensionCoverageStatus = "evidence_scarce"
     body_evidence: bool = False
     covered_actions: list[str] = field(default_factory=list)
     missing_actions: list[str] = field(default_factory=list)
+    action_coverage: list[CoverageAction] = field(default_factory=list)
     high_authority_source: bool = False
     independent_source_count: int = 0
     cross_validation_required: bool = False
@@ -439,6 +523,11 @@ class CoverageDimension:
             body_evidence=_bool_value(payload.get("body_evidence")),
             covered_actions=_string_list(payload.get("covered_actions")),
             missing_actions=_string_list(payload.get("missing_actions")),
+            action_coverage=[
+                CoverageAction.from_dict(item)
+                for item in payload.get("action_coverage") or []
+                if isinstance(item, dict)
+            ],
             high_authority_source=_bool_value(payload.get("high_authority_source")),
             independent_source_count=max(0, _int_value(payload.get("independent_source_count"))),
             cross_validation_required=_bool_value(payload.get("cross_validation_required")),
@@ -644,6 +733,46 @@ class SectionDraft:
             suggested_length=max(0, _int_value(payload.get("suggested_length"))),
             synthesis_priority=_bounded_float(payload.get("synthesis_priority"), default=0.5),
             verified=_bool_value(payload.get("verified")),
+        )
+
+
+@dataclass(slots=True)
+class SectionEvidencePack:
+    section_id: str
+    questions: list[str] = field(default_factory=list)
+    required_actions: list[str] = field(default_factory=list)
+    direct_evidence: list[dict[str, Any]] = field(default_factory=list)
+    boundary_evidence: list[dict[str, Any]] = field(default_factory=list)
+    counterexamples: list[dict[str, Any]] = field(default_factory=list)
+    verified_claims: list[SectionClaim] = field(default_factory=list)
+    distinctions: list[str] = field(default_factory=list)
+    mitigations: list[str] = field(default_factory=list)
+    unresolved_gaps: list[str] = field(default_factory=list)
+    forbidden_claims: list[str] = field(default_factory=list)
+    allowed_citations: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "SectionEvidencePack":
+        return cls(
+            section_id=str(payload.get("section_id") or "").strip(),
+            questions=_string_list(payload.get("questions")),
+            required_actions=_string_list(payload.get("required_actions")),
+            direct_evidence=[dict(item) for item in payload.get("direct_evidence") or [] if isinstance(item, dict)],
+            boundary_evidence=[dict(item) for item in payload.get("boundary_evidence") or [] if isinstance(item, dict)],
+            counterexamples=[dict(item) for item in payload.get("counterexamples") or [] if isinstance(item, dict)],
+            verified_claims=[
+                SectionClaim.from_dict(item, index=index)
+                for index, item in enumerate(payload.get("verified_claims") or [])
+                if isinstance(item, dict)
+            ],
+            distinctions=_string_list(payload.get("distinctions")),
+            mitigations=_string_list(payload.get("mitigations")),
+            unresolved_gaps=_string_list(payload.get("unresolved_gaps")),
+            forbidden_claims=_string_list(payload.get("forbidden_claims")),
+            allowed_citations=_string_list(payload.get("allowed_citations")),
         )
 
 

@@ -194,7 +194,7 @@ def test_papers_cli_promote_writes_reviewable_outputs(tmp_path):
         [
             sys.executable,
             "-m",
-            "conflux.papers",
+            "conflux.paper_ingestion.cli",
             "inbox",
             "--profile",
             "profiles/example_gis_agent.yaml",
@@ -214,7 +214,7 @@ def test_papers_cli_promote_writes_reviewable_outputs(tmp_path):
         [
             sys.executable,
             "-m",
-            "conflux.papers",
+            "conflux.paper_ingestion.cli",
             "promote",
             str(inbox_dir / "paper_inbox.json"),
             "--out-dir",

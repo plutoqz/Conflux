@@ -10,6 +10,7 @@ import os
 import queue
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from math import ceil
 from typing import Any
 
@@ -51,6 +52,38 @@ class BoundedChatModel:
             deadline_at=self._deadline_at,
             commit_reserve_seconds=self._commit_reserve_seconds,
             role=self._role,
+        )
+
+    def with_commit_reserve(
+        self,
+        commit_reserve_seconds: float,
+        *,
+        role: str | None = None,
+    ) -> "BoundedChatModel":
+        return BoundedChatModel(
+            self._model,
+            self._timeout_seconds,
+            deadline_at=self._deadline_at,
+            commit_reserve_seconds=commit_reserve_seconds,
+            role=role or self._role,
+        )
+
+    def with_max_tokens(
+        self,
+        max_tokens: int,
+        *,
+        role: str | None = None,
+    ) -> "BoundedChatModel":
+        inner = self._model
+        binder = getattr(inner, "bind", None)
+        if callable(binder):
+            inner = binder(max_tokens=max(1, int(max_tokens)))
+        return BoundedChatModel(
+            inner,
+            self._timeout_seconds,
+            deadline_at=self._deadline_at,
+            commit_reserve_seconds=self._commit_reserve_seconds,
+            role=role or self._role,
         )
 
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
@@ -97,18 +130,68 @@ class ResearchTokenBudget:
     def __init__(self, limit: int) -> None:
         self.limit = max(1, int(limit))
         self.used = 0
+        self.actual_used = 0
+        self.reserved = 0
         self._lock = threading.Lock()
+        self.telemetry: dict[str, Any] = {
+            "limit_tokens": self.limit,
+            "charged_tokens": 0,
+            "actual_tokens": 0,
+            "reserved_tokens": 0,
+            "call_count": 0,
+            "rejected_calls": 0,
+            "failed_calls": 0,
+            "preserve_clamps": 0,
+            "roles": {},
+        }
 
-    def ensure_available(self, required: int = 1) -> None:
+    def reserve(
+        self,
+        required: int = 1,
+        *,
+        preserve: int = 0,
+        role: str = "model",
+    ) -> int:
         with self._lock:
             required = max(1, int(required))
-            if self.used + required > self.limit:
+            preserve = max(0, int(preserve))
+            if self.used + self.reserved + required + preserve > self.limit:
+                self.telemetry["rejected_calls"] += 1
+                role_stats = self._role_stats(role)
+                role_stats["rejected_calls"] += 1
+                role_stats["last_rejected_required_tokens"] = required
+                role_stats["last_rejected_preserve_tokens"] = preserve
+                role_stats["last_rejected_charged_tokens"] = self.used
                 raise RuntimeError(
                     f"research token budget exhausted: {self.used}/{self.limit}; "
-                    f"next call reserves {required} tokens"
+                    f"in-flight reservations {self.reserved}; next call reserves "
+                    f"{required} tokens with {preserve} preserved downstream"
                 )
+            self.reserved += required
+            self.telemetry["reserved_tokens"] = self.reserved
+            return required
 
-    def record(self, response: Any) -> None:
+    def release(self, reservation: int) -> None:
+        with self._lock:
+            self.reserved = max(0, self.reserved - max(0, int(reservation)))
+            self.telemetry["reserved_tokens"] = self.reserved
+
+    def ensure_available(self, required: int = 1) -> None:
+        """Compatibility check for callers that do not execute a model call."""
+
+        reservation = self.reserve(required)
+        self.release(reservation)
+
+    def record(
+        self,
+        response: Any,
+        *,
+        reservation: int = 0,
+        preserve: int = 0,
+        role: str = "model",
+        estimated_input: int = 0,
+        elapsed_ms: float = 0.0,
+    ) -> None:
         usage = getattr(response, "usage_metadata", None) or {}
         metadata = getattr(response, "response_metadata", None) or {}
         token_usage = metadata.get("token_usage") or metadata.get("usage") or {}
@@ -117,18 +200,88 @@ class ResearchTokenBudget:
             consumed = max(0, int(total or 0))
         except (TypeError, ValueError):
             consumed = 0
-        if consumed:
-            with self._lock:
-                self.used += consumed
+        with self._lock:
+            self.reserved = max(0, self.reserved - max(0, int(reservation)))
+            self.actual_used += consumed
+            maximum_charge = max(
+                0,
+                self.limit - self.used - self.reserved - max(0, int(preserve)),
+            )
+            charged = min(consumed, maximum_charge)
+            if charged < consumed:
+                self.telemetry["preserve_clamps"] += 1
+            self.used += charged
+            self.telemetry.update({
+                "charged_tokens": self.used,
+                "actual_tokens": self.actual_used,
+                "reserved_tokens": self.reserved,
+                "call_count": int(self.telemetry["call_count"]) + 1,
+            })
+            role_stats = self._role_stats(role)
+            role_stats["call_count"] += 1
+            role_stats["estimated_input_tokens"] += max(0, int(estimated_input))
+            role_stats["actual_tokens"] += consumed
+            role_stats["charged_tokens"] += charged
+            role_stats["elapsed_ms"] = round(
+                float(role_stats["elapsed_ms"]) + max(0.0, float(elapsed_ms)),
+                2,
+            )
+
+    def record_failure(
+        self,
+        *,
+        reservation: int,
+        role: str,
+        elapsed_ms: float,
+    ) -> None:
+        with self._lock:
+            self.reserved = max(0, self.reserved - max(0, int(reservation)))
+            self.telemetry["reserved_tokens"] = self.reserved
+            self.telemetry["failed_calls"] += 1
+            role_stats = self._role_stats(role)
+            role_stats["failed_calls"] += 1
+            role_stats["elapsed_ms"] = round(
+                float(role_stats["elapsed_ms"]) + max(0.0, float(elapsed_ms)),
+                2,
+            )
+
+    def _role_stats(self, role: str) -> dict[str, int | float]:
+        roles = self.telemetry["roles"]
+        key = str(role or "model")
+        if key not in roles:
+            roles[key] = {
+                "call_count": 0,
+                "rejected_calls": 0,
+                "failed_calls": 0,
+                "estimated_input_tokens": 0,
+                "actual_tokens": 0,
+                "charged_tokens": 0,
+                "elapsed_ms": 0.0,
+                "last_rejected_required_tokens": 0,
+                "last_rejected_preserve_tokens": 0,
+                "last_rejected_charged_tokens": 0,
+            }
+        return roles[key]
 
 
 class BudgetedChatModel:
     """Share one enforceable token budget across all role models in a run."""
 
-    def __init__(self, model: Any, budget: ResearchTokenBudget, *, output_reserve: int = 0) -> None:
+    def __init__(
+        self,
+        model: Any,
+        budget: ResearchTokenBudget,
+        *,
+        output_reserve: int = 0,
+        role: str = "model",
+        downstream_reserve: int = 0,
+    ) -> None:
         self._model = model
         self._budget = budget
         self._output_reserve = max(0, int(output_reserve))
+        self._role = role
+        self._downstream_reserve = max(0, int(downstream_reserve))
+        self.last_reservation: dict[str, int | str] = {}
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._model, name)
@@ -138,13 +291,94 @@ class BudgetedChatModel:
             self._model.bind_tools(tools, **kwargs),
             self._budget,
             output_reserve=self._output_reserve,
+            role=self._role,
+            downstream_reserve=self._downstream_reserve,
+        )
+
+    def with_downstream_reserve(
+        self,
+        downstream_reserve: int,
+        *,
+        role: str | None = None,
+    ) -> "BudgetedChatModel":
+        """Clone the proxy with a stage-specific downstream token floor."""
+
+        return BudgetedChatModel(
+            self._model,
+            self._budget,
+            output_reserve=self._output_reserve,
+            role=role or self._role,
+            downstream_reserve=downstream_reserve,
+        )
+
+    def with_stage_policy(
+        self,
+        *,
+        downstream_reserve: int | None = None,
+        commit_reserve_seconds: float | None = None,
+        max_output_tokens: int | None = None,
+        role: str | None = None,
+    ) -> "BudgetedChatModel":
+        inner = self._model
+        if commit_reserve_seconds is not None and hasattr(inner, "with_commit_reserve"):
+            inner = inner.with_commit_reserve(
+                commit_reserve_seconds,
+                role=role or self._role,
+            )
+        if max_output_tokens is not None and hasattr(inner, "with_max_tokens"):
+            inner = inner.with_max_tokens(max_output_tokens, role=role or self._role)
+        return BudgetedChatModel(
+            inner,
+            self._budget,
+            output_reserve=(
+                self._output_reserve
+                if max_output_tokens is None
+                else min(self._output_reserve, max(1, int(max_output_tokens)))
+            ),
+            role=role or self._role,
+            downstream_reserve=(
+                self._downstream_reserve
+                if downstream_reserve is None
+                else downstream_reserve
+            ),
         )
 
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
-        self._budget.ensure_available(self._output_reserve + _estimate_input_tokens(args, kwargs))
-        response = self._model.invoke(*args, **kwargs)
-        self._budget.record(response)
+        estimated_input = _estimate_input_tokens(args, kwargs)
+        required = self._output_reserve + estimated_input
+        self.last_reservation = {
+            "role": self._role,
+            "estimated_input_tokens": estimated_input,
+            "output_reserve_tokens": self._output_reserve,
+            "required_tokens": required,
+        }
+        reservation = self._budget.reserve(
+            required,
+            preserve=self._downstream_reserve,
+            role=self._role,
+        )
+        started_at = time.perf_counter()
+        try:
+            response = self._model.invoke(*args, **kwargs)
+        except BaseException:
+            self._budget.record_failure(
+                reservation=reservation,
+                role=self._role,
+                elapsed_ms=(time.perf_counter() - started_at) * 1000,
+            )
+            raise
+        self._budget.record(
+            response,
+            reservation=reservation,
+            preserve=self._downstream_reserve,
+            role=self._role,
+            estimated_input=estimated_input,
+            elapsed_ms=(time.perf_counter() - started_at) * 1000,
+        )
         return response
+
+
+MAX_ESTIMATED_INPUT_TOKENS = 32_000
 
 
 def _estimate_input_tokens(args: tuple[Any, ...], kwargs: dict[str, Any]) -> int:
@@ -154,11 +388,38 @@ def _estimate_input_tokens(args: tuple[Any, ...], kwargs: dict[str, Any]) -> int
     characters = 0
     for message in messages:
         content = getattr(message, "content", message)
-        characters += len(str(content or ""))
+        characters += _structured_text_length(content)
     # Mixed Chinese/English prompts typically fall between 1.5 and 4 chars per
     # token. Three is conservative enough to prevent a final-call overshoot
     # without discarding most of the useful Standard-mode budget.
-    return max(1, ceil(characters / 3))
+    # Chinese commonly approaches one token per character. Dividing by 1.5
+    # remains conservative for mixed Chinese/English prompts without restoring
+    # the runaway reservations that the hard cap prevents.
+    return min(MAX_ESTIMATED_INPUT_TOKENS, max(1, ceil(characters / 1.5)))
+
+
+def _structured_text_length(value: Any, *, depth: int = 0) -> int:
+    """Count user-visible text without expanding arbitrary object reprs."""
+
+    if value is None or depth > 8:
+        return 0
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, bytes):
+        return len(value)
+    if isinstance(value, Mapping):
+        return sum(
+            len(str(key)) + _structured_text_length(item, depth=depth + 1)
+            for key, item in value.items()
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return sum(_structured_text_length(item, depth=depth + 1) for item in value)
+    if isinstance(value, (int, float, bool)):
+        return len(str(value))
+    nested = getattr(value, "content", None)
+    if nested is not None and nested is not value:
+        return _structured_text_length(nested, depth=depth + 1)
+    return 0
 
 
 def _resolve(cfg: dict, key: str, env_var: str | None = None, default=None):
@@ -246,6 +507,7 @@ def create_research_models(
     *,
     deadline_at: float | None = None,
     commit_reserve_seconds: float | None = None,
+    preserve_stage_budgets: bool = False,
 ) -> tuple[dict[str, BaseChatModel], dict]:
     """Create the role models selected by one P1 research profile."""
 
@@ -265,6 +527,32 @@ def create_research_models(
         if commit_reserve_seconds is None
         else max(0.0, float(commit_reserve_seconds))
     )
+    stage = profile.stage_budgets
+    downstream_reserves = {
+        "planner": stage["retrieval"] + stage["analysis"] + stage["synthesis"] + stage["verification"] + stage["commit"],
+        "reranker": stage["analysis"] + stage["synthesis"] + stage["verification"] + stage["commit"],
+        "analyst": stage["synthesis"] + stage["verification"] + stage["commit"],
+        "synthesizer": stage["verification"] + stage["commit"],
+        "verifier": stage["commit"],
+    }
+    role_reserves = downstream_reserves if preserve_stage_budgets else {
+        role: reserve for role in presets
+    }
+    planner_reserve_reclaimed = 0.0
+    final_token_reserve = min(
+        max(profile.synthesizer_max_tokens * 2 + profile.verifier_max_tokens + 20_000, 24_000),
+        int(profile.token_budget * 0.45),
+    )
+    role_token_reserves = {
+        "planner": final_token_reserve,
+        "reranker": final_token_reserve,
+        "analyst": final_token_reserve,
+        "synthesizer": min(
+            profile.verifier_max_tokens + 12_000,
+            int(profile.token_budget * 0.18),
+        ),
+        "verifier": 0,
+    } if preserve_stage_budgets else {role: 0 for role in presets}
     models = {
         role: BudgetedChatModel(
             BoundedChatModel(
@@ -276,15 +564,40 @@ def create_research_models(
                 ),
                 profile.role_timeout_seconds[role],
                 deadline_at=deadline_at,
-                commit_reserve_seconds=reserve,
+                commit_reserve_seconds=role_reserves[role],
                 role=role,
             ),
             budget,
             output_reserve=profile.role_max_tokens[role],
+            role=role,
+            downstream_reserve=role_token_reserves[role],
         )
         for role, preset in presets.items()
     }
-    return models, research_model_diagnostics(profile.depth)
+    if preserve_stage_budgets and deadline_at is not None:
+        remaining = max(0.0, float(deadline_at) - time.time())
+        planner_window = min(
+            float(stage["planning"]),
+            float(profile.role_timeout_seconds["planner"]),
+        )
+        available = remaining - float(role_reserves["planner"])
+        if available < planner_window - 1.0:
+            adjusted = max(0.0, remaining - planner_window - 1.0)
+            planner_reserve_reclaimed = float(role_reserves["planner"]) - adjusted
+            role_reserves["planner"] = adjusted
+            models["planner"] = models["planner"].with_stage_policy(
+                commit_reserve_seconds=adjusted,
+                role="planner",
+            )
+    diagnostics = research_model_diagnostics(profile.depth)
+    diagnostics["role_downstream_reserve_seconds"] = role_reserves
+    diagnostics["planner_reserve_reclaimed_seconds"] = round(
+        max(0.0, planner_reserve_reclaimed), 3
+    )
+    diagnostics["role_downstream_reserve_tokens"] = role_token_reserves
+    diagnostics["max_estimated_input_tokens"] = MAX_ESTIMATED_INPUT_TOKENS
+    diagnostics["token_budget_runtime"] = budget.telemetry
+    return models, diagnostics
 
 
 def validate_embedding_credentials() -> list[str]:

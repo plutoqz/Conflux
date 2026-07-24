@@ -7,8 +7,11 @@ import math
 import re
 from dataclasses import replace
 from typing import Any, Iterable, Mapping, Sequence
+from urllib.parse import urlparse
 
+from .query_planner import concept_alias_groups
 from .research_protocol import (
+    CoverageAction,
     CoverageDimension,
     CoverageMatrix,
     DomainMap,
@@ -17,9 +20,11 @@ from .research_protocol import (
     ReportOutline,
     ResearchDimension,
     ResearchStrategy,
+    ScopeContract,
     SectionClaim,
     SectionContract,
     SectionDraft,
+    SectionEvidencePack,
     SourcePlan,
 )
 
@@ -475,6 +480,160 @@ def classify_query_archetype(query: str, *, user_intent: str = "") -> QueryArche
     )
 
 
+def build_scope_contract(
+    query: str,
+    archetype: QueryArchetype | None = None,
+    *,
+    planner_payload: Mapping[str, Any] | None = None,
+) -> ScopeContract:
+    """Extract a conservative subject boundary before any model planning."""
+
+    clean = _normalize_text(query)
+    candidate = clean
+    candidate = re.sub(r"^(?:请|请问|帮我|请帮我|分析|说明|阐述|综述|调研)\s*", "", candidate)
+    candidate = re.sub(
+        r"(?:目前|当前|现阶段|截至[^，,；;。?？]{0,24})?"
+        r"(?:都)?(?:有)?(?:哪些|什么)(?:主要)?"
+        r"(?:瓶颈|局限|限制|挑战|方法|技术|方案|问题|趋势|进展)?[？?。.]?$",
+        "",
+        candidate,
+    ).strip(" ，,；;。?？:：")
+    candidate = re.sub(
+        r"\b(?:what|which|how|why)\b.{0,20}\b(?:limitations?|challenges?|bottlenecks?|methods?|approaches?)\b.*$",
+        "",
+        candidate,
+        flags=re.IGNORECASE,
+    ).strip(" ,;:.?")
+    subject = candidate if len(candidate) >= 2 else clean
+
+    planner = dict(planner_payload or {})
+    planner_subject = str(planner.get("subject") or "").strip()
+    planner_specificity = len(_normalize_key(planner_subject)) / max(1, len(_normalize_key(subject)))
+    if (
+        planner_subject
+        and planner_specificity >= 0.6
+        and _scope_subject_relevance(clean, planner_subject) >= 0.35
+    ):
+        subject = planner_subject
+
+    latin_entities = re.findall(r"\b[A-Z][A-Z0-9.+_-]{1,14}\b", clean)
+    named_entities = [
+        item for item in re.findall(r"[A-Za-z][A-Za-z0-9.+_-]{2,}", subject)
+        if item.casefold() not in {"the", "and", "for", "with", "current", "research"}
+    ]
+    planner_entities = [
+        str(item).strip() for item in planner.get("required_entities") or []
+        if str(item).strip()
+    ]
+    required_entities = _unique([*latin_entities, *named_entities, *planner_entities])[:12]
+    inclusions = _unique([
+        subject,
+        *[str(item).strip() for item in planner.get("scope_inclusions") or [] if str(item).strip()],
+    ])
+    task = str(planner.get("task") or (archetype.type if archetype else "research")).strip()
+    return ScopeContract(
+        subject=subject,
+        task=task,
+        scope_inclusions=inclusions,
+        scope_exclusions=[
+            str(item).strip() for item in planner.get("scope_exclusions") or []
+            if str(item).strip()
+        ],
+        time_scope=str(planner.get("time_scope") or "unspecified").strip(),
+        audience=str(planner.get("audience") or "researcher").strip(),
+        required_entities=required_entities,
+        ambiguities=[
+            str(item).strip() for item in planner.get("ambiguities") or []
+            if str(item).strip()
+        ],
+        original_query=clean,
+    )
+
+
+def anchor_domain_map(domain_map: DomainMap, scope_contract: ScopeContract) -> DomainMap:
+    """Keep fallback dimensions and their questions tied to the research subject."""
+
+    subject = scope_contract.subject.strip() or domain_map.scope
+    dimensions = []
+    for dimension in domain_map.dimensions:
+        questions = [
+            _anchor_research_query(subject, question)
+            for question in dimension.questions_to_answer
+        ]
+        dimensions.append(replace(
+            dimension,
+            questions_to_answer=_unique(questions),
+            terminology=_unique([
+                *dimension.terminology,
+                subject,
+                *scope_contract.required_entities,
+            ]),
+        ))
+    return replace(
+        domain_map,
+        scope=scope_contract.original_query or domain_map.scope,
+        key_concepts=_unique([
+            subject,
+            *scope_contract.required_entities,
+            *domain_map.key_concepts,
+        ])[:24],
+        terminology=_unique([
+            subject,
+            *scope_contract.required_entities,
+            *domain_map.terminology,
+        ])[:40],
+        dimensions=dimensions,
+    )
+
+
+def gate_evidence_items(
+    evidence: Sequence[Mapping[str, Any] | Any],
+    scope_contract: ScopeContract,
+    *,
+    domain_relevance_threshold: float = 0.7,
+    claim_entailment_threshold: float = 0.7,
+) -> list[dict[str, Any]]:
+    """Classify evidence before it may support coverage or report claims."""
+
+    domain_threshold = max(0.0, min(1.0, float(domain_relevance_threshold)))
+    entailment_threshold = max(0.0, min(1.0, float(claim_entailment_threshold)))
+    gated: list[dict[str, Any]] = []
+    for raw_item in evidence:
+        item = _payload(raw_item)
+        is_model = _is_model_item(item)
+        body_valid = _evidence_body_valid(item, is_model=is_model)
+        domain_relevance = _evidence_domain_relevance(item, scope_contract)
+        claim_entailment = _evidence_claim_entailment(item, body_valid=body_valid)
+        relationship = str(item.get("relationship") or "supports").casefold()
+
+        if is_model:
+            role = "model_analysis"
+        elif not body_valid:
+            role = "discovery_only"
+        elif domain_relevance < domain_threshold:
+            role = "analogy" if claim_entailment >= entailment_threshold else "discovery_only"
+        elif claim_entailment < entailment_threshold:
+            role = "discovery_only"
+        elif relationship in {"contradicts", "conflicts", "counterexample"}:
+            role = "counterexample"
+        elif relationship in {"limits", "qualifies", "boundary"}:
+            role = "boundary"
+        else:
+            role = "direct_support"
+
+        gate_passed = role in {"direct_support", "boundary", "counterexample", "model_analysis"}
+        gated.append({
+            **item,
+            "domain_relevance": round(domain_relevance, 3),
+            "claim_entailment": round(claim_entailment, 3),
+            "evidence_role": role,
+            "source_identity": _source_identity(item),
+            "body_valid": body_valid,
+            "evidence_gate_passed": gate_passed,
+        })
+    return gated
+
+
 def derive_research_strategy(archetype: QueryArchetype) -> ResearchStrategy:
     """Translate an archetype into generic discovery, depth, and stop actions."""
 
@@ -530,6 +689,120 @@ def deduplicate_dimensions(
     return merged
 
 
+_MAJOR_JURISDICTION_OBJECTS = (
+    (
+        "eu",
+        "欧盟",
+        ("European Union", "EU", "GPAI", "general-purpose AI model", "AI Act"),
+    ),
+    (
+        "us",
+        "美国",
+        ("United States", "US", "U.S.", "frontier AI", "BIS"),
+    ),
+    (
+        "uk",
+        "英国",
+        ("United Kingdom", "UK", "foundation model", "AI regulation"),
+    ),
+    (
+        "cn",
+        "中国",
+        ("China", "生成式人工智能", "generative AI", "网信办"),
+    ),
+)
+
+_JURISDICTION_OFFICIAL_HOSTS = {
+    "jurisdiction-eu": (
+        "europa.eu",
+        "eur-lex.europa.eu",
+    ),
+    "jurisdiction-us": (
+        "bis.gov",
+        "commerce.gov",
+        "federalregister.gov",
+        "nist.gov",
+        "whitehouse.gov",
+    ),
+    "jurisdiction-uk": ("gov.uk",),
+    "jurisdiction-cn": (
+        "gov.cn",
+        "cac.gov.cn",
+    ),
+}
+
+
+def deterministic_comparison_dimensions(
+    query: str,
+    archetype: QueryArchetype,
+) -> list[ResearchDimension]:
+    """Build object-level dimensions when a comparison set is deterministic."""
+
+    if archetype.type != "comparison" or not re.search(
+        r"主要司法辖区|各司法辖区|major jurisdictions?|across jurisdictions?",
+        str(query),
+        re.IGNORECASE,
+    ):
+        return []
+    subject = build_scope_contract(query, archetype).subject or _normalize_text(query)
+    dimensions: list[ResearchDimension] = []
+    for code, label, aliases in _MAJOR_JURISDICTION_OBJECTS:
+        dimensions.append(ResearchDimension(
+            id=f"jurisdiction-{code}",
+            name=f"{label}：义务、适用范围与执行状态",
+            inclusion_reason=(
+                "问题要求比较主要司法辖区；该对象有可定位的官方规则、政策或监管材料。"
+            ),
+            questions_to_answer=[
+                f"{label}针对{subject}规定或提出了哪些可核验义务与透明度机制？",
+                f"这些要求适用于哪些提供者、模型或服务，当前法律状态和执行主体是什么？",
+            ],
+            expected_evidence_types=[
+                "official_document",
+                "standard_or_policy",
+                "authoritative_report",
+            ],
+            required_actions=[
+                "define_comparison_scope",
+                "compare_mechanisms",
+                "compare_applicability",
+            ],
+            cross_validation_required=False,
+            importance=0.78,
+            terminology=[label, *aliases, subject],
+        ))
+    dimensions.append(ResearchDimension(
+        id="jurisdiction-cross-comparison",
+        name="跨司法辖区：共同基线、比较轴与可核验差异",
+        inclusion_reason="比较结论必须在统一口径下综合各对象，而不是并列摘录规则。",
+        questions_to_answer=[
+            f"围绕{subject}，各司法辖区共同要求披露什么，差异集中在哪些义务类型？",
+            "适用门槛、法律状态、监管主体和执行方式如何影响可比性？",
+        ],
+        expected_evidence_types=[
+            "official_document",
+            "standard_or_policy",
+            "authoritative_report",
+        ],
+        required_actions=[
+            "establish_common_baseline",
+            "identify_comparison_axes",
+            "compare_mechanisms",
+        ],
+        cross_validation_required=True,
+        importance=0.9,
+        terminology=[
+            subject,
+            "transparency obligations",
+            "reporting requirements",
+            "technical documentation",
+            "applicability threshold",
+            "enforcement status",
+        ],
+    ))
+    return dimensions
+
+
 def build_domain_map(
     query: str,
     archetype: QueryArchetype,
@@ -542,6 +815,10 @@ def build_domain_map(
 
     supplied_dimensions = bool(discovered_dimensions)
     inputs: list[ResearchDimension | Mapping[str, Any] | str] = list(discovered_dimensions or [])
+    deterministic_dimensions: list[ResearchDimension] = []
+    if not inputs:
+        deterministic_dimensions = deterministic_comparison_dimensions(query, archetype)
+        inputs.extend(deterministic_dimensions)
     if not inputs:
         inputs.extend(ARCHETYPE_SPECS.get(archetype.type, ARCHETYPE_SPECS["general_exploration"])["dimensions"])
         if _is_broad_query(query):
@@ -551,7 +828,7 @@ def build_domain_map(
                 if action in _ACTION_DIMENSION_TITLES
             )
     dimensions = deduplicate_dimensions(inputs)
-    if not supplied_dimensions and _is_broad_query(query) and len(dimensions) < 8:
+    if not supplied_dimensions and not deterministic_dimensions and _is_broad_query(query) and len(dimensions) < 8:
         for name in _GENERIC_BREADTH_DIMENSIONS:
             candidate = _coerce_dimension(name, index=len(dimensions))
             if all(_dimension_similarity(candidate, existing) < 0.78 for existing in dimensions):
@@ -571,6 +848,8 @@ def build_domain_map(
             inclusion_reason=dimension.inclusion_reason or "由问题原型的通用研究动作生成，待首轮证据复核。",
             questions_to_answer=questions,
             expected_evidence_types=dimension.expected_evidence_types or evidence_types,
+            required_actions=list(dimension.required_actions),
+            cross_validation_required=dimension.cross_validation_required,
             importance=max(dimension.importance, 0.85 if index == 0 else 0.7),
             stop_conditions=dimension.stop_conditions or [
                 "取得直接正文证据并完成必要研究动作",
@@ -594,8 +873,14 @@ def build_domain_map(
         terminology=terms,
         dimensions=normalized,
         dimension_relations=relations,
-        disputed_boundaries=[],
-        discovery_sources=list(_EVIDENCE_TYPES.get(archetype.type, _EVIDENCE_TYPES["general_exploration"])),
+        disputed_boundaries=(
+            ["“主要司法辖区”在本轮操作化为欧盟、美国、英国和中国；其他司法辖区不在本轮比较范围内。"]
+            if deterministic_dimensions else []
+        ),
+        discovery_sources=_unique([
+            *list(_EVIDENCE_TYPES.get(archetype.type, _EVIDENCE_TYPES["general_exploration"])),
+            *( ["deterministic_comparison_objects"] if deterministic_dimensions else [] ),
+        ]),
     )
 
 
@@ -604,6 +889,7 @@ def merge_discovered_dimensions(
     discovered_dimensions: Sequence[ResearchDimension | Mapping[str, Any] | str],
     *,
     query: str = "",
+    scope_contract: ScopeContract | None = None,
     max_dimensions: int = 15,
 ) -> DomainMap:
     """Merge newly discovered dimensions after relevance scoring and deduplication."""
@@ -612,7 +898,10 @@ def merge_discovered_dimensions(
     for index, value in enumerate(discovered_dimensions):
         dimension = _coerce_dimension(value, index=len(accepted) + index)
         relevance = _dimension_relevance(query or domain_map.scope, dimension)
-        if relevance < 0.08 and dimension.importance < 0.65 and not dimension.inclusion_reason:
+        if scope_contract is not None:
+            if not _dimension_has_scope_anchor(dimension, scope_contract) or relevance < 0.08:
+                continue
+        elif relevance < 0.08 and dimension.importance < 0.65 and not dimension.inclusion_reason:
             continue
         if relevance > 0:
             dimension = replace(dimension, importance=max(dimension.importance, min(0.9, 0.45 + relevance)))
@@ -631,6 +920,29 @@ def merge_discovered_dimensions(
         dimension_relations=_dimension_relations(dimensions),
         disputed_boundaries=list(domain_map.disputed_boundaries),
         discovery_sources=list(domain_map.discovery_sources),
+    )
+
+
+def _dimension_has_scope_anchor(
+    dimension: ResearchDimension,
+    scope_contract: ScopeContract,
+) -> bool:
+    """Require model-discovered dimensions to name the actual research subject."""
+
+    dimension_text = " ".join([
+        dimension.name,
+        *dimension.questions_to_answer,
+        *dimension.terminology,
+    ])
+    anchors = _unique([
+        scope_contract.subject,
+        *scope_contract.required_entities,
+        *scope_contract.scope_inclusions,
+    ])
+    return any(
+        _scope_subject_relevance(dimension_text, anchor) >= 0.25
+        for anchor in anchors
+        if _text_tokens(anchor)
     )
 
 
@@ -845,6 +1157,7 @@ def build_source_plans(
     source_health: Mapping[str, Any] | None = None,
     budget: DynamicResearchBudget | None = None,
     authority_threshold: float = 0.75,
+    scope_contract: ScopeContract | None = None,
 ) -> list[SourcePlan]:
     """Create one evidence-need-driven source route for each active dimension."""
 
@@ -881,24 +1194,40 @@ def build_source_plans(
             item in source_types
             for item in ("official_document", "version_notes", "standard_or_policy")
         )
+        authoritative_web_only = bool(
+            dimension.id.startswith("jurisdiction-")
+            and web_first
+            and _source_available(health, "Web")
+        )
         source_ids: list[str] = []
         if web_first and _source_available(health, "Web"):
             source_ids.append("builtin.web")
-        if _source_available(health, "RAG"):
+        if _source_available(health, "RAG") and not authoritative_web_only:
             source_ids.append("builtin.rag")
         if not web_first and _source_available(health, "Web"):
             source_ids.append("builtin.web")
         source_ids.append("builtin.model")
         cross_check = bool(
-            archetype.type in {"comparison", "evidence_review"}
-            or _is_temporal_query(domain_map.scope)
-            or dimension.conflicts
-            or (row and (row.status == "conflicting" or row.cross_validation_required))
+            dimension.cross_validation_required
+            if dimension.cross_validation_required is not None
+            else (
+                archetype.type in {"comparison", "evidence_review"}
+                or _is_temporal_query(domain_map.scope)
+                or dimension.conflicts
+                or (row and (row.status == "conflicting" or row.cross_validation_required))
+            )
         )
         query_intents = dimension.questions_to_answer or [
             f"{dimension.name}需要哪些直接证据？",
         ]
-        fallback = source_ids[1:]
+        if scope_contract is not None:
+            query_intents = [
+                _anchor_research_query(scope_contract.subject, question)
+                for question in query_intents
+            ]
+        fallback = list(source_ids[1:])
+        if authoritative_web_only and _source_available(health, "RAG"):
+            fallback.append("builtin.rag")
         plans.append(SourcePlan(
             id=f"source-plan-{index + 1}",
             dimension_id=dimension.id,
@@ -932,11 +1261,12 @@ def build_coverage_matrix(
     authority_threshold: float = 0.75,
     min_external_evidence_per_dimension: int = 1,
     coverage_target: float = 0.8,
+    domain_relevance_threshold: float = 0.7,
+    claim_entailment_threshold: float = 0.7,
 ) -> CoverageMatrix:
     """Evaluate body evidence, research actions, authority, and conflicts by dimension."""
 
     items = [_payload(item) for item in evidence]
-    required_actions = list(archetype.expected_research_actions) if archetype else []
     rows: list[CoverageDimension] = []
     importance: dict[str, float] = {}
     for dimension in domain_map.dimensions:
@@ -944,8 +1274,19 @@ def build_coverage_matrix(
         if dimension.current_coverage == "out_of_scope":
             rows.append(CoverageDimension(dimension_id=dimension.id, status="out_of_scope"))
             continue
+        required_actions = list(
+            dimension.required_actions
+            or (archetype.expected_research_actions if archetype else [])
+        )
         scoped = [item for item in items if _evidence_matches_dimension(item, dimension)]
-        usable = [item for item in scoped if _item_status_allows_evidence(item)]
+        usable = [
+            item for item in scoped
+            if _item_status_allows_evidence(
+                item,
+                domain_relevance_threshold=domain_relevance_threshold,
+                claim_entailment_threshold=claim_entailment_threshold,
+            )
+        ]
         evidence_ids = _unique([
             str(item.get("id") or item.get("evidence_id") or "").strip()
             for item in usable
@@ -959,12 +1300,20 @@ def build_coverage_matrix(
         model_items = [item for item in usable if _is_model_item(item)]
         external = [item for item in usable if not _is_model_item(item)]
         body = [item for item in external if _has_body_evidence(item)]
-        covered_actions = _unique([
+        detected_actions = _unique([
             action
             for item in usable
             for action in _evidence_actions(item)
         ])
-        missing_actions = [item for item in required_actions if item not in covered_actions]
+        action_coverage = _build_action_coverage(required_actions, usable)
+        covered_actions = [
+            item.action for item in action_coverage
+            if item.status in {"covered", "model_analysis", "conflicting"}
+        ] if required_actions else detected_actions
+        missing_actions = [
+            item.action for item in action_coverage
+            if item.status in {"gap", "model_analysis"} and (item.high_risk or item.status == "gap")
+        ]
         high_authority = any(
             _evidence_authority(item) >= max(0.0, min(1.0, authority_threshold))
             for item in body
@@ -994,20 +1343,24 @@ def build_coverage_matrix(
             if str(value).strip()
         ])
         cross_validation_required = bool(
-            dimension.importance >= 0.85
-            or conflicts
-            or temporal_conflicts
-            or (archetype and archetype.type in {"comparison", "evidence_review"})
+            dimension.cross_validation_required
+            if dimension.cross_validation_required is not None
+            else (
+                dimension.importance >= 0.85
+                or conflicts
+                or temporal_conflicts
+                or (archetype and archetype.type in {"comparison", "evidence_review"})
+            )
         )
         action_ratio = (
-            len(set(required_actions) & set(covered_actions)) / len(required_actions)
+            sum(item.status == "covered" for item in action_coverage) / len(action_coverage)
             if required_actions else 1.0
         )
         model_only = bool(usable) and len(model_items) == len(usable)
         saturation = _dimension_saturation(usable, body, identities, action_ratio)
         if conflicts or temporal_conflicts:
             status = "conflicting"
-        elif len(body) >= max(1, int(min_external_evidence_per_dimension)) and high_authority and action_ratio >= 0.5 and (
+        elif len(body) >= max(1, int(min_external_evidence_per_dimension)) and high_authority and action_ratio >= 0.85 and (
             not cross_validation_required or len(identities) >= 2
         ):
             status = "covered"
@@ -1034,6 +1387,7 @@ def build_coverage_matrix(
             body_evidence=bool(body),
             covered_actions=covered_actions,
             missing_actions=missing_actions,
+            action_coverage=action_coverage,
             high_authority_source=high_authority,
             independent_source_count=len(identities),
             cross_validation_required=cross_validation_required,
@@ -1283,7 +1637,10 @@ def build_section_drafts(
     rows = coverage_matrix.by_dimension() if coverage_matrix else {}
     result: list[SectionDraft] = []
     for contract in outline.sections:
-        scoped = [item for item in items if _item_dimension_ids(item) & set(contract.dimension_ids)]
+        scoped = [
+            item for item in items
+            if _item_matches_dimension_ids(item, contract.dimension_ids)
+        ]
         claims: list[SectionClaim] = []
         seen_claims: set[str] = set()
         for index, item in enumerate(scoped):
@@ -1343,6 +1700,91 @@ def build_section_drafts(
             verified=verified,
         ))
     return result
+
+
+def build_section_evidence_packs(
+    outline: ReportOutline,
+    evidence: Sequence[Mapping[str, Any] | Any],
+    *,
+    coverage_matrix: CoverageMatrix,
+    drafts: Sequence[SectionDraft] | None = None,
+) -> list[SectionEvidencePack]:
+    """Build bounded, auditable evidence payloads for section synthesis."""
+
+    items = [_payload(item) for item in evidence]
+    rows = coverage_matrix.by_dimension()
+    draft_map = {item.section_id: item for item in drafts or []}
+    packs: list[SectionEvidencePack] = []
+    for contract in outline.sections:
+        dimension_ids = set(contract.dimension_ids)
+        scoped = [
+            item for item in items
+            if _item_matches_dimension_ids(item, dimension_ids)
+        ]
+        direct: list[dict[str, Any]] = []
+        boundary: list[dict[str, Any]] = []
+        counterexamples: list[dict[str, Any]] = []
+        for item in scoped:
+            compact = _pack_evidence_item(item)
+            role = str(item.get("evidence_role") or item.get("relationship") or "direct_support").casefold()
+            if _is_model_item(item):
+                continue
+            if role in {"counterexample", "contradicts", "conflicts"}:
+                counterexamples.append(compact)
+            elif role in {"boundary", "limits"}:
+                boundary.append(compact)
+            elif role not in {"analogy", "discovery_only", "context"}:
+                direct.append(compact)
+        section_rows = [rows[item] for item in contract.dimension_ids if item in rows]
+        required_actions = _unique([
+            cell.action
+            for row in section_rows
+            for cell in row.action_coverage
+        ])
+        distinctions = _unique([
+            *contract.evidence_requirements,
+            *(value for row in section_rows for value in row.terminology_ambiguities),
+        ])
+        mitigations = _unique([
+            str(item.get("claim") or item.get("text") or "").strip()
+            for item in scoped
+            if any("mitigat" in action or "remedi" in action for action in _evidence_actions(item))
+            and str(item.get("claim") or item.get("text") or "").strip()
+        ])
+        draft = draft_map.get(contract.id)
+        claims = list(draft.claims) if draft else []
+        verified_claims = [
+            claim for claim in claims
+            if claim.externally_supported or claim.claim_type in {"analysis", "recommendation", "open_question"}
+        ]
+        forbidden = [
+            claim.text for claim in claims
+            if claim.claim_type == "external_fact" and not claim.externally_supported
+        ]
+        allowed_citations = _unique([
+            str(ref)
+            for item in scoped
+            for ref in _as_list(item.get("evidence_refs"))
+            if str(ref).strip()
+        ])
+        packs.append(SectionEvidencePack(
+            section_id=contract.id,
+            questions=list(contract.questions_to_answer),
+            required_actions=required_actions,
+            direct_evidence=direct,
+            boundary_evidence=boundary,
+            counterexamples=counterexamples,
+            verified_claims=verified_claims,
+            distinctions=distinctions,
+            mitigations=mitigations,
+            unresolved_gaps=_unique([
+                *(draft.unresolved_gaps if draft else []),
+                *(gap for row in section_rows for gap in row.gap_summary),
+            ]),
+            forbidden_claims=forbidden,
+            allowed_citations=allowed_citations,
+        ))
+    return packs
 
 
 def evaluate_generalized_research_quality(
@@ -1507,6 +1949,12 @@ def _merge_dimension(left: ResearchDimension, right: ResearchDimension) -> Resea
         child_ids=_unique([*left.child_ids, *right.child_ids]),
         questions_to_answer=_unique([*left.questions_to_answer, *right.questions_to_answer]),
         expected_evidence_types=_unique([*left.expected_evidence_types, *right.expected_evidence_types]),
+        required_actions=_unique([*left.required_actions, *right.required_actions]),
+        cross_validation_required=(
+            left.cross_validation_required
+            if left.cross_validation_required is not None
+            else right.cross_validation_required
+        ),
         importance=max(left.importance, right.importance),
         current_coverage=coverage,
         conflicts=_unique([*left.conflicts, *right.conflicts]),
@@ -1517,6 +1965,12 @@ def _merge_dimension(left: ResearchDimension, right: ResearchDimension) -> Resea
 
 
 def _dimension_similarity(left: ResearchDimension, right: ResearchDimension) -> float:
+    if (
+        left.id.startswith("jurisdiction-")
+        and right.id.startswith("jurisdiction-")
+        and left.id != right.id
+    ):
+        return 0.0
     left_key = _normalize_key(left.name)
     right_key = _normalize_key(right.name)
     if not left_key or not right_key:
@@ -1646,14 +2100,109 @@ def _coverage_scores(
     active = [item for item in rows if item.status != "out_of_scope"]
     if not active:
         return 1.0, 1.0
+    action_values = {
+        "covered": 1.0,
+        "model_analysis": 0.25,
+        "conflicting": 0.25,
+        "gap": 0.0,
+        "out_of_scope": 0.0,
+    }
+
+    def row_score(row: CoverageDimension, *, external_only: bool = False) -> float:
+        if not row.action_coverage:
+            return values[row.status]
+        if external_only:
+            return sum(item.status == "covered" for item in row.action_coverage) / len(row.action_coverage)
+        return sum(action_values[item.status] for item in row.action_coverage) / len(row.action_coverage)
+
     total_weight = sum(max(0.1, importance.get(item.dimension_id, 0.5)) for item in active)
     overall = sum(
-        values[item.status] * max(0.1, importance.get(item.dimension_id, 0.5))
+        row_score(item) * max(0.1, importance.get(item.dimension_id, 0.5))
         for item in active
     ) / total_weight
     high = [item for item in active if importance.get(item.dimension_id, 0.5) >= 0.75]
-    high_score = sum(values[item.status] for item in high) / len(high) if high else overall
+    high_score = sum(row_score(item, external_only=True) for item in high) / len(high) if high else overall
     return round(overall, 3), round(high_score, 3)
+
+
+def _build_action_coverage(
+    required_actions: Sequence[str],
+    evidence: Sequence[Mapping[str, Any]],
+) -> list[CoverageAction]:
+    high_risk_actions = {
+        "assess_impact",
+        "assess_maturity",
+        "compare_evidence",
+        "define_validation",
+        "establish_current_state",
+        "trace_time_evolution",
+    }
+    cells: list[CoverageAction] = []
+    for action in required_actions:
+        matching = [item for item in evidence if action in _evidence_actions(item)]
+        external = [
+            item for item in matching
+            if not _is_model_item(item)
+            and _has_body_evidence(item)
+            and str(item.get("evidence_role") or item.get("relationship") or "direct_support").casefold()
+            not in {"analogy", "discovery_only", "context"}
+        ]
+        model = [item for item in matching if _is_model_item(item)]
+        conflicting = [
+            item for item in matching
+            if str(item.get("relationship") or item.get("evidence_role") or "").casefold()
+            in {"contradicts", "conflicts", "counterexample"}
+        ]
+        if conflicting:
+            status = "conflicting"
+            reason = "存在尚未消解的反例或冲突证据"
+        elif external:
+            status = "covered"
+            reason = ""
+        elif model:
+            status = "model_analysis"
+            reason = "仅有明确标注的 Model analysis，缺少直接外部证据"
+        else:
+            status = "gap"
+            reason = "没有通过门禁的证据覆盖该研究动作"
+        cells.append(CoverageAction(
+            action=action,
+            status=status,  # type: ignore[arg-type]
+            evidence_ids=_unique([
+                str(item.get("id") or item.get("evidence_id") or "") for item in matching
+            ]),
+            external_evidence_ids=_unique([
+                str(item.get("id") or item.get("evidence_id") or "") for item in external
+            ]),
+            model_evidence_ids=_unique([
+                str(item.get("id") or item.get("evidence_id") or "") for item in model
+            ]),
+            citation_refs=_unique([
+                str(ref) for item in external for ref in _as_list(item.get("evidence_refs"))
+            ]),
+            high_risk=action in high_risk_actions,
+            gap_reason=reason,
+        ))
+    return cells
+
+
+def _pack_evidence_item(item: Mapping[str, Any]) -> dict[str, Any]:
+    quote = str(
+        item.get("verbatim_quote") or item.get("quote") or item.get("text")
+        or item.get("claim") or ""
+    ).strip()
+    return {
+        "id": str(item.get("id") or item.get("evidence_id") or "").strip(),
+        "claim": str(item.get("claim") or item.get("text") or "").strip()[:700],
+        "verbatim_quote": quote[:1200],
+        "evidence_refs": _unique(_as_list(item.get("evidence_refs"))),
+        "source_identity": str(item.get("source_identity") or item.get("source") or "").strip(),
+        "document_title": str(item.get("document_title") or item.get("title") or "").strip(),
+        "publication_year": str(item.get("publication_year") or item.get("year") or "").strip(),
+        "evidence_role": str(item.get("evidence_role") or item.get("relationship") or "direct_support"),
+        "research_actions": _evidence_actions(item),
+        "limitations": _unique(_as_list(item.get("limitations"))),
+    }
 
 
 def _dimension_saturation(
@@ -1679,6 +2228,10 @@ def _dimension_saturation(
 def _evidence_matches_dimension(item: Mapping[str, Any], dimension: ResearchDimension) -> bool:
     explicit = _item_dimension_ids(item)
     if explicit:
+        if dimension.id == "jurisdiction-cross-comparison" and any(
+            item_id in _JURISDICTION_OFFICIAL_HOSTS for item_id in explicit
+        ):
+            return True
         return dimension.id in explicit
     text = " ".join(str(item.get(key) or "") for key in (
         "claim", "text", "verbatim_quote", "document_title", "paper_section",
@@ -1695,6 +2248,19 @@ def _item_dimension_ids(item: Mapping[str, Any]) -> set[str]:
     return {item for item in ids if item}
 
 
+def _item_matches_dimension_ids(
+    item: Mapping[str, Any],
+    dimension_ids: Iterable[str],
+) -> bool:
+    expected = {str(value).strip() for value in dimension_ids if str(value).strip()}
+    explicit = _item_dimension_ids(item)
+    if explicit & expected:
+        return True
+    return "jurisdiction-cross-comparison" in expected and any(
+        item_id in _JURISDICTION_OFFICIAL_HOSTS for item_id in explicit
+    )
+
+
 def _evidence_actions(item: Mapping[str, Any]) -> list[str]:
     explicit = _unique([
         *(str(value).strip() for value in _as_list(item.get("research_actions"))),
@@ -1704,10 +2270,35 @@ def _evidence_actions(item: Mapping[str, Any]) -> list[str]:
     if explicit:
         return explicit
     text = _normalize_text(" ".join(str(item.get(key) or "") for key in (
-        "claim", "text", "verbatim_quote", "paper_section",
-    )))
+        "claim", "text", "verbatim_quote", "document_title", "paper_section", "url",
+    ))).casefold()
     markers = {
         "define_scope": ("定义", "范围", "scope", "definition"),
+        "define_comparison_scope": (
+            "适用于", "适用对象", "提供者", "开发者", "服务提供者",
+            "applies to", "provider", "developer", "service provider", "signator",
+            "regulator", "authority", "监管机构", "主管部门", "ai system", "scope",
+        ),
+        "establish_common_baseline": (
+            "透明度", "义务", "要求", "报告", "披露", "技术文档",
+            "transparency", "obligation", "requirement", "reporting", "disclosure",
+            "technical documentation",
+        ),
+        "identify_comparison_axes": (
+            "透明度", "报告", "披露", "技术文档", "版权", "网络安全", "监管主体",
+            "transparency", "reporting", "disclosure", "technical documentation",
+            "copyright", "cybersecurity", "supervisory authority",
+        ),
+        "compare_mechanisms": (
+            "必须", "应当", "义务", "要求", "监管", "监督", "技术文档", "标准", "指南", "原则", "透明度",
+            "must", "shall", "require", "obligation", "regulation", "supervision",
+            "technical documentation", "standard", "guidance", "principle", "transparency",
+        ),
+        "compare_applicability": (
+            "适用于", "适用对象", "提供者", "开发者", "服务", "门槛", "生效",
+            "applies", "provider", "developer", "service", "threshold", "effective",
+            "fine-tuning", "systemic risk", "signator", "ai system", "consumer", "user", "regulator",
+        ),
         "discover_taxonomy": ("分类", "类别", "taxonomy", "category"),
         "explain_mechanisms": ("机制", "原因", "mechanism", "because"),
         "identify_representative_implementations": ("实现", "系统", "工具", "implementation", "system"),
@@ -1723,6 +2314,16 @@ def _evidence_actions(item: Mapping[str, Any]) -> list[str]:
         "plan_implementation": ("实施", "部署", "步骤", "implement", "deploy"),
         "define_validation": ("验证", "评估", "指标", "validate", "evaluate", "metric"),
         "analyze_conflicts": ("冲突", "争议", "矛盾", "conflict", "controversy"),
+        "establish_current_state": ("当前", "现状", "部署", "current", "status", "deployment"),
+        "identify_drivers": ("驱动", "促进", "推动", "driver", "enable"),
+        "identify_emerging_directions": ("新兴", "未来", "方向", "emerging", "future", "direction"),
+        "identify_open_questions": ("开放问题", "未知", "待解决", "open question", "unresolved"),
+        "review_mitigations": ("缓解", "修复", "改进", "mitigation", "remediation"),
+        "identify_tradeoffs": ("权衡", "取舍", "trade-off", "tradeoff"),
+        "assess_risks_and_tradeoffs": ("风险", "权衡", "取舍", "risk", "trade-off"),
+        "identify_evidence_gaps": ("证据不足", "证据缺口", "缺少研究", "evidence gap", "lack of evidence"),
+        "define_evidence_criteria": ("证据标准", "纳入标准", "排除标准", "evidence criteria", "inclusion criteria"),
+        "define_review_scope": ("综述范围", "检索范围", "review scope", "search scope"),
     }
     return [name for name, terms in markers.items() if any(term in text for term in terms)]
 
@@ -1739,12 +2340,32 @@ def _has_body_evidence(item: Mapping[str, Any]) -> bool:
     content = str(item.get("body") or item.get("content") or "").strip()
     return bool(content) and kind in {
         "body", "html", "pdf", "fulltext", "document", "official_document", "abstract",
+        "local_full_text", "local_document", "run_scoped_fulltext",
     }
 
 
-def _item_status_allows_evidence(item: Mapping[str, Any]) -> bool:
+def _item_status_allows_evidence(
+    item: Mapping[str, Any],
+    *,
+    domain_relevance_threshold: float = 0.7,
+    claim_entailment_threshold: float = 0.7,
+) -> bool:
     status = str(item.get("status") or "success").casefold()
-    return status not in {"failed", "no_evidence", "low_relevance", "fallback", "disabled"}
+    if status in {"failed", "no_evidence", "low_relevance", "fallback", "disabled"}:
+        return False
+    if item.get("body_valid") is False:
+        return False
+    role = str(item.get("evidence_role") or "").casefold()
+    if role in {"analogy", "discovery_only"}:
+        return False
+    if role and role != "model_analysis":
+        domain = _number(item.get("domain_relevance"), 0.0)
+        entailment = _number(item.get("claim_entailment"), 0.0)
+        if domain < max(0.0, min(1.0, domain_relevance_threshold)):
+            return False
+        if entailment < max(0.0, min(1.0, claim_entailment_threshold)):
+            return False
+    return True
 
 
 def _is_model_item(item: Mapping[str, Any]) -> bool:
@@ -1769,11 +2390,196 @@ def _evidence_authority(item: Mapping[str, Any]) -> float:
 
 
 def _source_identity(item: Mapping[str, Any]) -> str:
-    for key in ("paper_id", "document_id", "url", "document_title", "source"):
+    for key in ("source_identity", "paper_id", "document_id", "url", "document_title", "source"):
         value = str(item.get(key) or "").strip().casefold()
         if value:
-            return re.sub(r"[#?].*$", "", value)
+            value = re.sub(r"[#?].*$", "", value)
+            value = re.sub(r"\.pdf$", "", value, flags=re.IGNORECASE)
+            arxiv = re.search(r"(?:arxiv:|arxiv\.org/(?:abs|pdf)/|papers?/)(\d{4}\.\d{4,5})", value)
+            return f"arxiv:{arxiv.group(1)}" if arxiv else value.rstrip("/")
     return ""
+
+
+def _evidence_domain_relevance(item: Mapping[str, Any], scope: ScopeContract) -> float:
+    explicit = _number(item.get("domain_relevance"), 0.0)
+    text = " ".join(str(item.get(key) or "") for key in (
+        "document_title", "claim", "verbatim_quote", "paper_section", "url",
+    ))
+    lexical = _scope_subject_relevance(text, scope.subject)
+    lexical = max(lexical, _scope_concept_alias_relevance(text, scope))
+    lexical = max(lexical, _jurisdiction_object_relevance(item, scope))
+    lowered = text.casefold()
+    required = [entity for entity in scope.required_entities if str(entity).strip()]
+    if any(str(entity).casefold() in lowered for entity in required):
+        lexical = max(lexical, 1.0)
+    if any(str(entity).casefold() == "gis" for entity in required):
+        if re.search(r"\b(?:geospatial|geographic(?:al)?|spatial data|geoinformatics)\b", lowered):
+            lexical = max(lexical, 0.9)
+    retrieval_relevance = _number(item.get("relevance"), 0.0)
+    # Retrieval similarity cannot establish domain identity on its own because
+    # generic fallback queries can score unrelated papers highly.
+    corroborated_retrieval = retrieval_relevance if lexical >= 0.25 else min(retrieval_relevance, 0.69)
+    return max(0.0, min(1.0, max(explicit, lexical, corroborated_retrieval)))
+
+
+def _jurisdiction_object_relevance(
+    item: Mapping[str, Any],
+    scope: ScopeContract,
+) -> float:
+    """Recognize an official comparison object without relaxing the general domain gate."""
+
+    dimension_id = str(
+        item.get("subquestion_id") or item.get("dimension_id") or ""
+    ).strip()
+    allowed_hosts = _JURISDICTION_OFFICIAL_HOSTS.get(dimension_id)
+    if not allowed_hosts:
+        return 0.0
+    scope_text = _normalize_text(" ".join((scope.subject, scope.original_query))).casefold()
+    if not any(marker in scope_text for marker in (
+        "司法辖区", "jurisdiction", "基础模型", "通用人工智能模型",
+        "foundation model", "general-purpose ai", "gpai",
+    )):
+        return 0.0
+    identity = str(
+        item.get("url") or item.get("paper_id") or item.get("source_identity") or ""
+    ).strip()
+    host = (urlparse(identity).hostname or "").casefold()
+    if not any(host == allowed or host.endswith(f".{allowed}") for allowed in allowed_hosts):
+        return 0.0
+    candidate = _normalize_text(" ".join(str(item.get(key) or "") for key in (
+        "document_title", "claim", "verbatim_quote", "paper_section", "url",
+    ))).casefold()
+    ai_anchor = re.search(
+        r"\b(?:ai|gpai)\b|artificial intelligence|foundation model|frontier ai|"
+        r"general-purpose ai|generative ai|人工智能|基础模型|生成式人工智能",
+        candidate,
+        re.IGNORECASE,
+    )
+    policy_anchor = re.search(
+        r"transparen|explainab|reporting|disclos|documentation|obligation|require|"
+        r"regulat|guidance|standard|provider|透明度|可解释|报告|披露|文档|义务|"
+        r"要求|监管|规则|标准|提供者",
+        candidate,
+        re.IGNORECASE,
+    )
+    return 0.9 if ai_anchor and policy_anchor else 0.0
+
+
+_GENERIC_SCOPE_CONCEPT_TRIGGERS = {
+    "自动化",
+    "司法辖区",
+    "局限性",
+    "局限",
+    "挑战",
+    "失败模式",
+    "未来工作",
+    "研究空白",
+    "limitations",
+    "failure modes",
+    "research gaps",
+}
+
+_GENERIC_SCOPE_ALIASES = {
+    "agent",
+    "automation",
+    "automated workflow",
+    "challenges",
+    "failure cases",
+    "failure modes",
+    "future work",
+    "limitations",
+    "open problems",
+    "research gaps",
+    "workflow automation",
+}
+
+
+def _scope_concept_alias_relevance(text: str, scope: ScopeContract) -> float:
+    """Match explicit bilingual domain aliases without weakening the gate."""
+
+    scope_text = " ".join([
+        scope.subject,
+        *scope.required_entities,
+        *scope.scope_inclusions,
+        scope.original_query,
+    ])
+    candidate = _normalize_text(text).casefold()
+    candidate_tokens = _text_tokens(candidate)
+    best = 0.0
+    for group in concept_alias_groups(scope_text):
+        trigger = str(group[0] if group else "").casefold()
+        if trigger in _GENERIC_SCOPE_CONCEPT_TRIGGERS:
+            continue
+        for raw_alias in group:
+            alias = _normalize_text(raw_alias).casefold()
+            if not alias or alias in _GENERIC_SCOPE_ALIASES:
+                continue
+            alias_tokens = _text_tokens(alias)
+            ascii_tokens = re.findall(r"[a-z0-9][a-z0-9_.+-]*", alias)
+            is_acronym = bool(re.fullmatch(r"[A-Z0-9.+_-]{2,}", str(raw_alias).strip()))
+            is_specific = (
+                bool(re.search(r"[\u4e00-\u9fff]{3,}", alias))
+                or len(ascii_tokens) >= 2
+                or is_acronym
+                or (len(ascii_tokens) == 1 and len(ascii_tokens[0]) >= 6)
+            )
+            if not is_specific:
+                continue
+            if re.search(r"[\u4e00-\u9fff]", alias):
+                exact = alias in candidate
+            else:
+                exact = bool(re.search(
+                    rf"(?<![a-z0-9]){re.escape(alias)}(?:s|es)?(?![a-z0-9])",
+                    candidate,
+                ))
+            if exact:
+                best = max(best, 0.9)
+                continue
+            if len(alias_tokens) >= 2:
+                overlap = len(alias_tokens & candidate_tokens) / len(alias_tokens)
+                if overlap >= 0.75:
+                    best = max(best, 0.8)
+    return best
+
+
+def _evidence_claim_entailment(item: Mapping[str, Any], *, body_valid: bool) -> float:
+    explicit = _number(item.get("claim_entailment"), 0.0)
+    directness = _number(item.get("directness"), 0.0)
+    quote = str(item.get("verbatim_quote") or item.get("quote") or "").strip()
+    inferred = 0.75 if body_valid and quote else 0.4 if body_valid else 0.0
+    return max(0.0, min(1.0, max(explicit, directness, inferred)))
+
+
+def _evidence_body_valid(item: Mapping[str, Any], *, is_model: bool) -> bool:
+    if is_model:
+        return True
+    if item.get("body_valid") is False:
+        return False
+    kind = str(item.get("content_kind") or "").casefold()
+    if kind in {"snippet", "search_result", "unfetched", "url", "title_only", "discovery_metadata"}:
+        return False
+    text = str(
+        item.get("verbatim_quote") or item.get("quote")
+        or item.get("body") or item.get("content") or ""
+    ).strip()
+    if len(text) < 24:
+        return False
+    normalized = re.sub(r"\s+", " ", text).casefold()
+    chrome_patterns = (
+        r"show details\s+hide details",
+        r"enable javascript .* (?:view|continue)",
+        r"accept all cookies",
+        r"sign in\s+(?:register|create account)",
+        r"\bcaptcha\b",
+        r"\brequest access\b",
+        r"\baccess denied\b",
+        r"\bverify (?:that )?you are (?:a )?human\b",
+        r"\bsite help.*wider ip range\b",
+    )
+    if any(re.search(pattern, normalized) for pattern in chrome_patterns):
+        return False
+    meaningful = re.findall(r"[a-z0-9\u4e00-\u9fff]", normalized)
+    return len(meaningful) >= 16
 
 
 def _source_available(source_health: Mapping[str, Any], source: str) -> bool:
@@ -1920,6 +2726,24 @@ def _key_concepts(query: str) -> list[str]:
     return _unique([*parts, *latin])
 
 
+def _anchor_research_query(subject: str, question: str) -> str:
+    clean_subject = _normalize_text(subject)
+    clean_question = _normalize_text(question)
+    if not clean_subject:
+        return clean_question
+    if _scope_subject_relevance(clean_question, clean_subject) >= 0.45:
+        return clean_question
+    return f"{clean_subject}：{clean_question}"
+
+
+def _scope_subject_relevance(text: str, subject: str) -> float:
+    text_tokens = _text_tokens(text)
+    subject_tokens = _text_tokens(subject)
+    if not text_tokens or not subject_tokens:
+        return 0.0
+    return len(text_tokens & subject_tokens) / max(1, len(subject_tokens))
+
+
 def _text_tokens(text: str) -> set[str]:
     normalized = _normalize_text(text).casefold()
     tokens = set(re.findall(r"[a-z0-9][a-z0-9_.+-]{1,}", normalized))
@@ -2029,14 +2853,19 @@ def _context_around(text: str, needle: str) -> str:
 __all__ = [
     "ARCHETYPE_SPECS",
     "allocate_dynamic_budget",
+    "anchor_domain_map",
     "build_coverage_matrix",
     "build_domain_map",
     "build_report_outline",
+    "build_scope_contract",
     "build_section_drafts",
+    "build_section_evidence_packs",
     "build_source_plans",
     "classify_query_archetype",
     "deduplicate_dimensions",
+    "deterministic_comparison_dimensions",
     "derive_research_strategy",
+    "gate_evidence_items",
     "estimate_query_complexity",
     "evaluate_generalized_research_quality",
     "merge_discovered_dimensions",

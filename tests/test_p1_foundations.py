@@ -8,6 +8,7 @@ import tomllib
 import time
 from pathlib import Path
 
+import pytest
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage
 
@@ -126,6 +127,20 @@ def test_research_budget_reserves_input_and_output_before_starting_call():
         raise AssertionError("call should be rejected before it can exceed the budget")
     assert model.calls == 0
 
+
+def test_json_object_invocation_repairs_minor_model_json_damage():
+    from langchain_core.messages import AIMessage
+
+    from conflux.graph_p1 import _invoke_json_object
+
+    class Model:
+        def invoke(self, messages):
+            return AIMessage(content="```json\n{'answer': 'ok',}\n```")
+
+    _, payload = _invoke_json_object(Model(), "system", "prompt")
+
+    assert payload == {"answer": "ok"}
+
 def test_pypdf_is_a_runtime_dependency():
     payload = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     dependencies = payload["project"]["dependencies"]
@@ -206,7 +221,7 @@ def test_quick_profile_can_complete_a_three_system_comparison():
     deep = resolve_research_profile("deep")
     assert deep.candidate_limit == 12
     assert deep.final_evidence_limit == 12
-    assert deep.model_timeout_seconds == 120
+    assert deep.model_timeout_seconds == 240
 
 
 def test_profiled_web_tool_uses_run_scoped_budget(monkeypatch):
@@ -418,6 +433,41 @@ def test_html_fetch_extracts_body_metadata_and_removes_injection(monkeypatch):
     assert "system prompt" not in fetched.text
     assert fetched.prompt_injection_detected is True
     assert fetched.content_hash
+
+
+def test_html_fetch_rejects_captcha_access_page(monkeypatch):
+    from conflux.tools import web
+
+    class Headers:
+        def get_content_type(self):
+            return "text/html"
+
+        def get_content_charset(self):
+            return "utf-8"
+
+    class Response:
+        headers = Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def geturl(self):
+            return "https://unblock.example.gov/"
+
+        def read(self, size):
+            return b"""<html><head><title>Request Access</title></head><body>
+            <p>If you are experiencing issues with the CAPTCHA, use Site Help
+            to request a wider IP range.</p></body></html>"""
+
+    monkeypatch.setattr(web.urllib.request, "urlopen", lambda request, timeout: Response())
+    fetched = web.fetch_url_content("https://example.gov/document")
+
+    assert fetched.status == "blocked"
+    assert fetched.usable is False
+    assert "not citeable body evidence" in fetched.error
 
 
 def test_web_uses_fetched_body_not_generic_search_snippet(monkeypatch):
@@ -826,6 +876,49 @@ def test_official_seed_results_cover_pqc_status_and_migration_documents():
     assert any("quantum-readiness-fact-sheet.pdf" in item for item in urls)
 
 
+def test_official_seed_results_cover_foundation_model_policy_jurisdictions():
+    from conflux.tools.web import _filter_web_results, _official_seed_results
+
+    query = "当前主要司法辖区对基础模型透明度义务有哪些可核验差异？"
+    seeds = _official_seed_results(query)
+    urls = {item["url"] for item in seeds}
+
+    assert any("digital-strategy.ec.europa.eu" in item for item in urls)
+    assert any("bis.gov" in item for item in urls)
+    assert any("ai-regulation-a-pro-innovation-approach/white-paper" in item for item in urls)
+    assert any("cac.gov.cn" in item for item in urls)
+    kept, _ = _filter_web_results(query, seeds)
+    assert {item["url"] for item in kept} == urls
+
+
+def test_bis_policy_source_receives_official_domain_priority():
+    from conflux.tools.web import _domain, _domain_quality
+
+    assert _domain_quality(
+        _domain(
+            "https://www.bis.gov/press-release/commerce-proposes-reporting-requirements-frontier-ai-models"
+        )
+    ) == 1.0
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_domain"),
+    [
+        ("欧盟针对基础模型透明度义务有哪些要求？", "digital-strategy.ec.europa.eu"),
+        ("美国针对基础模型透明度义务有哪些要求？", "bis.gov"),
+        ("英国针对基础模型透明度义务有哪些要求？", "gov.uk"),
+        ("中国针对基础模型透明度义务有哪些要求？", "cac.gov.cn"),
+    ],
+)
+def test_jurisdiction_policy_seed_is_object_specific(query, expected_domain):
+    from conflux.tools.web import _official_seed_results
+
+    seeds = _official_seed_results(query)
+
+    assert len(seeds) == 1
+    assert expected_domain in seeds[0]["url"]
+
+
 def test_web_claim_extraction_reflows_pdf_line_wrapping():
     from conflux.tools.web import _claim_from_web_content
 
@@ -843,6 +936,141 @@ def test_web_claim_extraction_reflows_pdf_line_wrapping():
     assert "quantum-readiness roadmaps" in claim
     assert "cryptographic inventories" in claim
     assert "engage vendors" in claim
+
+
+def test_web_claim_extraction_prefers_policy_obligation_over_footer_link():
+    from conflux.tools.web import _claim_from_web_content
+
+    text = (
+        "The agency released a proposed rule. "
+        "Today's proposed rule requires developers of the most powerful AI models "
+        "and computing clusters to provide detailed reporting to the federal government. "
+        "Additional information on industrial base activities can be found online."
+    )
+
+    claim = _claim_from_web_content(
+        "site:bis.gov frontier AI model proposed reporting requirements",
+        text,
+    )
+
+    assert "requires developers" in claim
+    assert "detailed reporting" in claim
+    assert "Additional information" not in claim
+
+
+def test_web_claim_extraction_rejects_government_copyright_footer_as_obligation():
+    from conflux.tools.web import _claim_from_web_content
+
+    text = (
+        "The interim measures require generative AI service providers to protect users' "
+        "personal information and label generated content where required.\n\n"
+        "Without written authorization from www.gov.cn, such content shall not be "
+        "republished or used in any form."
+    )
+
+    claim = _claim_from_web_content(
+        "site:gov.cn generative AI services interim measures provider obligations",
+        text,
+    )
+
+    assert "require generative AI service providers" in claim
+    assert "Without written authorization" not in claim
+
+
+def test_web_extracts_complementary_policy_claims_from_one_official_body():
+    from conflux.tools.web import _claims_from_web_content
+
+    body = (
+        "The authority released a Notice of Proposed Rulemaking. "
+        "Providers must publish technical documentation and a training-content summary. "
+        "The rule applies to providers that place covered models on the market. "
+        "The AI Office and national competent authorities may request the documentation."
+    )
+
+    claims = _claims_from_web_content(
+        "What transparency obligations apply to foundation models?",
+        body,
+        matched_query="site:official.example foundation model transparency rule",
+    )
+
+    combined = " ".join(claims)
+    assert len(claims) >= 3
+    assert "technical documentation" in combined
+    assert "applies to providers" in combined
+    assert "competent authorities" in combined
+
+
+def test_web_fetch_retries_one_transient_ssl_eof(monkeypatch):
+    import time
+
+    from conflux.tools import web
+
+    calls = []
+
+    def fake_fetch(url, **kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            return web.FetchedContent(
+                url=url,
+                final_url=url,
+                title="UK policy",
+                text="",
+                content_type="",
+                content_kind="unfetched",
+                status="failed",
+                error="URLError: SSL UNEXPECTED_EOF_WHILE_READING",
+            )
+        return web.FetchedContent(
+            url=url,
+            final_url=url,
+            title="UK policy",
+            text="Existing regulators implement appropriate AI transparency principles.",
+            content_type="text/html",
+            content_kind="html",
+            status="success",
+        )
+
+    monkeypatch.setattr(web, "fetch_url_content", fake_fetch)
+    result = web._fetch_url_content_with_retry(
+        "https://www.gov.uk/government/publications/ai-regulation/white-paper",
+        title_hint="UK policy",
+        deadline_at=time.time() + 30,
+        commit_reserve_seconds=0,
+    )
+
+    assert result.usable is True
+    assert len(calls) == 2
+
+
+def test_evidence_table_preserves_reference_metadata():
+    from conflux.evidence import build_evidence_graph_from_results
+    from conflux.graph_p1 import _evidence_table
+    from conflux.source_status import AgentClaim, SourceResult
+
+    result = SourceResult(
+        source="Web",
+        status="success",
+        content="Official policy evidence.",
+        claims=[AgentClaim(
+            claim="Official policy evidence.",
+            source="Web",
+            verbatim_quote="Official policy evidence.",
+            paper_id="https://official.example/policy",
+            document_title="Official AI Policy",
+            authors=["Policy Office"],
+            organization="Official Authority",
+            evidence_refs=["[Web:https://official.example/policy]"],
+            evidence_class="authoritative_document",
+            content_kind="html",
+        )],
+        evidence_class="authoritative_document",
+    )
+
+    table = _evidence_table(build_evidence_graph_from_results({"Web": result}))
+
+    assert table[0]["document_title"] == "Official AI Policy"
+    assert table[0]["authors"] == ["Policy Office"]
+    assert table[0]["organization"] == "Official Authority"
 
 
 def test_web_fetch_backfills_inaccessible_priority_page(monkeypatch):
@@ -954,7 +1182,10 @@ def test_semantic_reranker_failure_is_explicit_unreviewed():
     from conflux.rag.reranker import SemanticReranker
 
     class Model:
+        calls = 0
+
         def invoke(self, messages):
+            self.calls += 1
             raise TimeoutError("reranker timeout")
 
     scored = [{
@@ -962,10 +1193,16 @@ def test_semantic_reranker_failure_is_explicit_unreviewed():
         "score": 0.7,
         "breakdown": {},
     }]
-    reranked = SemanticReranker(Model()).rerank("query", scored)
+    model = Model()
+    reranker = SemanticReranker(model)
+    reranked = reranker.rerank("query", scored)
+    second = reranker.rerank("another query", scored)
+
+    assert model.calls == 1
     assert reranked[0]["semantic_score"] is None
     assert reranked[0]["rerank_status"] == "unreviewed"
     assert "TimeoutError" in reranked[0]["semantic_reason"]
+    assert "circuit open" in second[0]["semantic_reason"]
 
 
 def test_semantic_reranker_accepts_provider_json_wrappers_and_jsonl():
@@ -1451,6 +1688,25 @@ def test_answer_claims_treat_bold_hypothesis_sections_as_analysis():
     claims = _answer_claims(report)
     assert len(claims) == 1
     assert re.search(r"\[RAG:", claims[0])
+
+
+def test_answer_claims_exclude_explicit_pending_verification_rows():
+    from conflux.graph_p1 import _answer_claims
+
+    report = """## 回答
+
+### 英国
+
+- **待核验：** 缺少可核验正文证据；未覆盖比较范围与适用条件。
+
+### 美国
+
+The official rule requires reporting by covered developers.[1]
+"""
+
+    assert _answer_claims(report) == [
+        "The official rule requires reporting by covered developers.[1]"
+    ]
 
 
 def test_answer_claims_exclude_mitigation_recommendations():
@@ -2437,6 +2693,38 @@ def test_chinese_geoprocessing_queries_produce_english_academic_variant():
     assert "ethics" in variants
 
 
+def test_policy_query_does_not_collapse_to_generic_current_model_search():
+    from conflux.query_planner import is_academic_query, plan_queries
+    from conflux.tools.web import _academic_query_variants
+
+    query = "当前主要司法辖区对基础模型透明度义务有哪些可核验差异？"
+    plan = plan_queries(query, target="web", max_subqueries=6)
+    variants = _academic_query_variants(plan.bilingual_queries or [])
+
+    assert is_academic_query(query) is False
+    assert "current model" not in (plan.bilingual_queries or [])
+    assert "current model" not in variants
+
+
+def test_policy_query_produces_english_and_official_jurisdiction_variants():
+    from conflux.query_planner import plan_queries
+
+    query = "当前主要司法辖区对基础模型透明度义务有哪些可核验差异？"
+    plan = plan_queries(query, target="web", max_subqueries=12)
+    bilingual = "\n".join(plan.bilingual_queries or []).casefold()
+    official = "\n".join(
+        item.casefold() for item in plan.subqueries if item.startswith("site:")
+    )
+
+    assert "foundation model" in bilingual
+    assert "transparency obligations" in bilingual
+    assert "major jurisdictions" in bilingual
+    assert "site:eur-lex.europa.eu" in official
+    assert "site:federalregister.gov" in official
+    assert "site:gov.uk" in official
+    assert "site:cac.gov.cn" in official
+
+
 def test_academic_query_variants_remove_mixed_language_noise():
     from conflux.query_planner import plan_queries
     from conflux.tools.web import _academic_query_variants
@@ -2683,8 +2971,57 @@ def test_geoprocessing_query_rejects_generic_automation_paper_without_topic_anch
     assert filtered[0]["_filter_reason"] == "missing_topic_anchor"
 
 
+def test_policy_query_rejects_generic_ai_page_without_model_anchor():
+    from conflux.tools.web import _filter_web_results
+
+    kept, filtered = _filter_web_results(
+        "当前主要司法辖区对基础模型透明度义务有哪些差异？",
+        [{
+            "title": "Government announces a general AI innovation event",
+            "snippet": "A current public-sector event about technology and digital services.",
+            "url": "https://example.gov/current-ai-event",
+            "matched_query": "current AI policy",
+        }],
+    )
+
+    assert kept == []
+    assert filtered[0]["_filter_reason"] == "missing_topic_anchor"
+
+
+def test_fetched_body_rerank_caps_missing_policy_topic_anchor():
+    from conflux.tools import web
+
+    reranked = web._rerank_fetched_results(
+        "当前主要司法辖区对基础模型透明度义务有哪些差异？",
+        [{
+            "title": "Foundation model transparency policy",
+            "snippet": "A discovery snippet mentions GPAI documentation requirements.",
+            "url": "https://example.gov/policy",
+            "matched_query": "foundation model transparency obligations",
+            "matched_queries": ["foundation model transparency obligations"],
+            "_score": 0.9,
+            "fetch": web.FetchedContent(
+                url="https://example.gov/policy",
+                final_url="https://example.gov/home",
+                title="Government services home",
+                text="Public services, travel information, business registration, and contact details.",
+                content_type="text/html",
+                content_kind="html",
+                status="success",
+            ),
+        }],
+    )
+
+    assert reranked[0]["_final_score"] < 0.55
+    assert reranked[0]["_breakdown"]["fetched_topic_anchor"] == 0
+
+
 def test_successful_web_result_reports_only_items_above_fact_threshold():
-    from conflux.tools.web import _reported_web_results
+    from conflux.tools.web import (
+        FetchedContent,
+        _grounded_official_seed,
+        _reported_web_results,
+    )
 
     results = [
         {"url": "https://example.org/direct", "_final_score": 0.72},
@@ -2692,6 +3029,24 @@ def test_successful_web_result_reports_only_items_above_fact_threshold():
     ]
     assert _reported_web_results(results, "success") == [results[0]]
     assert _reported_web_results(results, "low_relevance") == results
+
+    official = {
+        "url": "https://official.example/policy",
+        "provider_source": "official_seed",
+        "_final_score": 0.42,
+        "_breakdown": {"fetched_topic_anchor": 1},
+        "fetch": FetchedContent(
+            url="https://official.example/policy",
+            final_url="https://official.example/policy",
+            title="Official policy",
+            text="The official policy body defines a directly relevant obligation.",
+            content_type="text/html",
+            content_kind="html",
+            status="success",
+        ),
+    }
+    assert _grounded_official_seed(official) is True
+    assert _reported_web_results([results[1], official], "success") == [official]
 
 
 def test_output_rubric_rejects_narrow_fully_cited_counterexample():
@@ -2788,6 +3143,8 @@ def test_citation_compiler_builds_numeric_references_and_final_confidence_append
         "verbatim_quote": "Incomplete metadata and distribution shifts limit deployment across regions.",
         "paper_id": "paper-1",
         "document_title": "Geoprocessing Automation",
+        "authors": ["A. Researcher"],
+        "published_at": "2025-03-02",
         "paper_section": "limitations",
         "evidence_refs": [ref],
         "evidence_class": "peer_reviewed",
@@ -2819,6 +3176,7 @@ def test_citation_compiler_builds_numeric_references_and_final_confidence_append
     assert ref not in report
     assert "[1]" in report
     assert "引用内容：Incomplete metadata" in report
+    assert "A. Researcher；2025" in report
     assert report.rfind("## 置信度附录") > report.rfind("## 参考文献与证据")
     assert entries[0].number == 1
     assert confidence[0].level == "高"
@@ -2828,6 +3186,45 @@ def test_citation_compiler_builds_numeric_references_and_final_confidence_append
         {"RAG": {"status": "success"}},
     )
     assert findings["invalid_citation_count"] == 0
+
+
+def test_citation_compiler_aggregates_distinct_quotes_from_the_same_source():
+    from conflux.citation_compiler import CitationCompiler
+
+    ref = "[Web:https://official.example/policy]"
+    evidence = [
+        {
+            "id": "scope",
+            "claim": "The rule applies to covered providers.",
+            "verbatim_quote": "The rule applies to covered providers.",
+            "document_title": "Official policy",
+            "url": "https://official.example/policy",
+            "evidence_refs": [ref],
+        },
+        {
+            "id": "mechanism",
+            "claim": "Providers must publish technical documentation.",
+            "verbatim_quote": "Providers must publish technical documentation.",
+            "document_title": "Official policy",
+            "url": "https://official.example/policy",
+            "evidence_refs": [ref],
+        },
+    ]
+
+    report, entries, confidence = CitationCompiler(evidence).compile(
+        f"## 回答\n\nThe policy defines scope and documentation duties.{ref}",
+        claim_assessments=[{
+            "claim_id": "mechanism",
+            "wording": "Providers must publish technical documentation.",
+            "evidence_ids": ["mechanism"],
+            "reliability": "verified",
+        }],
+    )
+
+    assert len(entries) == 1
+    assert "The rule applies to covered providers." in report
+    assert "Providers must publish technical documentation." in report
+    assert confidence[0].citation_numbers == [1]
 
 
 def test_numeric_citation_repair_requires_complete_acquired_ref_mapping():

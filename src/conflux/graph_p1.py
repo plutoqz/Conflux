@@ -807,13 +807,19 @@ def _evidence_merge_node(state: P1ResearchState, verifier_model: Any) -> dict:
         conflicts.append({"claim": left.claim, "evidence_ids": [left.id, right.id], "reason": "surface contradiction"})
     conflict_analysis = ""
     if conflicts:
+        prompt_conflicts, prompt_evidence = _conflict_arbitration_payload(
+            _evidence_table(graph),
+            conflicts,
+            query=state["query"],
+        )
         prompt = f"""Analyze only the genuine conflicts below. Do not use majority voting.
 Explain whether differences come from definitions, dates, samples, methods, or a real contradiction.
 State the strongest wording the final answer may use.
 
 Query: {state['query']}
-Conflicts: {json.dumps(conflicts, ensure_ascii=False)}
-Evidence: {json.dumps(_evidence_table(graph), ensure_ascii=False)}"""
+Conflicts: {json.dumps(prompt_conflicts, ensure_ascii=False)}
+Evidence: {json.dumps(prompt_evidence, ensure_ascii=False)}
+Keep the response under 800 characters and discuss only the supplied conflicts."""
         try:
             response = verifier_model.invoke([
                 SystemMessage(content="You are a source-conflict analyst."),
@@ -1450,7 +1456,70 @@ def _compact_evidence(evidence: list[dict]) -> list[dict]:
         "paper_section", "evidence_refs", "limitations", "evidence_class",
         "relevance", "directness", "subquestion_id", "page_start", "page_end",
     )
-    return [{key: item.get(key) for key in keys if item.get(key) not in (None, "", [], {})} for item in evidence]
+    compact = []
+    for item in evidence:
+        payload = {key: item.get(key) for key in keys if item.get(key) not in (None, "", [], {})}
+        for key, limit in (("claim", 600), ("verbatim_quote", 900), ("document_title", 240)):
+            if key in payload:
+                payload[key] = str(payload[key])[:limit]
+        if "limitations" in payload:
+            payload["limitations"] = [str(value)[:240] for value in payload["limitations"][:4]]
+        if "evidence_refs" in payload:
+            payload["evidence_refs"] = [str(value)[:500] for value in payload["evidence_refs"][:6]]
+        compact.append(payload)
+    return compact
+
+
+def _conflict_arbitration_payload(
+    evidence: list[dict],
+    conflicts: list[dict],
+    *,
+    query: str,
+    conflict_limit: int = 10,
+    evidence_limit: int = 20,
+) -> tuple[list[dict], list[dict]]:
+    """Bound arbitration input while retaining evidence cited by each conflict."""
+
+    compact_conflicts: list[dict] = []
+    referenced_ids: list[str] = []
+    for raw in conflicts[: max(1, int(conflict_limit))]:
+        if not isinstance(raw, dict):
+            continue
+        evidence_ids = [
+            str(value).strip()
+            for value in raw.get("evidence_ids") or []
+            if str(value).strip()
+        ][:2]
+        referenced_ids.extend(evidence_ids)
+        compact_conflicts.append({
+            "claim": str(raw.get("claim") or "")[:400],
+            "evidence_ids": evidence_ids,
+            "reason": str(raw.get("reason") or "")[:240],
+        })
+
+    limit = max(1, int(evidence_limit))
+    by_id = {str(item.get("id") or ""): item for item in evidence}
+    referenced = [
+        by_id[evidence_id]
+        for evidence_id in dict.fromkeys(referenced_ids)
+        if evidence_id in by_id
+    ][:limit]
+    referenced_set = {str(item.get("id") or "") for item in referenced}
+    remaining_limit = limit - len(referenced)
+    selected = []
+    if remaining_limit > 0:
+        selected = _select_evidence(
+            [item for item in evidence if str(item.get("id") or "") not in referenced_set],
+            remaining_limit,
+            query=query,
+        )
+    compact_evidence = _compact_evidence([*referenced, *selected][:limit])
+    for item in compact_evidence:
+        if "claim" in item:
+            item["claim"] = str(item["claim"])[:400]
+        if "verbatim_quote" in item:
+            item["verbatim_quote"] = str(item["verbatim_quote"])[:700]
+    return compact_conflicts, compact_evidence
 
 
 def _answer_evidence(state: P1ResearchState, limit: int) -> list[dict]:
@@ -2344,7 +2413,8 @@ def _answer_claims(report: str) -> list[str]:
             continue
         inline_label = re.match(r"^\*\*(.+?)\*\*\s*[:：]?", cleaned)
         if not has_citation and inline_label and re.search(
-            r"(?:子问题.{0,12}(?:结论|合并分析)|结论摘要|^结论$|机制与影响|缓解方向|模型分析|分析与建议|非外部事实)",
+            r"(?:子问题.{0,12}(?:结论|合并分析)|结论摘要|^结论$|机制与影响|缓解方向|"
+            r"模型分析|分析与建议|非外部事实|待核验|证据缺口|未覆盖问题|限制)",
             inline_label.group(1),
         ):
             continue
@@ -2362,12 +2432,13 @@ def _answer_claims(report: str) -> list[str]:
         synthesis_prefixes = (
             "这些", "因此", "由此", "综合来看", "总体而言", "换言之", "这意味着",
             "现有证据", "当前证据", "本次检索", "论文未", "直接证据未",
-            "本轮报告综合", "本轮综合", "本轮没有取得", "当前材料不足",
+            "本轮报告综合", "本轮综合", "本轮取得", "本轮没有取得", "当前材料不足",
             "基于现有文献", "根据现有文献", "根据直接文献证据",
             "由于缺乏直接", "鉴于缺乏直接",
             "三个系统的直接证据", "三者的直接证据", "以下比较", "下表",
             "these issues", "therefore", "overall", "in synthesis", "this suggests",
             "current evidence", "the available evidence", "the paper does not",
+            "model analysis", "open question", "模型分析", "开放问题",
         )
         if len(cleaned) >= 30 and not lowered.startswith(synthesis_prefixes):
             claims.append(cleaned)
@@ -2572,7 +2643,13 @@ def _invoke_json_object(model: Any, system: str, prompt: str) -> tuple[str, dict
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start < 0 or end <= start:
         raise ValueError("model response did not contain a JSON object")
-    value = json.loads(cleaned[start : end + 1])
+    fragment = cleaned[start : end + 1]
+    try:
+        value = json.loads(fragment)
+    except json.JSONDecodeError:
+        from json_repair import repair_json
+
+        value = repair_json(fragment, return_objects=True)
     if not isinstance(value, dict):
         raise ValueError("model response must be a JSON object")
     return raw, value
@@ -2620,6 +2697,9 @@ def _evidence_table(graph: EvidenceGraph) -> list[dict]:
             "evidence_class": node.evidence_class,
             "evidence_refs": node.evidence_refs,
             "verbatim_quote": node.verbatim_quote,
+            "document_title": node.document_title,
+            "authors": list(node.authors),
+            "organization": node.organization,
             "paper_id": node.paper_id,
             "paper_section": node.paper_section,
             "page_start": node.page_start,
@@ -2633,6 +2713,11 @@ def _evidence_table(graph: EvidenceGraph) -> list[dict]:
             "subquestion_id": node.subquestion_id,
             "relevance": node.relevance,
             "limitations": node.limitations,
+            "domain_relevance": node.domain_relevance,
+            "claim_entailment": node.claim_entailment,
+            "evidence_role": node.evidence_role,
+            "source_identity": node.source_identity,
+            "body_valid": node.body_valid,
         }
         for node in graph.nodes.values()
     ]

@@ -91,18 +91,21 @@ class PromptRouterModel:
                 "gaps": [],
                 "conflicts": [],
             }))
-        if "Write one section" in prompt:
-            refs = re.findall(r"\[Web:[^\]]+\]", prompt)
-            if not refs:
-                return AIMessage(content=(
-                    "Model analysis: this dimension remains a conceptual limitation, but no "
-                    "external body evidence was available in this run."
-                ))
-            citation = f" {refs[0]}"
-            return AIMessage(content=(
-                "The official body evidence documents a production limitation and its "
-                f"operational boundary.{citation}"
-            ))
+        if "Write all sections" in prompt:
+            packs_text = prompt.split("Section packs: ", 1)[1].split("\nRevision context:", 1)[0]
+            packs = json.loads(packs_text)
+            sections = []
+            for pack in packs:
+                refs = (pack.get("evidence_pack") or {}).get("allowed_citations") or []
+                citation = f" {refs[0]}" if refs else ""
+                content = (
+                    "The official body evidence documents a production limitation and its "
+                    f"operational boundary.{citation}"
+                    if refs else
+                    "Model analysis: this dimension remains conceptual because no external body evidence was available."
+                )
+                sections.append({"section_id": pack["section_id"], "content": content})
+            return AIMessage(content=json.dumps({"sections": sections}))
         if "Create the two global layers" in prompt:
             refs = re.findall(r"\[Web:[^\]]+\]", prompt)
             if not refs:
@@ -168,14 +171,16 @@ def test_p1_5_graph_completes_with_rag_empty_and_web_body_evidence() -> None:
             content="The official document describes a production limitation.",
             evidence_class="authoritative_document",
             claims=[AgentClaim(
-                claim=(
-                    f"The official document for query {slug} describes a production limitation and "
-                    "its operational boundary."
+                    claim=(
+                        f"The official document for query {slug} defines the production scope, "
+                        "describes limitations and failure mechanisms, assesses operational impact "
+                        "and boundary conditions, and reviews mitigations and open questions."
                 ),
                 source="Web",
-                verbatim_quote=(
-                    "The production control requires verified changes and a recoverable "
-                    "operational checkpoint."
+                    verbatim_quote=(
+                        "Within the documented scope, production limitations arise from failure "
+                        "mechanisms that affect operations under stated boundary conditions; "
+                        "the document assesses impact, mitigation, and unresolved open questions."
                 ),
                 paper_id=url,
                 paper_section="body",
@@ -219,8 +224,10 @@ def test_p1_5_graph_completes_with_rag_empty_and_web_body_evidence() -> None:
     }
     assert query_log["rag"]
     assert query_log["web"]
-    assert planned_questions <= set(query_log["rag"])
-    assert planned_questions <= set(query_log["web"])
+    assert all(any(question in routed for routed in query_log["rag"]) for question in planned_questions)
+    assert all(any(question in routed for routed in query_log["web"]) for question in planned_questions)
+    assert all("autonomous coding agents" in routed for routed in query_log["rag"])
+    assert all("autonomous coding agents" in routed for routed in query_log["web"])
     prompt_corpus = "\n".join(
         [*query_log["rag"], *query_log["web"]]
         + [
@@ -258,11 +265,23 @@ def test_p1_5_graph_completes_with_rag_empty_and_web_body_evidence() -> None:
     )
     assert result["final_answer"].strip()
     assert "[1]" in result["final_answer"]
+    assert re.search(
+        r"\b(?:dim-[\w-]+|(?:assess|define|identify|explain|review)_[a-z_]+)\b",
+        result["final_answer"],
+        re.IGNORECASE,
+    ) is None
     assert result["_pipeline_stage"] == "completed"
     assert result["_run_summary"]["mode"] == "p15"
     assert planner.calls
     assert analyst.calls
+    assert sum(
+        "Analyze acquired evidence" in str(messages[-1].content)
+        for messages in analyst.calls
+    ) == 1
     assert synthesizer.calls
+    synthesis_prompts = [str(messages[-1].content) for messages in synthesizer.calls]
+    assert sum("Write all sections" in prompt for prompt in synthesis_prompts) == 1
+    assert sum("Create the two global layers" in prompt for prompt in synthesis_prompts) == 1
     assert verifier.calls
 
 
@@ -397,7 +416,8 @@ def test_source_plan_web_budget_reaches_profiled_tool_arguments() -> None:
     assert result.status == "success"
     assert calls == [{
         "query": "Find recovery body evidence",
-        "max_subqueries": 1,
+        # One routed SourcePlan query still permits internal Web rewrites.
+        "max_subqueries": 7,
         "fetch_limit": 2,
         "fetch_attempts": 6,
     }]
@@ -480,12 +500,16 @@ def test_p1_5_graph_dual_external_failure_keeps_public_envelope_without_citation
     ]
     assert result["_source_statuses"]["RAG"]["status"] == "no_evidence"
     assert result["_source_statuses"]["Web"]["status"] == "failed"
-    assert "Model analysis:" in report
+    assert "本轮尚未取得足以形成外部事实结论的正文证据" in report
     assert "[RAG:" not in report
     assert "[Web:" not in report
     assert re.search(r"\[\d+(?:,\d+)*\]", report) is None
     assert result["_factcheck_status"] == "passed"
     assert result["_pipeline_stage"] == "completed"
+    assert not any(
+        "Write all sections" in str(messages[-1].content)
+        for messages in model.calls
+    )
 
 
 def test_finalize_combines_base_generalization_and_richness_gates(

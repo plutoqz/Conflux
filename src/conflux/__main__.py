@@ -14,7 +14,7 @@ from .agent import ResearchAgent, create_sub_agent
 from .checkpointing import create_checkpointer, graph_config
 from .config import load as load_config
 from .graph import create_graph
-from .graph_v2 import create_multi_agent_graph
+from .graph_v2 import create_multi_agent_graph, create_v2_research_graph
 from .graph_p1 import create_p1_research_graph
 from .graph_p15 import create_p15_research_graph
 from .model_factory import (
@@ -119,6 +119,17 @@ def index_command(docs_dir: str) -> None:
     print(f"Indexed {indexed} child chunks into the vector store.")
 
 
+def _new_v2_state(
+    query: str,
+    *,
+    deadline_at: float | None = None,
+) -> dict:
+    """Create initial state for the V2 answer_first pipeline."""
+    from .graph_v2 import _new_state
+
+    return _new_state(query, deadline_at=deadline_at)
+
+
 def _empty_multi_agent_state(
     query: str,
     *,
@@ -221,7 +232,7 @@ def query_command(
         enabled = generalization_config.get("enabled", True)
         if str(enabled).strip().casefold() in {"0", "false", "no", "off"}:
             pipeline = "p1"
-    use_p1_roles = mode == "phase2" and pipeline in {"p1", "p15"}
+    use_p1_roles = mode == "phase2" and pipeline in {"p1", "p15", "answer_first"}
     credential_problems = validate_runtime_credentials(
         research_profile.depth,
         include_legacy_presets=not use_p1_roles,
@@ -236,11 +247,12 @@ def query_command(
     vector_store = create_vector_store()
     retriever = HybridRetriever(vector_store)
     print("-> Initializing models...")
-    if mode == "phase2" and pipeline in {"p1", "p15"}:
+    if mode == "phase2" and pipeline in {"p1", "p15", "answer_first"}:
         role_models, model_trace = create_research_models(
             research_profile.depth,
             deadline_at=deadline_at,
             commit_reserve_seconds=commit_reserve_seconds,
+            preserve_stage_budgets=(pipeline == "p15"),
         )
         set_model(role_models["analyst"])
         rag_tool = create_rag_tool(
@@ -289,6 +301,33 @@ def query_command(
             "iteration_count": 0,
         }
         final_state, trace_events = _run_phase1_graph(graph, initial_state, query)
+    elif pipeline == "answer_first":
+        # V2 answer_first pipeline — simplified 4-step flow
+        retriever = HybridRetriever(vector_store)
+        rag_agent = create_sub_agent("rag", role_models["reranker"], rag_tool)
+        web_agent = create_sub_agent("web", role_models["reranker"], web_tool)
+        graph = create_v2_research_graph(
+            rag_agent,
+            web_agent,
+            planner_model=role_models["planner"],
+            synthesizer_model=role_models["synthesizer"],
+            profile=research_profile,
+            retriever=retriever,
+            reranker_model=role_models.get("reranker"),
+            deadline_at=deadline_at,
+            commit_reserve_seconds=commit_reserve_seconds,
+        )
+        initial_state = _new_v2_state(
+            query,
+            deadline_at=deadline_at,
+        )
+        final_state, trace_events = _run_phase2_graph(
+            graph,
+            initial_state,
+            query,
+            stream_events=stream_events,
+            thread_id=effective_thread_id,
+        )
     elif pipeline in {"p1", "p15"}:
         rag_agent = create_sub_agent("rag", role_models["reranker"], rag_tool)
         web_agent = create_sub_agent("web", role_models["reranker"], web_tool)
@@ -351,21 +390,76 @@ def query_command(
             thread_id=effective_thread_id,
         )
 
-    answer = final_state.get("final_answer", "")
+    if pipeline == "answer_first":
+        # V2: 报告已在管道内完成组装
+        answer = final_state.get("_report_markdown") or ""
+        if not answer:
+            answer = final_state.get("final_answer") or ""
+    else:
+        answer = final_state.get("final_answer", "")
     artifacts = None
+    delivery_status = str(final_state.get("_delivery_status") or "")
+    diagnostic_only = pipeline == "p15" and delivery_status == "diagnostic_only"
+    is_v2 = pipeline == "answer_first"
     if answer:
-        print(f"\n{answer}\n")
-        artifacts = write_report_artifacts(query, final_state, output_dir=output_dir)
-        print(f"Markdown report: {artifacts.markdown_path.resolve()}")
-        print(f"HTML report: {artifacts.html_path.resolve()}")
-        if artifacts.evidence_json_path:
-            print(f"Evidence JSON: {artifacts.evidence_json_path.resolve()}")
-        if artifacts.raw_sources_path:
-            print(f"Raw sources: {artifacts.raw_sources_path.resolve()}")
-        if artifacts.deep_evidence_json_path:
-            print(f"Deep evidence JSON: {artifacts.deep_evidence_json_path.resolve()}")
-        if artifacts.audit_markdown_path:
-            print(f"Research audit: {artifacts.audit_markdown_path.resolve()}")
+        print(f"\n{answer[:3000]}\n")
+        if is_v2:
+            # V2: write report directly, bypass old delivery-gate write path
+            from .report import (
+                _atomic_write_text,
+                _strip_code_fence,
+                markdown_to_html,
+                slugify,
+            )
+            from datetime import datetime
+            out_dir = Path(output_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            answer_clean = _strip_code_fence(answer)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            stem = f"{stamp}-{slugify(query)}"
+            md_path = out_dir / f"{stem}.md"
+            html_path = out_dir / f"{stem}.html"
+            _atomic_write_text(md_path, answer_clean)
+            _atomic_write_text(html_path, markdown_to_html(query, answer_clean))
+            # Also stage in workbench query dir for results visibility
+            wb_dir = Path("reports/workbench/query")
+            wb_dir.mkdir(parents=True, exist_ok=True)
+            wb_draft = wb_dir / f"{stem}.draft.md"
+            try:
+                _atomic_write_text(wb_draft, answer_clean)
+            except Exception:
+                pass
+            artifacts = type("Artifacts", (), {
+                "markdown_path": md_path,
+                "html_path": html_path,
+                "evidence_json_path": None,
+                "raw_sources_path": None,
+                "deep_evidence_json_path": None,
+                "audit_markdown_path": None,
+            })()
+            confidence = final_state.get("_confidence", "unverified")
+            confidence_label = {"high": "高可信", "medium": "中可信", "low": "低可信", "unverified": "未核验"}.get(confidence, confidence)
+            print(f"Report Markdown: {md_path.resolve()}")
+            print(f"Report HTML: {html_path.resolve()}")
+            print(f"可信度：{confidence_label}")
+        else:
+            artifacts = write_report_artifacts(
+                query,
+                final_state,
+                output_dir=output_dir,
+                diagnostic=diagnostic_only,
+            )
+            label = "Diagnostic" if diagnostic_only else "Report"
+            print(f"{label} Markdown: {artifacts.markdown_path.resolve()}")
+            print(f"{label} HTML: {artifacts.html_path.resolve()}")
+            if artifacts.evidence_json_path:
+                print(f"Evidence JSON: {artifacts.evidence_json_path.resolve()}")
+            if artifacts.raw_sources_path:
+                print(f"Raw sources: {artifacts.raw_sources_path.resolve()}")
+            if artifacts.deep_evidence_json_path:
+                print(f"Deep evidence JSON: {artifacts.deep_evidence_json_path.resolve()}")
+            if artifacts.audit_markdown_path:
+                print(f"Research audit: {artifacts.audit_markdown_path.resolve()}")
     else:
         print("\nWarning: no final answer was generated. Check API, embedding, and tool configuration.\n")
 
@@ -374,7 +468,39 @@ def query_command(
     summary_path = trace_root / f"{run_id}.summary.json"
     write_trace_jsonl(trace_events, trace_path)
     summary = dict(final_state.get("_run_summary") or {})
-    summary.update({
+    if is_v2:
+        # V2 summary
+        summary.update({
+            "delivery_status": final_state.get("_confidence", "unverified"),
+            "delivery_assessment": {},
+            "report_md_path": str(artifacts.markdown_path.resolve()) if artifacts and artifacts.markdown_path else "",
+            "report_html_path": str(artifacts.html_path.resolve()) if artifacts and artifacts.html_path else "",
+            "report_evidence_path": "",
+            "report_sources_path": "",
+            "report_deep_evidence_path": "",
+            "report_audit_path": "",
+            "diagnostic_markdown_path": "",
+            "diagnostic_html_path": "",
+            "diagnostic_evidence_path": "",
+            "diagnostic_sources_path": "",
+            "diagnostic_deep_evidence_path": "",
+            "diagnostic_audit_path": "",
+            "run_id": run_id,
+            "thread_id": effective_thread_id,
+            "query": query,
+            "final_answer": answer[:2000] if answer else "",
+            "checkpoint_backend": checkpoint.backend,
+            "resumed": bool(resume),
+            "trace_path": str(trace_path),
+            "run_status": final_state.get("_run_status"),
+            "report_available": bool(final_state.get("_report_available")),
+            "confidence": final_state.get("_confidence"),
+            "source_statuses": {},
+            "factcheck_status": "",
+            "quality": {},
+        })
+    else:
+        summary.update({
         "run_id": run_id,
         "thread_id": effective_thread_id,
         "query": query,
@@ -382,12 +508,20 @@ def query_command(
         "checkpoint_backend": checkpoint.backend,
         "resumed": bool(resume),
         "trace_path": str(trace_path),
-        "report_md_path": str(artifacts.markdown_path.resolve()) if artifacts else "",
-        "report_html_path": str(artifacts.html_path.resolve()) if artifacts else "",
-        "report_evidence_path": str(artifacts.evidence_json_path.resolve()) if artifacts and artifacts.evidence_json_path else "",
-        "report_sources_path": str(artifacts.raw_sources_path.resolve()) if artifacts and artifacts.raw_sources_path else "",
-        "report_deep_evidence_path": str(artifacts.deep_evidence_json_path.resolve()) if artifacts and artifacts.deep_evidence_json_path else "",
-        "report_audit_path": str(artifacts.audit_markdown_path.resolve()) if artifacts and artifacts.audit_markdown_path else "",
+        "delivery_status": delivery_status,
+        "delivery_assessment": final_state.get("_delivery_assessment") or {},
+        "report_md_path": str(artifacts.markdown_path.resolve()) if artifacts and not diagnostic_only else "",
+        "report_html_path": str(artifacts.html_path.resolve()) if artifacts and not diagnostic_only else "",
+        "report_evidence_path": str(artifacts.evidence_json_path.resolve()) if artifacts and artifacts.evidence_json_path and not diagnostic_only else "",
+        "report_sources_path": str(artifacts.raw_sources_path.resolve()) if artifacts and artifacts.raw_sources_path and not diagnostic_only else "",
+        "report_deep_evidence_path": str(artifacts.deep_evidence_json_path.resolve()) if artifacts and artifacts.deep_evidence_json_path and not diagnostic_only else "",
+        "report_audit_path": str(artifacts.audit_markdown_path.resolve()) if artifacts and artifacts.audit_markdown_path and not diagnostic_only else "",
+        "diagnostic_markdown_path": str(artifacts.markdown_path.resolve()) if artifacts and diagnostic_only else "",
+        "diagnostic_html_path": str(artifacts.html_path.resolve()) if artifacts and diagnostic_only else "",
+        "diagnostic_evidence_path": str(artifacts.evidence_json_path.resolve()) if artifacts and artifacts.evidence_json_path and diagnostic_only else "",
+        "diagnostic_sources_path": str(artifacts.raw_sources_path.resolve()) if artifacts and artifacts.raw_sources_path and diagnostic_only else "",
+        "diagnostic_deep_evidence_path": str(artifacts.deep_evidence_json_path.resolve()) if artifacts and artifacts.deep_evidence_json_path and diagnostic_only else "",
+        "diagnostic_audit_path": str(artifacts.audit_markdown_path.resolve()) if artifacts and artifacts.audit_markdown_path and diagnostic_only else "",
         "source_statuses": {
             source: payload.get("status")
             for source, payload in (final_state.get("_source_statuses") or {}).items()
@@ -403,6 +537,12 @@ def query_command(
         "raw_sources_path": summary["report_sources_path"],
         "deep_evidence_json_path": summary["report_deep_evidence_path"],
         "audit_markdown_path": summary["report_audit_path"],
+        "diagnostic_markdown_path": summary["diagnostic_markdown_path"],
+        "diagnostic_html_path": summary["diagnostic_html_path"],
+        "diagnostic_evidence_path": summary["diagnostic_evidence_path"],
+        "diagnostic_sources_path": summary["diagnostic_sources_path"],
+        "diagnostic_deep_evidence_path": summary["diagnostic_deep_evidence_path"],
+        "diagnostic_audit_path": summary["diagnostic_audit_path"],
     }
     print(f"Trace JSONL: {trace_path.resolve()}")
     print(f"Run summary: {summary_path.resolve()}")

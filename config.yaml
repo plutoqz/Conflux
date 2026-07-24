@@ -103,21 +103,27 @@ retrieval:
 
 agent:
   max_iterations: 3
-  confidence_threshold: 0.7
 
 research:
-  # Set to p1 to roll back to the previously accepted three-source pipeline.
-  pipeline: p15
+  # Set to p15 for P1.5 pipeline, answer_first for V2 simplified pipeline.
+  pipeline: answer_first
   depth: standard
   enable_l4: true
   max_deep_questions: 2
-  max_verify_iterations: 1
   max_rewrite_attempts: 2
   generalization:
     enabled: true
     min_external_evidence_per_dimension: 1
     authority_threshold: 0.75
     coverage_target: 0.8
+    domain_relevance_threshold: 0.7
+    claim_entailment_threshold: 0.7
+    delivery_gate:
+      enabled: true
+      citation_coverage_threshold: 0.9
+      limited_citation_coverage_threshold: 0.85
+      high_importance_coverage_threshold: 0.85
+      limited_high_importance_coverage_threshold: 0.6
     quick:
       narrow_dimension_target: 2
       broad_dimension_target: 4
@@ -201,7 +207,7 @@ research:
       synthesizer_max_tokens: 5500
       verifier_max_tokens: 1600
       token_budget: 75000
-      model_timeout_seconds: 70
+      model_timeout_seconds: 120
       max_retries: 0
       timeout_seconds: 240
     deep:
@@ -227,7 +233,7 @@ research:
       synthesizer_max_tokens: 6000
       verifier_max_tokens: 3200
       token_budget: 140000
-      model_timeout_seconds: 120
+      model_timeout_seconds: 240
       max_retries: 0
       timeout_seconds: 480
 

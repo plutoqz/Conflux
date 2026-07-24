@@ -98,16 +98,20 @@ def evaluate_p15_quality(state: dict[str, Any]) -> dict[str, Any]:
         for item in coverage_rows
         if str(item.get("dimension_id") or "")
     }
-    covered_high = {
-        dimension_id
-        for dimension_id in high_dimension_ids
-        if str((coverage_by_id.get(dimension_id) or {}).get("status") or "") == "covered"
-    }
-    high_coverage_ratio = (
-        len(covered_high) / len(high_dimension_ids)
-        if high_dimension_ids
-        else float(matrix.get("high_importance_coverage") or 0.0)
-    )
+    action_matrix = any(item.get("action_coverage") for item in coverage_rows)
+    if action_matrix:
+        high_coverage_ratio = float(matrix.get("high_importance_coverage") or 0.0)
+    else:
+        covered_high = {
+            dimension_id
+            for dimension_id in high_dimension_ids
+            if str((coverage_by_id.get(dimension_id) or {}).get("status") or "") == "covered"
+        }
+        high_coverage_ratio = (
+            len(covered_high) / len(high_dimension_ids)
+            if high_dimension_ids
+            else float(matrix.get("high_importance_coverage") or 0.0)
+        )
 
     draft_by_section = {
         str(item.get("section_id") or ""): item
@@ -215,6 +219,128 @@ def evaluate_p15_quality(state: dict[str, Any]) -> dict[str, Any]:
         "budget_within_hard_limits": budget_within_hard_limits,
         "failed_source_leak": failed_source_leak,
         "notes": notes,
+    }
+
+
+def evaluate_p15_delivery(
+    state: dict[str, Any],
+    *,
+    enabled: bool = True,
+    citation_coverage_threshold: float = 0.9,
+    limited_citation_coverage_threshold: float = 0.85,
+    high_importance_coverage_threshold: float = 0.85,
+    limited_high_importance_coverage_threshold: float = 0.6,
+) -> dict[str, Any]:
+    """Classify a P1.5 result as a report or a diagnostic artifact."""
+
+    if not enabled:
+        return {
+            "status": "deliverable",
+            "passed": True,
+            "gate_enabled": False,
+            "hard_failures": [],
+            "limitations": ["delivery gate disabled by configuration"],
+            "metrics": {},
+        }
+
+    findings = state.get("_factcheck_findings") or {}
+    matrix = state.get("_coverage_matrix") or {}
+    gate = state.get("_evidence_gate") or {}
+    dimensions = {
+        str(item.get("id") or ""): item
+        for item in (state.get("_domain_map") or {}).get("dimensions") or []
+        if isinstance(item, dict) and str(item.get("id") or "")
+    }
+    rows = [item for item in matrix.get("dimensions") or [] if isinstance(item, dict)]
+    core_scarce = [
+        str(item.get("dimension_id") or "")
+        for item in rows
+        if str(item.get("status") or "") == "evidence_scarce"
+        and _importance_value((dimensions.get(str(item.get("dimension_id") or "")) or {}).get("importance")) >= 0.7
+    ]
+    unresolved_high = [
+        item for item in state.get("_verification_issues") or []
+        if isinstance(item, dict)
+        and str(item.get("severity") or "").casefold() == "high"
+        and not bool(item.get("resolved"))
+    ]
+    citation_coverage = float(findings.get("verified_claim_ratio") or 0.0)
+    valid_citations = int(findings.get("valid_citation_count") or 0)
+    invalid_citations = int(findings.get("invalid_citation_count") or 0)
+    high_coverage = float(matrix.get("high_importance_coverage") or 0.0)
+    synthesis_status = str(state.get("_synthesis_status") or "").casefold()
+    synthesis_error = str(state.get("_synthesis_error") or "").strip()
+    factcheck_status = str(state.get("_factcheck_status") or "").casefold()
+    verifier_status = str(findings.get("semantic_verifier_status") or "not_run").casefold()
+
+    hard_failures: list[str] = []
+    if not str(state.get("final_answer") or "").strip():
+        hard_failures.append("empty_report")
+    if synthesis_status != "completed" or synthesis_error:
+        hard_failures.append("synthesis_incomplete")
+    if factcheck_status != "passed":
+        hard_failures.append("factcheck_not_passed")
+    if verifier_status in {"failed", "not_run"}:
+        hard_failures.append("semantic_verifier_unavailable")
+    if unresolved_high:
+        hard_failures.append("unresolved_high_severity_issue")
+    if invalid_citations:
+        hard_failures.append("invalid_citations")
+    if int(gate.get("external_passed") or 0) > 0 and valid_citations <= 0:
+        hard_failures.append("no_valid_citations")
+    if not bool(gate.get("passed")) or int(gate.get("external_passed") or 0) <= 0:
+        hard_failures.append("no_gate_eligible_external_evidence")
+    if core_scarce:
+        hard_failures.append("core_dimension_evidence_scarce")
+
+    limitations: list[str] = []
+    if citation_coverage < citation_coverage_threshold:
+        limitations.append("citation_coverage_below_delivery_target")
+    if high_coverage < high_importance_coverage_threshold:
+        limitations.append("high_importance_coverage_below_delivery_target")
+    if verifier_status == "not_required":
+        limitations.append("semantic_verifier_not_required_by_profile")
+    if verifier_status == "deterministic_fallback":
+        limitations.append("semantic_verifier_deterministic_fallback")
+    partial_core = [
+        str(item.get("dimension_id") or "")
+        for item in rows
+        if str(item.get("status") or "") in {"partial", "conflicting"}
+        and _importance_value((dimensions.get(str(item.get("dimension_id") or "")) or {}).get("importance")) >= 0.7
+    ]
+    if partial_core:
+        limitations.append("core_dimensions_partial_or_conflicting")
+
+    deliverable = (
+        not hard_failures
+        and verifier_status == "completed"
+        and citation_coverage >= max(0.0, min(1.0, citation_coverage_threshold))
+        and high_coverage >= max(0.0, min(1.0, high_importance_coverage_threshold))
+    )
+    limited = (
+        not hard_failures
+        and citation_coverage >= max(0.0, min(1.0, limited_citation_coverage_threshold))
+        and high_coverage >= max(0.0, min(1.0, limited_high_importance_coverage_threshold))
+    )
+    status = "deliverable" if deliverable else "limited" if limited else "diagnostic_only"
+    return {
+        "status": status,
+        "passed": status in {"deliverable", "limited"},
+        "gate_enabled": True,
+        "hard_failures": list(dict.fromkeys(hard_failures)),
+        "limitations": list(dict.fromkeys(limitations)),
+        "metrics": {
+            "factcheck_status": factcheck_status,
+            "semantic_verifier_status": verifier_status,
+            "citation_coverage": round(citation_coverage, 3),
+            "valid_citation_count": valid_citations,
+            "invalid_citation_count": invalid_citations,
+            "high_importance_coverage": round(high_coverage, 3),
+            "core_evidence_scarce": core_scarce,
+            "core_partial_or_conflicting": partial_core,
+            "gate_eligible_external_evidence": int(gate.get("external_passed") or 0),
+            "synthesis_status": synthesis_status,
+        },
     }
 
 

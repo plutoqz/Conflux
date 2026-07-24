@@ -94,6 +94,7 @@ class ResearchJob:
     source_statuses: dict[str, str] = field(default_factory=dict)
     factcheck_status: str = ""
     pipeline: str = ""
+    delivery_status: str = ""
     artifacts: dict[str, str] = field(default_factory=dict)
     error: str = ""
     current_stage: str = ""
@@ -107,7 +108,15 @@ class ResearchJob:
     def __post_init__(self) -> None:
         if self.deadline_at <= 0:
             self.deadline_at = self.started_at + max(1, self.timeout_seconds)
-        self.has_report = bool(self.has_report or self.final_answer)
+        self.has_report = bool(
+            (self.has_report or self.final_answer)
+            and self.delivery_status != "diagnostic_only"
+            and (
+                self.pipeline not in {"p15", "answer_first"}
+                or self.pipeline == "answer_first"
+                or self.delivery_status in {"deliverable", "limited"}
+            )
+        )
 
     @property
     def active(self) -> bool:
@@ -138,8 +147,14 @@ def _finish_job(
     preserve_report: bool = True,
 ) -> None:
     job.ended_at = time.time()
+    formal_delivery = (
+        job.pipeline == "answer_first"
+        or job.pipeline not in {"p15", "answer_first"}
+        or job.delivery_status in {"deliverable", "limited"}
+    )
     has_report = bool(
         preserve_report
+        and formal_delivery
         and (job.has_report or job.final_answer or job.artifacts.get("markdown_path"))
     )
     job.has_report = has_report
@@ -175,7 +190,18 @@ def _capture_report_snapshot(
     if not answer.strip():
         return
     job.final_answer = answer
-    job.has_report = True
+    is_p15 = bool(state.get("_scope_contract")) or str(
+        (state.get("_run_summary") or {}).get("mode") or ""
+    ) == "p15"
+    if is_p15:
+        job.pipeline = "p15"
+    delivery_status = str(state.get("_delivery_status") or "")
+    if delivery_status:
+        job.delivery_status = delivery_status
+    if not is_p15:
+        job.has_report = True
+    elif delivery_status in {"deliverable", "limited"}:
+        job.has_report = True
     job.factcheck_status = str(state.get("_factcheck_status") or job.factcheck_status)
     try:
         path = write_staged_markdown_report(
@@ -192,7 +218,8 @@ def _capture_report_snapshot(
         return
     key = "verified_markdown_path" if stage == "verified" else "draft_markdown_path"
     job.artifacts[key] = str(path.resolve())
-    job.artifacts["markdown_path"] = str(path.resolve())
+    if not is_p15:
+        job.artifacts["markdown_path"] = str(path.resolve())
 
 
 def _persist_trace_snapshot(job: ResearchJob, events: list[Any], output_dir: str) -> None:
@@ -309,6 +336,7 @@ class JobManager:
             "source_statuses": job.source_statuses,
             "factcheck_status": job.factcheck_status,
             "pipeline": job.pipeline,
+            "delivery_status": job.delivery_status,
             "artifacts": dict(job.artifacts),
             "report_md_path": str(job.artifacts.get("markdown_path") or ""),
             "error": job.error,
@@ -436,6 +464,9 @@ class JobManager:
                                 last_verified = verified_answer
 
                             pipeline_stage = str(event.get("_pipeline_stage") or "")
+                            event_mode = str((event.get("_run_summary") or {}).get("mode") or "")
+                            if event_mode:
+                                job.pipeline = event_mode
                             gap_round = max(
                                 int(event.get("_gap_iteration") or 0),
                                 int(event.get("_coverage_iteration") or 0),
@@ -545,6 +576,7 @@ class JobManager:
             }
             job.factcheck_status = str(state.get("_factcheck_status") or "")
             job.pipeline = str((state.get("_run_summary") or {}).get("mode") or "")
+            job.delivery_status = str(state.get("_delivery_status") or "")
             job.artifacts.update({
                 str(key): str(value)
                 for key, value in (state.get("_report_artifacts") or {}).items()
@@ -564,6 +596,14 @@ class JobManager:
                     job.artifacts["verified_markdown_path"] = final_markdown
                 if job.artifacts.get("draft_markdown_path") == staged_markdown:
                     job.artifacts["draft_markdown_path"] = final_markdown
+            if job.pipeline == "p15":
+                job.has_report = bool(
+                    job.delivery_status in {"deliverable", "limited"}
+                    and job.artifacts.get("markdown_path")
+                )
+                if job.delivery_status == "diagnostic_only":
+                    job.artifacts.pop("markdown_path", None)
+                    job.artifacts.pop("html_path", None)
             emit_stage(live_events, "final_commit", "completed", "最终提交完成")
             _persist_trace_snapshot(job, live_events, output_dir)
             job.warnings.extend(
@@ -579,7 +619,10 @@ class JobManager:
                 )
             else:
                 job.ended_at = time.time()
-                job.status = "completed_with_warnings" if job.warnings else "completed"
+                if job.delivery_status == "diagnostic_only":
+                    job.status = "completed_diagnostic"
+                else:
+                    job.status = "completed_with_warnings" if job.warnings else "completed"
         except _JobCancelled as exc:
             _finish_job(job, "cancelled", str(exc), preserve_report=True)
         except _JobTimedOut as exc:
@@ -647,15 +690,17 @@ def _model_env_updates(payload: dict[str, Any]) -> dict[str, str]:
     if depth not in {"quick", "standard", "deep"}:
         depth = "standard"
     preset = depth.upper()
-    updates[f"CONFLUX_MODELS__{preset}__PROVIDER"] = "openai_compatible"
-    if base_url:
-        updates[f"CONFLUX_MODELS__{preset}__BASE_URL"] = base_url
-    if api_key:
-        updates[f"CONFLUX_MODELS__{preset}__API_KEY"] = api_key
-    if model:
-        updates[f"CONFLUX_MODELS__{preset}__MODEL"] = model
-    for role in ("PLANNER", "ANALYST", "RERANKER", "SYNTHESIZER", "VERIFIER"):
-        updates[f"CONFLUX_RESEARCH__PROFILES__{preset}__{role}_MODEL"] = depth
+    model_override = bool(base_url or api_key or model)
+    if model_override:
+        updates[f"CONFLUX_MODELS__{preset}__PROVIDER"] = "openai_compatible"
+        if base_url:
+            updates[f"CONFLUX_MODELS__{preset}__BASE_URL"] = base_url
+        if api_key:
+            updates[f"CONFLUX_MODELS__{preset}__API_KEY"] = api_key
+        if model:
+            updates[f"CONFLUX_MODELS__{preset}__MODEL"] = model
+        for role in ("PLANNER", "ANALYST", "RERANKER", "SYNTHESIZER", "VERIFIER"):
+            updates[f"CONFLUX_RESEARCH__PROFILES__{preset}__{role}_MODEL"] = depth
     if embedding_base_url or base_url:
         updates["CONFLUX_EMBEDDING__BASE_URL"] = embedding_base_url or base_url
     if embedding_api_key or api_key:

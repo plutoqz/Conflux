@@ -1798,7 +1798,7 @@ async function runQuery() {
       const res = await authFetch('/api/query/jobs/' + runId);
       if (!res.ok) return;
       const job = await res.json();
-      const terminalStatuses = ['completed', 'completed_with_warnings', 'timed_out_with_report', 'timed_out', 'cancelled', 'failed'];
+      const terminalStatuses = ['completed', 'completed_with_warnings', 'completed_diagnostic', 'timed_out_with_report', 'timed_out', 'cancelled', 'failed'];
       if (terminalStatuses.includes(job.status)) {
         window.clearInterval(pollInterval);
         window.clearInterval(elapsedTimer);
@@ -1809,7 +1809,21 @@ async function runQuery() {
         const reportPath = job.report_md_path || ((job.artifacts || {}).markdown_path || '');
         const hasReport = Boolean(job.has_report && (reportPath || job.final_answer));
         const warningStatus = job.status === 'completed_with_warnings' || job.status === 'timed_out_with_report';
-        if (hasReport || job.status === 'completed' || job.status === 'completed_with_warnings') {
+        if (job.status === 'completed_diagnostic') {
+          $('queryStage').textContent = '完成（仅诊断） · ' + Math.round((Date.now() - started) / 1000) + ' 秒';
+          $('queryStage').className = 'status-pill warn';
+          const diagnosticPath = ((job.artifacts || {}).diagnostic_markdown_path || '');
+          if (diagnosticPath) {
+            $('queryOutput').hidden = true;
+            $('queryReportPreview').src = '/api/markdown?path=' + encodeURIComponent(diagnosticPath);
+            $('queryReportPreview').hidden = false;
+          } else {
+            $('queryOutput').textContent = job.final_answer || '运行未通过交付门禁。';
+          }
+          $('queryResultMeta').textContent = '交付状态：diagnostic_only\n' + (job.error || job.warning || '结果已保留为诊断产物，不进入正式报告列表。');
+          $('queryResultMeta').hidden = false;
+          toast('运行未通过交付门禁，已保留诊断产物', 'warn');
+        } else if (hasReport || job.status === 'completed' || job.status === 'completed_with_warnings') {
           const stageLabels = {
             completed:'完成', completed_with_warnings:'完成（有警告）',
             timed_out_with_report:'超时（报告已保留）', failed:'失败（报告已保留）',

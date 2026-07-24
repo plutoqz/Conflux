@@ -321,12 +321,18 @@ def write_report_artifacts(
     query: str,
     state: dict[str, Any],
     output_dir: str | Path = "reports",
+    *,
+    diagnostic: bool = False,
 ) -> ReportArtifacts:
     out_dir = Path(output_dir)
+    if diagnostic:
+        out_dir = out_dir / "diagnostics"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     stem = f"{stamp}-{slugify(query)}"
+    if diagnostic:
+        stem += ".diagnostic"
     markdown_path = out_dir / f"{stem}.md"
     html_path = out_dir / f"{stem}.html"
     evidence_json_path = out_dir / f"{stem}.evidence.json"
@@ -334,11 +340,40 @@ def write_report_artifacts(
     raw_sources_path = out_dir / f"{stem}.sources.md"
     audit_markdown_path = out_dir / f"{stem}.audit.md"
 
-    markdown = build_markdown_report(query, state)
+    artifact_state = state
+    if (
+        not diagnostic
+        and str(state.get("_delivery_status") or "") in {"deliverable", "limited"}
+        and str(state.get("_gated_evidence_json") or "").strip()
+    ):
+        artifact_state = {**state, "_evidence_json": state["_gated_evidence_json"]}
+    markdown = build_markdown_report(query, artifact_state)
+    if not diagnostic and str(state.get("_delivery_status") or "") == "limited":
+        assessment = state.get("_delivery_assessment") or {}
+        limitations = ", ".join(str(item) for item in assessment.get("limitations") or [])
+        limited_title = "# Conflux 有限证据研究报告"
+        markdown = markdown.replace(REPORT_TITLE, limited_title, 1)
+        markdown = (
+            f"{markdown.splitlines()[0]}\n\n"
+            "> 本报告通过基础交付门禁，但存在已披露的非关键证据限制。\n\n"
+            f"> 限制项：{limitations or '详见可靠性与缺口部分'}\n\n"
+            + "\n".join(markdown.splitlines()[1:]).lstrip()
+        )
+    elif diagnostic:
+        assessment = state.get("_delivery_assessment") or {}
+        reasons = ", ".join(str(item) for item in assessment.get("hard_failures") or [])
+        diagnostic_title = "# Conflux 研究诊断产物"
+        markdown = markdown.replace(REPORT_TITLE, diagnostic_title, 1)
+        markdown = (
+            f"{markdown.splitlines()[0]}\n\n"
+            "> 此运行未通过交付门禁，不应作为正式研究报告使用。\n\n"
+            f"> 门禁原因：{reasons or '未满足交付条件'}\n\n"
+            + "\n".join(markdown.splitlines()[1:]).lstrip()
+        )
     html_doc = markdown_to_html(markdown)
     _atomic_write_text(markdown_path, markdown)
     _atomic_write_text(html_path, html_doc)
-    evidence_text = str(state.get("_evidence_json") or "").strip()
+    evidence_text = str(artifact_state.get("_evidence_json") or "").strip()
     if evidence_text:
         try:
             evidence_payload = json.loads(evidence_text)
@@ -369,7 +404,7 @@ def write_report_artifacts(
     else:
         raw_sources_path = None
     if _is_p1_state(state):
-        _atomic_write_text(audit_markdown_path, build_p1_audit_report(query, state))
+        _atomic_write_text(audit_markdown_path, build_p1_audit_report(query, artifact_state))
     else:
         audit_markdown_path = None
     return ReportArtifacts(

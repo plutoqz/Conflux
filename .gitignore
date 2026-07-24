@@ -36,3 +36,9 @@ scripts/output.txt
 # OS
 .DS_Store
 Thumbs.db
+
+# Temp and workbench runtime artifacts
+temp_*.txt
+temp_*.json
+workbench-*.log
+workbench-*.pid

@@ -127,7 +127,7 @@ def test_paper_inbox_cli_writes_markdown_and_json(tmp_path):
         [
             sys.executable,
             "-m",
-            "conflux.papers",
+            "conflux.paper_ingestion.cli",
             "inbox",
             "--profile",
             "profiles/example_gis_agent.yaml",

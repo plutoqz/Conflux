@@ -65,6 +65,13 @@ DOMAIN_PRIORITY = {
     "media.defense.gov": 0.95,
     "europa.eu": 0.95,
     "digital-strategy.ec.europa.eu": 0.95,
+    "eur-lex.europa.eu": 1.0,
+    "federalregister.gov": 1.0,
+    "bis.gov": 1.0,
+    "whitehouse.gov": 0.95,
+    "gov.uk": 0.95,
+    "gov.cn": 0.95,
+    "cac.gov.cn": 1.0,
     "esri.com": 0.95,
     "developers.arcgis.com": 0.95,
     "doc.arcgis.com": 0.95,
@@ -130,6 +137,27 @@ CONCEPT_EXPANSIONS = {
     "智能体": ["agent", "LLM agent", "GeoAI", "GIS agent"],
     "大模型": ["large language model", "LLM"],
     "GeoAI": ["GeoAI", "geospatial artificial intelligence"],
+    "基础模型": [
+        "foundation model",
+        "general-purpose AI model",
+        "GPAI",
+        "generative AI",
+        "生成式人工智能",
+        "frontier AI",
+        "advanced AI model",
+    ],
+    "透明度义务": [
+        "transparency obligations",
+        "disclosure requirements",
+        "documentation requirements",
+    ],
+    "司法辖区": [
+        "major jurisdictions",
+        "European Union",
+        "United States",
+        "China",
+        "United Kingdom",
+    ],
     "洪水": ["flood", "flood depth estimation", "water level", "hydrology"],
     "水深": ["water depth", "flood depth estimation", "water level", "inundation depth"],
     "内涝": ["urban flooding", "pluvial flood", "inundation depth", "urban drainage"],
@@ -210,6 +238,12 @@ TECHNICAL_ENTITIES = {
 
 
 BILINGUAL_TERM_MAP = {
+    "主要司法辖区": "major jurisdictions",
+    "透明度义务": "transparency obligations",
+    "可核验差异": "verifiable differences",
+    "通用人工智能模型": "general-purpose AI model",
+    "基础模型": "foundation model",
+    "司法辖区": "jurisdictions",
     "地理数据": "geospatial data",
     "地理AI": "GeoAI",
     "地理处理": "geoprocessing",
@@ -282,6 +316,27 @@ BILINGUAL_TERM_MAP = {
     "智能体": "agent",
     "大模型": "large language model",
 }
+
+
+def concept_alias_groups(query: str) -> list[list[str]]:
+    """Return deterministic cross-language aliases for concepts named in a query."""
+
+    text = str(query or "")
+    lowered = text.casefold()
+    groups: list[list[str]] = []
+    for trigger, expansions in sorted(
+        CONCEPT_EXPANSIONS.items(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        if trigger.casefold() not in lowered:
+            continue
+        groups.append(_dedupe_words([
+            trigger,
+            BILINGUAL_TERM_MAP.get(trigger, ""),
+            *expansions,
+        ]))
+    return groups
 
 
 @dataclass(frozen=True)
@@ -482,6 +537,10 @@ def is_academic_query(text: str) -> bool:
         "research gap", "evaluation", "algorithm", "model", "洪水", "水深", "水文", "遥感",
         "局限", "挑战", "失败模式", "未来工作", "研究空白", "评估", "算法", "模型", "风险",
     }
+    # "model" describes many policy, product, statistical, and biological
+    # questions; by itself it is not evidence that scholarly APIs are useful.
+    markers.discard("model")
+    markers.discard("模型")
     return any(marker in lower for marker in markers)
 
 
@@ -523,16 +582,44 @@ def _deterministic_bilingual_queries(query: str, *, target: str) -> list[str]:
     translated = original
     for source, target_term in sorted(BILINGUAL_TERM_MAP.items(), key=lambda item: len(item[0]), reverse=True):
         translated = translated.replace(source, f" {target_term} ")
-    translated = re.sub(r"\s+", " ", translated).strip()
+    translated = _clean_partial_translation(translated)
     expansions = _expansions_for_query(original)
     terms = sorted(important_terms(original))
     expanded = " ".join(_dedupe_words([*expansions, *terms])[:14])
     candidates = []
-    if translated.casefold() != original.casefold() and translated:
+    if (
+        translated.casefold() != original.casefold()
+        and translated
+        and _useful_bilingual_variant(translated)
+    ):
         candidates.append(translated)
     if expanded:
         candidates.append(expanded)
     return _dedupe_texts(candidates)
+
+
+def _clean_partial_translation(value: str) -> str:
+    glue = {"对", "有哪些", "有什么", "是什么", "在", "的", "方面", "之间"}
+    tokens = []
+    for raw in re.sub(r"\s+", " ", str(value or "")).split():
+        token = raw.strip("，,；;。.?？:：")
+        if token and token not in glue:
+            tokens.append(token)
+    return " ".join(tokens)
+
+
+def _useful_bilingual_variant(value: str) -> bool:
+    """Reject partial translations that collapse a subject to generic words."""
+
+    tokens = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9.+-]*", str(value or ""))
+    }
+    generic = {
+        "current", "latest", "recent", "model", "models", "research",
+        "paper", "papers", "method", "methods", "study", "studies",
+    }
+    return len(tokens - generic) >= 2
 
 
 def _dedupe_texts(items: list[str]) -> list[str]:
@@ -562,6 +649,15 @@ def _priority_domains_for_query(query: str) -> list[str]:
         domains.append("media.defense.gov")
     if any(term in lower for term in ("ai act", "欧盟", "european union", "eu ")):
         domains.extend(["europa.eu", "digital-strategy.ec.europa.eu"])
+    if _is_ai_policy_query(query):
+        domains.extend([
+            "eur-lex.europa.eu",
+            "federalregister.gov",
+            "whitehouse.gov",
+            "gov.uk",
+            "cac.gov.cn",
+            "gov.cn",
+        ])
     if any(term in lower for term in ("arcgis", "esri")):
         domains.extend(["esri.com", "developers.arcgis.com"])
     if any(term in lower for term in ("osm", "openstreetmap", "geosparql", "ogc", "知识图谱")):
@@ -573,6 +669,16 @@ def _priority_domains_for_query(query: str) -> list[str]:
     )):
         domains.extend(["semanticscholar.org", "openalex.org", "crossref.org", "arxiv.org", "doi.org"])
     return _dedupe_words(domains)
+
+
+def _is_ai_policy_query(query: str) -> bool:
+    lower = str(query or "").casefold()
+    return any(term in lower for term in (
+        "基础模型", "通用人工智能模型", "foundation model", "general-purpose ai", "gpai",
+    )) and any(term in lower for term in (
+        "司法辖区", "透明度义务", "监管", "法规", "政策", "治理",
+        "jurisdiction", "transparency obligation", "regulation", "policy", "governance",
+    ))
 
 
 def is_temporal_query(text: str) -> bool:
@@ -612,10 +718,17 @@ def _official_web_queries(query: str, combined: list[str]) -> list[str]:
         "cisa.gov": "CISA",
         "nsa.gov": "NSA",
         "media.defense.gov": "NSA",
+        "eur-lex.europa.eu": "European Union AI Act",
+        "federalregister.gov": "United States AI policy",
+        "whitehouse.gov": "United States AI policy",
+        "gov.uk": "United Kingdom AI regulation",
+        "cac.gov.cn": "China generative AI regulation",
+        "gov.cn": "China generative AI regulation",
     }
     pqc_migration = any(term in query.casefold() for term in ("pqc", "post-quantum", "后量子")) and any(
         term in query.casefold() for term in ("迁移", "migration", "roadmap", "路线图")
     )
+    ai_policy = _is_ai_policy_query(query)
     for domain in domains:
         agency = agency_for_domain.get(domain, "")
         topic_identifiers = [item for item in explicit if item.casefold() not in agency_names]
@@ -632,7 +745,16 @@ def _official_web_queries(query: str, combined: list[str]) -> list[str]:
                 )
             continue
         domain_hints: list[str] = []
-        if pqc_migration:
+        if ai_policy:
+            domain_hints = {
+                "eur-lex.europa.eu": ["GPAI", "transparency obligations"],
+                "federalregister.gov": ["foundation model", "reporting requirements"],
+                "whitehouse.gov": ["foundation model", "transparency reporting"],
+                "gov.uk": ["foundation model", "transparency regulation"],
+                "cac.gov.cn": ["generative AI service", "transparency measures"],
+                "gov.cn": ["generative AI service", "transparency measures"],
+            }.get(domain, [])
+        elif pqc_migration:
             domain_hints = {
                 "nist.gov": ["crypto agility", "SP 800-227"],
                 "csrc.nist.gov": ["crypto agility", "SP 800-227"],

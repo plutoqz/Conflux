@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from conflux.research_protocol import (
+    CoverageAction,
     CoverageDimension,
     CoverageMatrix,
     DomainMap,
@@ -17,6 +18,7 @@ from conflux.research_protocol import (
     SectionClaim,
     SectionContract,
     SectionDraft,
+    SectionEvidencePack,
     SourcePlan,
 )
 
@@ -78,6 +80,16 @@ PROTOCOL_VALUES = [
         body_evidence=True,
         covered_actions=["compare_evidence"],
         missing_actions=["identify_tradeoffs"],
+        action_coverage=[
+            CoverageAction(
+                action="compare_evidence",
+                status="covered",
+                evidence_ids=["e-1"],
+                external_evidence_ids=["e-1"],
+                citation_refs=["[1]"],
+                high_risk=True,
+            )
+        ],
         high_authority_source=True,
         independent_source_count=2,
         cross_validation_required=True,
@@ -174,6 +186,20 @@ PROTOCOL_VALUES = [
         suggested_length=700,
         synthesis_priority=0.9,
         verified=False,
+    ),
+    SectionEvidencePack(
+        section_id="section-reliability",
+        questions=["Which failures are recoverable?"],
+        required_actions=["compare_evidence"],
+        direct_evidence=[{"id": "e-1", "verbatim_quote": "Checkpoint recovery is documented."}],
+        verified_claims=[
+            SectionClaim(
+                id="claim-1",
+                text="Checkpoint recovery is documented.",
+                externally_supported=True,
+            )
+        ],
+        allowed_citations=["[1]"],
     ),
     SectionContract(
         id="section-reliability",

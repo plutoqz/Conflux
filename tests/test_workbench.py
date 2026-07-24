@@ -1224,6 +1224,16 @@ def test_query_model_override_targets_only_selected_user_tier():
     assert updates["CONFLUX_RESEARCH__PROFILES__DEEP__VERIFIER_MODEL"] == "deep"
 
 
+def test_query_without_model_override_keeps_configured_role_presets():
+    from conflux.workbench.jobs import _model_env_updates
+
+    updates = _model_env_updates({"depth": "standard"})
+
+    assert "CONFLUX_MODELS__STANDARD__PROVIDER" not in updates
+    assert "CONFLUX_RESEARCH__PROFILES__STANDARD__PLANNER_MODEL" not in updates
+    assert updates["CONFLUX_RESEARCH__DEPTH"] == "standard"
+
+
 def test_job_status_exposes_complete_markdown_artifact_path():
     from conflux.workbench.jobs import JobManager, ResearchJob
 

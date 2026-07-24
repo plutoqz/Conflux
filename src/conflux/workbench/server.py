@@ -177,7 +177,7 @@ def build_status() -> dict[str, Any]:
     return {
         "project_root": str(PROJECT_ROOT),
         "profiles": [_enrich_profile(p) for p in _list_files(PROJECT_ROOT / "profiles", {".yaml", ".yml"})],
-        "reports": _list_files(PROJECT_ROOT / "reports", {".md", ".html", ".json"}),
+        "reports": _list_report_files(PROJECT_ROOT / "reports"),
         "paper_outputs": _list_files(PROJECT_ROOT / "data" / "documents" / "papers", {".md", ".json"}),
         "paper_ingestion_audit": build_paper_ingestion_audit(),
         "defaults": {
@@ -2727,6 +2727,34 @@ def _available_port(host: str, preferred: int) -> int:
     raise OSError(f"No available port near {preferred}.")
 
 
+def _list_report_files(root: Path) -> list[dict[str, Any]]:
+    """列出最终报告（仅 workbench/query/ 下 .md，排除中间产物）。"""
+    query_root = root / "workbench" / "query"
+    if not query_root.exists():
+        return []
+    # 中间产物后缀（小写匹配）
+    INTERMEDIATE_SUFFIXES = (".draft.md", ".verified.md", ".audit.md", ".sources.md", ".diagnostic.md")
+    files = []
+    for path in sorted(query_root.rglob("*.md")):
+        if not path.is_file():
+            continue
+        try:
+            if any(part.startswith(".") for part in path.relative_to(root).parts):
+                continue
+        except ValueError:
+            continue
+        name_lower = path.name.lower()
+        if name_lower.endswith(INTERMEDIATE_SUFFIXES):
+            continue
+        files.append({
+            "path": _rel(path),
+            "name": path.name,
+            "size": path.stat().st_size,
+            "modified": int(path.stat().st_mtime),
+        })
+    return files
+
+
 def _list_files(root: Path, suffixes: set[str]) -> list[dict[str, Any]]:
     if not root.exists():
         return []
@@ -2744,7 +2772,7 @@ def _list_files(root: Path, suffixes: set[str]) -> list[dict[str, Any]]:
                 "size": path.stat().st_size,
                 "modified": int(path.stat().st_mtime),
             })
-    return files[-80:]
+    return files
 
 
 SEEN_PAPERS_PATH = PROJECT_ROOT / "reports" / "workbench" / ".seen_papers.json"

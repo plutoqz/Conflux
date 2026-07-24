@@ -47,6 +47,7 @@ def build_session_index() -> list[dict[str, Any]]:
             "resumed": payload.get("resumed", False),
             "source_statuses": payload.get("source_statuses", {}),
             "factcheck_status": payload.get("factcheck_status", ""),
+            "delivery_status": payload.get("delivery_status", ""),
             "quality": payload.get("quality", {}),
             "summary_path": _rel(summary_path),
             "modified": int(summary_path.stat().st_mtime),
@@ -85,18 +86,26 @@ def get_session_detail(run_id: str) -> dict[str, Any] | None:
         # Report paths — prefer persisted values, then verified legacy matches.
         md_path = payload.get("report_md_path")
         html_path = payload.get("report_html_path")
-        if md_path:
-            resolved_md = _resolve_artifact_path(str(md_path))
-            result["report_md_available"] = resolved_md.exists()
-            result["report_md_path"] = _rel(resolved_md)
+        if "report_md_path" in payload:
+            if md_path:
+                resolved_md = _resolve_artifact_path(str(md_path))
+                result["report_md_available"] = resolved_md.exists()
+                result["report_md_path"] = _rel(resolved_md)
+            else:
+                result["report_md_available"] = False
+                result["report_md_path"] = ""
         else:
             legacy_md = _find_legacy_report(summary_path.parent, run_id, ".md")
             result["report_md_available"] = legacy_md is not None
             result["report_md_path"] = _rel(legacy_md) if legacy_md else ""
-        if html_path:
-            resolved_html = _resolve_artifact_path(str(html_path))
-            result["report_html_available"] = resolved_html.exists()
-            result["report_html_path"] = _rel(resolved_html)
+        if "report_html_path" in payload:
+            if html_path:
+                resolved_html = _resolve_artifact_path(str(html_path))
+                result["report_html_available"] = resolved_html.exists()
+                result["report_html_path"] = _rel(resolved_html)
+            else:
+                result["report_html_available"] = False
+                result["report_html_path"] = ""
         else:
             legacy_html = _find_legacy_report(summary_path.parent, run_id, ".html")
             result["report_html_available"] = legacy_html is not None

@@ -24,27 +24,25 @@ class SemanticReranker:
     def __init__(self, model: Any, *, batch_size: int = 16) -> None:
         self.model = model
         self.batch_size = max(1, batch_size)
+        self._disabled_reason = ""
 
     def rerank(self, query: str, scored_docs: list[dict], *, limit: int | None = None) -> list[dict]:
         if not scored_docs:
             return []
         decisions: dict[str, RerankDecision] = {}
         candidates = scored_docs[:limit] if limit else scored_docs
+        if self._disabled_reason:
+            return self._unreviewed(
+                candidates,
+                f"unreviewed: reranker circuit open after {self._disabled_reason}",
+            )
         try:
             for start in range(0, len(candidates), self.batch_size):
                 batch = candidates[start : start + self.batch_size]
                 decisions.update(self._rerank_batch(query, batch, offset=start))
         except Exception as exc:
-            return [
-                {
-                    **item,
-                    "semantic_score": None,
-                    "semantic_directness": None,
-                    "semantic_reason": f"unreviewed: {type(exc).__name__}: {exc}",
-                    "rerank_status": "unreviewed",
-                }
-                for item in candidates
-            ]
+            self._disabled_reason = f"{type(exc).__name__}: {exc}"
+            return self._unreviewed(candidates, f"unreviewed: {self._disabled_reason}")
 
         reranked = []
         for index, item in enumerate(candidates):
@@ -76,6 +74,19 @@ class SemanticReranker:
             ),
             reverse=True,
         )
+
+    @staticmethod
+    def _unreviewed(candidates: list[dict], reason: str) -> list[dict]:
+        return [
+            {
+                **item,
+                "semantic_score": None,
+                "semantic_directness": None,
+                "semantic_reason": reason,
+                "rerank_status": "unreviewed",
+            }
+            for item in candidates
+        ]
 
     def _rerank_batch(self, query: str, batch: list[dict], *, offset: int) -> dict[str, RerankDecision]:
         payload = []

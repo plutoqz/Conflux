@@ -53,6 +53,11 @@ _TOPIC_ANCHOR_FAMILIES = (
         "地理处理", "地理空间", "空间分析", "geoprocessing", "geospatial",
         "geographic information system", "spatial analysis", "autonomous gis", "gis agent",
     ),
+    (
+        "基础模型", "通用人工智能模型", "生成式人工智能", "foundation model",
+        "general-purpose ai model", "general purpose ai model", "gpai", "generative ai",
+        "frontier ai", "advanced ai model",
+    ),
 )
 
 
@@ -642,7 +647,11 @@ def _search_web(
         ).to_tool_text()
 
     top_score = max(float(item.get("_final_score", item.get("_score", 0.0))) for item in usable_results)
-    status = "success" if top_score >= 0.55 else "low_relevance"
+    status = (
+        "success"
+        if top_score >= 0.55 or any(_grounded_official_seed(item) for item in usable_results)
+        else "low_relevance"
+    )
     confidence = 0.78 if status == "success" else 0.52
     reported_results = _reported_web_results(usable_results, status)
 
@@ -656,10 +665,14 @@ def _search_web(
         url = _result_identity({"url": raw_url}) if raw_url else ""
         evidence_class = _web_evidence_class(result, url)
         paper_id = str(result.get("paper_id") or _web_paper_id(url))
+        published_at = fetched.published_at or str(result.get("published_at") or "")
         evidence_ref = f"[Web:{url}]" if url else f"[Web:result-{i + 1}]"
         matched_query = str(result.get("matched_query") or "").strip()
-        quote_query = "\n".join(dict.fromkeys(item for item in (query, matched_query) if item))
-        quote = _claim_from_web_content(quote_query, fetched.text)
+        quotes = _claims_from_web_content(
+            query,
+            fetched.text,
+            matched_query=matched_query,
+        )
         content_preview = fetched.text[:1800]
         final_score = float(result.get("_final_score", result.get("_score", 0.0)))
         parts.append(
@@ -678,16 +691,15 @@ def _search_web(
             "paper_id": paper_id,
             "evidence_class": evidence_class,
             "provider_source": result.get("provider_source", provider),
-            "quote": quote,
+            "quote": "\n".join(quotes)[:1800],
             "content_type": fetched.content_type,
             "content_kind": fetched.content_kind,
             "content_hash": fetched.content_hash,
-            "published_at": fetched.published_at,
+            "published_at": published_at,
             "retrieved_at": fetched.retrieved_at,
             "prompt_injection_detected": fetched.prompt_injection_detected,
         })
-        claim_text = quote
-        if claim_text:
+        for claim_text in quotes:
             limitation = (
                 "academic abstract only; inspect full paper for claims beyond the abstract"
                 if fetched.status == "abstract_only"
@@ -709,8 +721,9 @@ def _search_web(
                 limitations=[limitation],
                 evidence_class=evidence_class,
                 document_title=title,
+                organization=_web_organization(url),
                 url=url,
-                published_at=fetched.published_at or str(result.get("published_at") or ""),
+                published_at=published_at,
                 retrieved_at=fetched.retrieved_at,
                 content_hash=fetched.content_hash,
                 content_kind=fetched.content_kind,
@@ -841,8 +854,29 @@ def _official_seed_results(query: str) -> list[dict]:
 
     lowered = str(query or "").casefold()
     results: list[dict] = []
+    jurisdiction_hint = ""
+    jurisdiction_markers = (
+        ("eu", ("欧盟", "european union")),
+        ("us", ("美国", "united states", "u.s.")),
+        ("uk", ("英国", "united kingdom")),
+        ("cn", ("中国", "china")),
+    )
+    matched_jurisdictions = [
+        code
+        for code, markers in jurisdiction_markers
+        if any(marker in lowered for marker in markers)
+    ]
+    if len(matched_jurisdictions) == 1:
+        jurisdiction_hint = matched_jurisdictions[0]
 
-    def add(*, title: str, snippet: str, url: str, matched_query: str) -> None:
+    def add(
+        *,
+        title: str,
+        snippet: str,
+        url: str,
+        matched_query: str,
+        published_at: str = "",
+    ) -> None:
         results.append({
             "title": title,
             "snippet": snippet,
@@ -851,9 +885,78 @@ def _official_seed_results(query: str) -> list[dict]:
             "matched_queries": [matched_query],
             "provider_source": "official_seed",
             "evidence_class": "authoritative_document",
+            "published_at": published_at,
         })
 
     identifiers = set(standard_identifiers(query))
+    foundation_policy = any(
+        marker in lowered
+        for marker in (
+            "基础模型", "通用人工智能模型", "foundation model",
+            "general-purpose ai", "gpai",
+        )
+    ) and any(
+        marker in lowered
+        for marker in (
+            "透明度", "监管", "法规", "政策", "司法辖区",
+            "transparency", "regulation", "policy", "jurisdiction",
+        )
+    )
+    if foundation_policy:
+        if jurisdiction_hint in {"", "eu"}:
+            add(
+                title="General-Purpose AI Models in the AI Act - Questions & Answers",
+                snippet=(
+                    "The European Commission explains Article 53 transparency, technical "
+                    "documentation, downstream information, and copyright obligations for GPAI providers."
+                ),
+                url=(
+                    "https://digital-strategy.ec.europa.eu/en/faqs/"
+                    "general-purpose-ai-models-ai-act-questions-answers"
+                ),
+                matched_query="site:digital-strategy.ec.europa.eu GPAI Article 53 transparency obligations",
+            )
+        if jurisdiction_hint in {"", "us"}:
+            add(
+                title="Commerce Proposes Reporting Requirements for Frontier AI Developers",
+                snippet=(
+                    "The U.S. Bureau of Industry and Security describes a proposed rule requiring "
+                    "developers of frontier foundation models to report development and security information."
+                ),
+                url=(
+                    "https://www.bis.gov/press-release/commerce-proposes-reporting-requirements-"
+                    "frontier-ai-developers-compute-providers"
+                ),
+                matched_query="site:bis.gov frontier AI model proposed reporting requirements",
+                published_at="2024-09-09",
+            )
+        if jurisdiction_hint in {"", "uk"}:
+            add(
+                title="A pro-innovation approach to AI regulation",
+                snippet=(
+                    "The UK AI regulation white paper addresses foundation models and sets a "
+                    "cross-sector principle of appropriate transparency and explainability "
+                    "implemented by existing regulators."
+                ),
+                url=(
+                    "https://www.gov.uk/government/publications/"
+                    "ai-regulation-a-pro-innovation-approach/white-paper"
+                ),
+                matched_query="site:gov.uk AI regulation transparency explainability principle regulators",
+                published_at="2023-08-03",
+            )
+        if jurisdiction_hint in {"", "cn"}:
+            add(
+                title="生成式人工智能服务管理暂行办法",
+                snippet=(
+                    "The Cyberspace Administration of China publishes the binding interim measures "
+                    "covering scope, generated-content labeling, security assessment, algorithm filing, "
+                    "regulatory inspection, and provider transparency duties."
+                ),
+                url="https://www.cac.gov.cn/2023-07/13/c_1690898327029107.htm",
+                matched_query="site:cac.gov.cn 生成式人工智能服务管理暂行办法",
+                published_at="2023-07-13",
+            )
     if identifiers.intersection({"FIPS 203", "FIPS 204", "FIPS 205"}):
         add(
             title="NIST Approves Three FIPS for Post-Quantum Cryptography",
@@ -925,6 +1028,29 @@ def _claim_from_web_content(query: str, text: str, max_length: int = 500) -> str
         re.IGNORECASE,
     )
     guidance_query = bool(re.search(r"guidance|roadmap|migration|指南|指导|路线图|迁移", query, re.IGNORECASE))
+    obligation_query = bool(re.search(
+        r"obligations?|requirements?|reporting|disclos(?:e|ure)|documentation|"
+        r"义务|要求|报告|披露|文档|透明度",
+        query,
+        re.IGNORECASE,
+    ))
+    obligation_pattern = re.compile(
+        r"\b(?:must|shall|should|requires?|required to|mandatory|obligations?|"
+        r"reporting requirements?|disclosure requirements?|documentation requirements?)\b|"
+        r"必须|应当|义务|强制|报告要求|披露要求|文档要求",
+        re.IGNORECASE,
+    )
+    mandatory_action_pattern = re.compile(
+        r"\b(?:must|shall|should|requires?|required to|mandates?)\b|必须|应当|要求|强制",
+        re.IGNORECASE,
+    )
+    obligation_topics = set()
+    if obligation_query:
+        obligation_topics = {
+            "transparency", "explainability", "documentation", "disclosure",
+            "reporting", "copyright", "labeling", "透明度", "可解释", "技术文档",
+            "披露", "报告", "版权", "标识",
+        }
     status_query = bool(re.search(
         r"status|latest|draft|final|as of|状态|最新|草案|最终|截至",
         query,
@@ -940,7 +1066,14 @@ def _claim_from_web_content(query: str, text: str, max_length: int = 500) -> str
         r"TLP:CLEAR|central@|@CISA|BACKGROUND|contact us|follow us|"
         r"estimated time|software requirements|purchase options?|sales team|"
         r"call (?:us|esri)|chat online|contact form|select a different location|"
-        r"skip to main content|table of contents|this video was created",
+        r"skip to main content|table of contents|this video was created|"
+        r"without written authori[sz]ation|shall not be republished|all rights reserved|"
+        r"\bcopyright\b|未经.{0,20}授权|不得转载|版权所有",
+        re.IGNORECASE,
+    )
+    trailing_link_pattern = re.compile(
+        r"\b(?:additional|more) information\b.*\b(?:found|available|visit)\b|"
+        r"\bfor more information\b|更多信息|另请参阅",
         re.IGNORECASE,
     )
     target_years = {str(year) for year in temporal_years(query)} if temporal else set()
@@ -991,7 +1124,24 @@ def _claim_from_web_content(query: str, text: str, max_length: int = 500) -> str
         event_penalty = 0.28 if event_pattern.search(sentence) else 0.0
         guidance_hits = len({match.casefold() for match in guidance_pattern.findall(sentence)})
         guidance_bonus = min(0.4, 0.1 * guidance_hits) if guidance_query else 0.0
-        boilerplate_penalty = 0.9 if boilerplate_pattern.search(sentence) else 0.0
+        obligation_bonus = (
+            0.65
+            if obligation_query and mandatory_action_pattern.search(sentence)
+            else 0.35
+            if obligation_query and obligation_pattern.search(sentence)
+            else 0.0
+        )
+        obligation_topic_hits = sum(
+            topic.casefold() in sentence.casefold() for topic in obligation_topics
+        )
+        obligation_topic_bonus = min(
+            0.45,
+            0.15 * obligation_topic_hits,
+        )
+        obligation_topic_penalty = 0.5 if obligation_topics and not obligation_topic_hits else 0.0
+        boilerplate_penalty = 0.9 if (
+            boilerplate_pattern.search(sentence) or trailing_link_pattern.search(sentence)
+        ) else 0.0
         length_penalty = 0.18 if len(sentence) > max_length else 0.0
         score = (
             (0.55 * lexical)
@@ -1001,8 +1151,11 @@ def _claim_from_web_content(query: str, text: str, max_length: int = 500) -> str
             + status_detail_bonus
             + freshness_bonus
             + guidance_bonus
+            + obligation_bonus
+            + obligation_topic_bonus
             - event_penalty
             - boilerplate_penalty
+            - obligation_topic_penalty
             - length_penalty
         )
         candidates.append((score, sentence))
@@ -1010,6 +1163,82 @@ def _claim_from_web_content(query: str, text: str, max_length: int = 500) -> str
         return ""
     candidates.sort(key=lambda item: (item[0], len(item[1])), reverse=True)
     return candidates[0][1][:max_length]
+
+
+def _claims_from_web_content(
+    query: str,
+    text: str,
+    *,
+    matched_query: str = "",
+    max_claims: int = 6,
+    max_length: int = 800,
+) -> list[str]:
+    """Extract complementary mechanism, scope, and status claims from one body."""
+
+    chinese_body = len(re.findall(r"[\u3400-\u9fff]", str(text or ""))) >= 80
+    if chinese_body:
+        focus_groups = [
+            ("图片", "视频", "生成内容", "标识"),
+            ("报告", "网络安全", "开发活动", "测试结果"),
+            ("未向境内公众", "不适用本办法", "适用范围", "提供服务"),
+            ("生效", "施行", "草案", "最终"),
+            ("安全评估", "算法备案", "变更", "注销"),
+            ("监督检查", "训练数据来源", "标注规则", "算法机制", "说明"),
+        ]
+    else:
+        focus_groups = [
+            ("technical documentation", "downstream providers", "copyright policy", "training content summary"),
+            ("reporting requirement", "developmental activities", "cybersecurity", "red-teaming"),
+            ("applies to", "provider", "scope", "threshold", "fine-tuning", "systemic risk"),
+            ("proposed rule", "notice of proposed rulemaking", "effective", "in force", "voluntary"),
+            ("non-statutory", "statutory duty", "existing remits", "existing powers", "implement the principles"),
+            ("regulator", "competent authorities", "AI Office", "enforcement", "inspection"),
+        ]
+    claims: list[str] = []
+    seen: set[str] = set()
+    main_query = "\n".join(item for item in (query, matched_query) if str(item).strip())
+    candidates = [_claim_from_web_content(main_query, text, max_length=max_length)]
+    candidates.extend(
+        _claim_from_web_focus(text, terms, max_length=max_length)
+        for terms in focus_groups
+    )
+    for claim in candidates:
+        key = re.sub(r"\s+", " ", claim).strip().casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        claims.append(claim)
+        if len(claims) >= max(1, int(max_claims)):
+            break
+    return claims
+
+
+def _claim_from_web_focus(
+    text: str,
+    terms: tuple[str, ...],
+    *,
+    max_length: int,
+) -> str:
+    candidates: list[tuple[int, int, int, str]] = []
+    reflowed = _reflow_web_text(str(text or ""))
+    for raw in re.split(r"(?<=[。.!?])\s+|\n{2,}", reflowed):
+        sentence = re.sub(r"\s+", " ", raw).strip(" -*\t")
+        if len(sentence) < 35 or len(sentence) > 1600:
+            continue
+        lowered = sentence.casefold()
+        hits = sum(term.casefold() in lowered for term in terms)
+        if hits <= 0:
+            continue
+        mandatory = int(bool(re.search(
+            r"\b(?:must|shall|requires?|mandatory|obligations?)\b|必须|应当|要求|义务",
+            sentence,
+            re.IGNORECASE,
+        )))
+        candidates.append((hits, mandatory, -abs(len(sentence) - 240), sentence))
+    if not candidates:
+        return ""
+    candidates.sort(reverse=True)
+    return candidates[0][3][:max_length]
 
 
 def _reflow_web_text(text: str) -> str:
@@ -1122,7 +1351,15 @@ def _academic_query_variants(queries: list[str]) -> list[str]:
         variants.append("geoprocessing automation methods review")
     for query in queries:
         tokens = re.findall(r"[A-Za-z][A-Za-z0-9.+-]*", str(query))
-        normalized = " ".join(dict.fromkeys(token.casefold() for token in tokens))
+        normalized_tokens = list(dict.fromkeys(token.casefold() for token in tokens))
+        informative = [
+            token for token in normalized_tokens
+            if token not in {
+                "current", "latest", "recent", "model", "models", "research",
+                "paper", "papers", "method", "methods", "study", "studies",
+            }
+        ]
+        normalized = " ".join(normalized_tokens) if len(informative) >= 2 else ""
         value = normalized or str(query).strip()
         if value and value not in variants:
             variants.append(value)
@@ -1303,6 +1540,22 @@ def fetch_url_content(
         )
 
     sanitized, injection_detected = _sanitize_untrusted_content(text)
+    blocked_reason = _blocked_page_reason(title or title_hint, sanitized, final_url)
+    if blocked_reason:
+        return FetchedContent(
+            url=url,
+            final_url=final_url,
+            title=title or title_hint,
+            text=sanitized,
+            content_type=content_type,
+            content_kind=content_kind,
+            status="blocked",
+            published_at=published_at,
+            retrieved_at=retrieved_at,
+            content_hash=sha256(sanitized.encode("utf-8")).hexdigest() if sanitized else "",
+            error=blocked_reason,
+            prompt_injection_detected=injection_detected,
+        )
     if len(sanitized) < 80:
         return FetchedContent(
             url=url,
@@ -1332,6 +1585,22 @@ def fetch_url_content(
         error=error,
         prompt_injection_detected=injection_detected,
     )
+
+
+def _blocked_page_reason(title: str, text: str, final_url: str) -> str:
+    payload = " ".join((str(title or ""), str(text or ""), str(final_url or ""))).casefold()
+    patterns = (
+        r"\bcaptcha\b",
+        r"\brequest access\b",
+        r"\baccess denied\b",
+        r"\bverify (?:that )?you are (?:a )?human\b",
+        r"\bchecking (?:if )?the site connection is secure\b",
+        r"\bsite help.*wider ip range\b",
+        r"\bunblock\.[a-z0-9.-]+",
+    )
+    if any(re.search(pattern, payload, re.IGNORECASE) for pattern in patterns):
+        return "Access-control or CAPTCHA page is not citeable body evidence."
+    return ""
 
 
 def _extract_html_body(raw: bytes, *, charset: str, title_hint: str) -> tuple[str, str, str, str]:
@@ -1390,6 +1659,54 @@ def _sanitize_untrusted_content(text: str) -> tuple[str, bool]:
     return "\n".join(kept), detected
 
 
+def _fetch_url_content_with_retry(
+    url: str,
+    *,
+    title_hint: str,
+    deadline_at: float | None,
+    commit_reserve_seconds: float,
+) -> FetchedContent:
+    """Retry one transient transport failure while respecting the run deadline."""
+
+    last = FetchedContent(
+        url=url,
+        final_url=url,
+        title=title_hint,
+        text="",
+        content_type="",
+        content_kind="unfetched",
+        status="failed",
+        error="Run deadline reserve reached before fetch.",
+    )
+    for _ in range(2):
+        timeout = _deadline_call_timeout(
+            deadline_at,
+            commit_reserve_seconds,
+            float(get("web_search", "fetch_timeout_seconds", default=12)),
+        )
+        if timeout <= 0:
+            return last
+        last = fetch_url_content(
+            url,
+            title_hint=title_hint,
+            timeout_seconds=timeout,
+        )
+        if last.usable or not _retryable_web_fetch_failure(last):
+            return last
+    return last
+
+
+def _retryable_web_fetch_failure(content: FetchedContent) -> bool:
+    if content.status != "failed":
+        return False
+    return bool(re.search(
+        r"unexpected_eof|timed? ?out|timeout|connection reset|remote end closed|"
+        r"temporar(?:y|ily)|http error 429|http error 5\d\d",
+        str(content.error or ""),
+        re.IGNORECASE,
+    ))
+
+
 def _fetch_web_results(
     results: list[dict],
     *,
@@ -1415,26 +1732,11 @@ def _fetch_web_results(
 
     with ThreadPoolExecutor(max_workers=min(4, len(selected) or 1)) as executor:
         def fetch(item: dict) -> FetchedContent:
-            timeout = _deadline_call_timeout(
-                deadline_at,
-                commit_reserve_seconds,
-                float(get("web_search", "fetch_timeout_seconds", default=12)),
-            )
-            if timeout <= 0:
-                return FetchedContent(
-                    url=str(item.get("url") or ""),
-                    final_url=str(item.get("url") or ""),
-                    title=str(item.get("title") or ""),
-                    text="",
-                    content_type="",
-                    content_kind="unfetched",
-                    status="failed",
-                    error="Run deadline reserve reached before fetch.",
-                )
-            invoke = lambda: fetch_url_content(
+            invoke = lambda: _fetch_url_content_with_retry(
                 str(item.get("url") or ""),
                 title_hint=str(item.get("title") or ""),
-                timeout_seconds=timeout,
+                deadline_at=deadline_at,
+                commit_reserve_seconds=commit_reserve_seconds,
             )
             if corpus_provider is None:
                 return invoke()
@@ -1552,9 +1854,15 @@ def _select_results_for_fetch(query: str, results: list[dict], limit: int) -> li
     # Canonical primary documents are resolved independently of the search
     # provider. Preserve them before generic targeted queries consume the
     # bounded fetch budget.
-    for item in ordered:
-        if str(item.get("provider_source") or "").casefold() == "official_seed":
-            add(item)
+    official_seeds = [
+        item for item in ordered
+        if str(item.get("provider_source") or "").casefold() == "official_seed"
+    ]
+    if official_seeds:
+        offset = int(sha256(str(query).encode("utf-8")).hexdigest()[:8], 16) % len(official_seeds)
+        official_seeds = official_seeds[offset:] + official_seeds[:offset]
+    for item in official_seeds:
+        add(item)
 
     targeted_queries: list[str] = []
     for item in ordered:
@@ -1597,6 +1905,17 @@ def _rerank_fetched_results(query: str, results: list[dict]) -> list[dict]:
         final_score = (0.75 * base) + (0.2 * freshness) + (0.05 * official) if temporal else base
         breakdown = dict(item.get("_breakdown") or {})
         breakdown["fetched_freshness"] = round(freshness, 3)
+        query_variants = [
+            query,
+            *(item.get("matched_queries") or [item.get("matched_query", "")]),
+        ]
+        body_anchor = _topic_anchor_match(
+            [str(value) for value in query_variants if str(value).strip()],
+            "\n".join((fetched.title, fetched.text[:6000], fetched.final_url or fetched.url)),
+        )
+        breakdown["fetched_topic_anchor"] = None if body_anchor is None else int(body_anchor)
+        if body_anchor is False:
+            final_score = min(final_score, 0.34)
         reranked.append({
             **item,
             "_freshness": round(freshness, 3),
@@ -1612,7 +1931,16 @@ def _reported_web_results(results: list[dict], status: str) -> list[dict]:
     return [
         item for item in results
         if float(item.get("_final_score", item.get("_score", 0.0))) >= 0.55
+        or _grounded_official_seed(item)
     ]
+
+
+def _grounded_official_seed(item: dict) -> bool:
+    return bool(
+        str(item.get("provider_source") or "").casefold() == "official_seed"
+        and getattr(item.get("fetch"), "usable", False)
+        and int((item.get("_breakdown") or {}).get("fetched_topic_anchor") or 0) == 1
+    )
 
 
 def _fetch_candidate_rank(query: str, item: dict) -> float:
@@ -2073,6 +2401,26 @@ def _domain(url: str) -> str:
     if host.startswith("www."):
         host = host[4:]
     return host
+
+
+def _web_organization(url: str) -> str:
+    host = _domain(url)
+    organizations = (
+        ("digital-strategy.ec.europa.eu", "European Commission"),
+        ("europa.eu", "European Union"),
+        ("bis.gov", "U.S. Department of Commerce, Bureau of Industry and Security"),
+        ("gov.uk", "UK Government"),
+        ("cac.gov.cn", "Cyberspace Administration of China"),
+        ("gov.cn", "State Council of the People's Republic of China"),
+    )
+    return next(
+        (
+            organization
+            for suffix, organization in organizations
+            if host == suffix or host.endswith(f".{suffix}")
+        ),
+        "",
+    )
 
 
 def _domain_quality(domain: str) -> float:

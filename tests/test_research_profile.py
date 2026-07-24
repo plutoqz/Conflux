@@ -132,7 +132,7 @@ def test_profile_cli_validate_and_show():
     root = Path(__file__).resolve().parents[1]
 
     validate_result = subprocess.run(
-        [sys.executable, "-m", "conflux.profile", "validate", "profiles/example_gis_agent.yaml"],
+        [sys.executable, "-m", "conflux.research_profile.cli", "validate", "profiles/example_gis_agent.yaml"],
         cwd=root,
         text=True,
         capture_output=True,
@@ -142,7 +142,7 @@ def test_profile_cli_validate_and_show():
     assert "Profile OK: gis-agent-research" in validate_result.stdout
 
     show_result = subprocess.run(
-        [sys.executable, "-m", "conflux.profile", "show", "profiles/example_gis_agent.yaml", "--json"],
+        [sys.executable, "-m", "conflux.research_profile.cli", "show", "profiles/example_gis_agent.yaml", "--json"],
         cwd=root,
         text=True,
         capture_output=True,

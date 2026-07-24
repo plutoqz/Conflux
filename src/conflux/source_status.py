@@ -9,6 +9,14 @@ from typing import Any, Iterator, Literal
 
 SourceName = str
 SourceStatus = Literal["success", "low_relevance", "no_evidence", "failed", "fallback"]
+EvidenceRole = Literal[
+    "direct_support",
+    "boundary",
+    "counterexample",
+    "analogy",
+    "discovery_only",
+    "model_analysis",
+]
 EvidenceClass = Literal[
     "peer_reviewed",
     "preprint",
@@ -49,6 +57,8 @@ class EvidenceItem:
     limitations: list[str] = field(default_factory=list)
     evidence_class: str = ""
     document_title: str = ""
+    authors: list[str] = field(default_factory=list)
+    organization: str = ""
     url: str = ""
     published_at: str = ""
     retrieved_at: str = ""
@@ -60,6 +70,11 @@ class EvidenceItem:
     page_start: int | None = None
     page_end: int | None = None
     subquestion_id: str = ""
+    domain_relevance: float = 0.0
+    claim_entailment: float = 0.0
+    evidence_role: str = ""
+    source_identity: str = ""
+    body_valid: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -81,6 +96,11 @@ class EvidenceItem:
             limitations=[str(item) for item in payload.get("limitations") or []],
             evidence_class=normalize_evidence_class(payload.get("evidence_class"), source),
             document_title=str(payload.get("document_title") or payload.get("title") or ""),
+            authors=[str(item) for item in payload.get("authors") or [] if str(item).strip()],
+            organization=str(
+                payload.get("organization") or payload.get("institution")
+                or payload.get("publisher") or ""
+            ),
             url=str(payload.get("url") or ""),
             published_at=str(payload.get("published_at") or ""),
             retrieved_at=str(payload.get("retrieved_at") or ""),
@@ -92,6 +112,11 @@ class EvidenceItem:
             page_start=_optional_int(payload.get("page_start")),
             page_end=_optional_int(payload.get("page_end")),
             subquestion_id=str(payload.get("subquestion_id") or ""),
+            domain_relevance=float(payload.get("domain_relevance", 0.0)),
+            claim_entailment=float(payload.get("claim_entailment", 0.0)),
+            evidence_role=str(payload.get("evidence_role") or ""),
+            source_identity=str(payload.get("source_identity") or ""),
+            body_valid=_optional_bool(payload.get("body_valid"), default=True),
         )
 
 
@@ -106,6 +131,14 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _optional_bool(value: Any, *, default: bool) -> bool:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().casefold() not in {"0", "false", "no", "off"}
 
 
 @dataclass

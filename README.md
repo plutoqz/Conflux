@@ -6,7 +6,7 @@ Conflux 是一个本地优先的研究工作台，将论文发现、知识入库
 
 ## 当前技术能力
 
-- LangGraph 工作流并行执行 RAG 和 Web 检索，再由 Model Analyst 读取外部证据进行分析。
+- LangGraph 工作流：V2 默认管道 (`answer_first`) 是线性 6 步 decompose→retrieve→generate→synthesize→audit→finalize；旧版并行 RAG+Web→Model Analyst 模式在 p1/p15 管道中仍可用。
 - 来源状态协议包含 `success`、`low_relevance`、`no_evidence`、`failed` 和 `fallback`。
 - `no_evidence`、`failed` 和 `fallback` 来源不会进入 Evidence Graph 共识投票。
 - 来源结果包含声明级 `evidence_refs`、`confidence` 和 `limitations`。
@@ -14,13 +14,15 @@ Conflux 是一个本地优先的研究工作台，将论文发现、知识入库
 - FactCheck 包含确定性追溯检查、独立模型核查、主答案修订和轻量复核闭环。
 - Deep 档支持六维研究计划、RunScoped 临时全文、数字引用编译、置信度附录和匿名成对盲评。
 - P1.5 支持通用问题原型、动态领域地图、覆盖矩阵、按证据需求的来源路由、动态预算、章节级/全局分层综合和动态报告契约。
-- P1.5 默认通过 `research.pipeline: p15` 启用；设置 `pipeline: p1` 或 `generalization.enabled: false` 可回退到已验收的 P1 路径。
+- P1.5 通过 `research.pipeline: p15` 启用；V2 简化管道 (`answer_first`) 是当前默认值，走 decompose→retrieve→generate→synthesize→audit→finalize 流程。
 - Trace JSONL 和 Run Summary JSON 用于检查每次运行的阶段和来源状态。
 - 离线评测覆盖检索质量、报告验收、来源故障矩阵、预算硬上限、失败来源泄漏、Prompt Injection 和章节追溯；不包含付费真实 API 盲评。
 
 ## 为什么使用 LangGraph
 
 当前调研流程需要明确状态边界、并行检索分支、条件路由和可选 Checkpointer。仓库已接入内存 Checkpointer，并记录 `run_id`、`thread_id`、Checkpoint 后端、来源状态和阶段进度；内存后端不会在进程重启后保留状态，因此当前不能宣称已经支持持久断点恢复。
+
+下图展示旧版 (p1/p15) 并行 agent 流程；当前默认 V2 pipeline 为线性 6 步：
 
 ```mermaid
 flowchart TD
@@ -112,7 +114,7 @@ models:
     base_url: https://your-gateway.example/v1
 
 research:
-  pipeline: p15  # p1 或 generalization.enabled: false 可回退到 P1
+  pipeline: answer_first  # answer_first 是当前默认；p15 启用 P1.5，p1 回退到 P1
   profiles:
     quick:
       planner_model: fast

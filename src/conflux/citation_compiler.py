@@ -21,7 +21,21 @@ class CitationCompiler:
         for item in self.evidence:
             for ref in item.get("evidence_refs") or []:
                 if str(ref):
-                    self.by_ref.setdefault(str(ref), item)
+                    key = str(ref)
+                    if key not in self.by_ref:
+                        self.by_ref[key] = dict(item)
+                        continue
+                    existing = self.by_ref[key]
+                    quotes = []
+                    for candidate in (existing, item):
+                        quote = re.sub(
+                            r"\s+",
+                            " ",
+                            str(candidate.get("verbatim_quote") or candidate.get("claim") or ""),
+                        ).strip()
+                        if quote and quote not in quotes:
+                            quotes.append(quote)
+                    existing["verbatim_quote"] = " ".join(quotes)[:1800]
 
     def compile(
         self,
@@ -36,6 +50,12 @@ class CitationCompiler:
             if ref in self.by_ref and ref not in ordered_refs:
                 ordered_refs.append(ref)
         number_by_ref = {ref: index + 1 for index, ref in enumerate(ordered_refs)}
+        evidence_number_by_id = {
+            str(item.get("id")): number_by_ref[ref]
+            for item in self.evidence
+            for ref in item.get("evidence_refs") or []
+            if str(item.get("id") or "") and ref in number_by_ref
+        }
         body = INTERNAL_CITATION_RE.sub(lambda match: f"[{number_by_ref[match.group(0)]}]" if match.group(0) in number_by_ref else "", body)
         body = _merge_adjacent_numeric_citations(body)
         entries = [self._entry(number_by_ref[ref], self.by_ref[ref]) for ref in ordered_refs]
@@ -44,6 +64,7 @@ class CitationCompiler:
             entries,
             claim_assessments or [],
             source_coverage or [],
+            evidence_number_by_id,
         )
         return _render_report(body, entries, confidence), entries, confidence
 
@@ -63,8 +84,20 @@ class CitationCompiler:
         quote = re.sub(r"\s+", " ", str(item.get("verbatim_quote") or item.get("claim") or "")).strip()
         return CitationEntry(
             number=number,
-            title=str(item.get("document_title") or item.get("paper_id") or item.get("url") or "未命名来源"),
+            title=str(item.get("document_title") or "题名元数据未提供"),
             source_type=str(item.get("evidence_class") or item.get("source") or "source"),
+            authors=[
+                str(value).strip()
+                for value in item.get("authors") or item.get("creators") or []
+                if str(value).strip()
+            ],
+            organization=str(
+                item.get("organization") or item.get("institution")
+                or item.get("publisher") or ""
+            ).strip(),
+            publication_year=_publication_year(
+                item.get("publication_year") or item.get("published_at") or item.get("year")
+            ),
             identifier=str(item.get("paper_id") or ""),
             url=str(item.get("url") or ""),
             location=location,
@@ -113,8 +146,12 @@ def _confidence_assessments(
     entries: list[CitationEntry],
     claim_assessments: list[dict[str, Any]],
     source_coverage: list[dict[str, Any]],
+    evidence_number_by_id: dict[str, int] | None = None,
 ) -> list[ConfidenceAssessment]:
-    entry_numbers = {entry.evidence_id: entry.number for entry in entries if entry.evidence_id}
+    entry_numbers = {
+        **(evidence_number_by_id or {}),
+        **{entry.evidence_id: entry.number for entry in entries if entry.evidence_id},
+    }
     rows: list[ConfidenceAssessment] = []
     for index, assessment in enumerate(claim_assessments):
         wording = str(assessment.get("wording") or assessment.get("claim") or "").strip()
@@ -160,7 +197,9 @@ def _confidence_assessments(
         if str(item.get("status") or "") in {"gap", "failed"}
     } - {""})
     if uncovered and rows:
-        rows[-1].limitations.append("仍有未闭合研究维度：" + "、".join(uncovered[:6]))
+        rows[-1].limitations.append(
+            f"仍有 {len(uncovered)} 个研究维度未闭合，详见正文的证据边界说明"
+        )
     return rows[:12]
 
 
@@ -186,8 +225,11 @@ def _render_report(
     references = []
     for entry in entries:
         identity = "；".join(item for item in (entry.identifier, entry.url, entry.location) if item)
+        creator = "、".join(entry.authors) or entry.organization or "作者/机构元数据未提供"
+        year = entry.publication_year or "年份元数据未提供"
         references.append(
             f"{entry.number}. **{_escape(entry.title)}**（{_escape(entry.source_type)}"
+            f"；{_escape(creator)}；{_escape(year)}"
             f"{'；' + _escape(identity) if identity else ''}）\n"
             f"   - 引用内容：{_escape(entry.quote) or '未提供可复核正文片段'}"
         )
@@ -218,3 +260,8 @@ def _escape(value: str) -> str:
 
 def _cell(value: str) -> str:
     return _escape(value).replace("\n", " ")
+
+
+def _publication_year(value: Any) -> str:
+    match = re.search(r"\b(19|20)\d{2}\b", str(value or ""))
+    return match.group(0) if match else ""

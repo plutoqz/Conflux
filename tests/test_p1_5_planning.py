@@ -13,6 +13,7 @@ from conflux.research_generalization import (
     merge_discovered_dimensions,
 )
 from conflux.research_protocol import DomainMap, QueryArchetype, ResearchDimension
+from conflux.research_protocol import ScopeContract
 
 
 ROOT = Path(__file__).parents[1]
@@ -110,6 +111,53 @@ def test_merge_discovered_dimensions_deduplicates_aliases_and_respects_bound() -
         "Which failures can be recovered?",
         "What is the recovery point?",
     }
+
+
+def test_merge_discovered_dimensions_rejects_high_importance_off_domain_drift() -> None:
+    query = "What transparency obligations should apply to foundation models?"
+    scope = ScopeContract(
+        subject="foundation model transparency",
+        task="policy analysis",
+        scope_inclusions=["foundation model transparency"],
+        required_entities=["foundation models"],
+        original_query=query,
+    )
+    base = DomainMap(
+        scope=query,
+        dimensions=[
+            ResearchDimension(
+                id="baseline",
+                name="Foundation model transparency requirements",
+                importance=0.9,
+            )
+        ],
+    )
+
+    merged = merge_discovered_dimensions(
+        base,
+        [
+            ResearchDimension(
+                id="medical-drift",
+                name="Trigger thresholds in anticoagulant dosing",
+                inclusion_reason="the model marked this as important",
+                importance=0.99,
+            ),
+            ResearchDimension(
+                id="audit",
+                name="Independent audits for foundation model transparency",
+                questions_to_answer=[
+                    "How should foundation model transparency audits be governed?"
+                ],
+                importance=0.8,
+            ),
+        ],
+        query=query,
+        scope_contract=scope,
+    )
+
+    ids = {item.id for item in merged.dimensions}
+    assert "audit" in ids
+    assert "medical-drift" not in ids
 
 
 @pytest.mark.parametrize(

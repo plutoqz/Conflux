@@ -68,6 +68,8 @@ class EvidenceNode:
     research_type: str = ""
     metric: str = ""
     document_title: str = ""
+    authors: list[str] = field(default_factory=list)
+    organization: str = ""
     url: str = ""
     published_at: str = ""
     retrieved_at: str = ""
@@ -78,6 +80,11 @@ class EvidenceNode:
     relationship: str = "supports"
     page_start: int | None = None
     page_end: int | None = None
+    domain_relevance: float = 0.0
+    claim_entailment: float = 0.0
+    evidence_role: str = ""
+    source_identity: str = ""
+    body_valid: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -265,6 +272,8 @@ def build_evidence_graph_from_results(results: dict[str, SourceResult]) -> Evide
                     research_type=claim.research_type,
                     metric=claim.metric,
                     document_title=claim.document_title,
+                    authors=list(claim.authors),
+                    organization=claim.organization,
                     url=claim.url,
                     published_at=claim.published_at,
                     retrieved_at=claim.retrieved_at,
@@ -275,6 +284,11 @@ def build_evidence_graph_from_results(results: dict[str, SourceResult]) -> Evide
                     relationship=claim.relationship,
                     page_start=claim.page_start,
                     page_end=claim.page_end,
+                    domain_relevance=claim.domain_relevance,
+                    claim_entailment=claim.claim_entailment,
+                    evidence_role=claim.evidence_role,
+                    source_identity=claim.source_identity or _paper_id_for_item(claim),
+                    body_valid=claim.body_valid,
                 ))
         else:
             for node in extract_claims_from_text(
@@ -446,7 +460,9 @@ def _identity_from_ref(ref: str) -> str:
 
 
 def _normalize_identity(value: str) -> str:
-    text = re.sub(r"^https?://(dx\.)?doi\.org/", "doi:", value.strip(), flags=re.IGNORECASE)
+    text = value.strip()
+    text = re.sub(r"[#?].*$", "", text)
+    text = re.sub(r"^https?://(dx\.)?doi\.org/", "doi:", text, flags=re.IGNORECASE)
     text = re.sub(r"^https?://(www\.)?arxiv\.org/(abs|pdf)/", "arxiv:", text, flags=re.IGNORECASE)
     text = re.sub(r"\.pdf$", "", text, flags=re.IGNORECASE)
     text = text.rstrip("/").lower()

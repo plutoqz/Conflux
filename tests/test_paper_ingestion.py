@@ -115,7 +115,7 @@ def test_papers_cli_load_fixture_and_crawl_dry_run():
     root = Path(__file__).resolve().parents[1]
 
     load_result = subprocess.run(
-        [sys.executable, "-m", "conflux.papers", "load-fixture", "tests/fixtures/papers/arxiv_sample.json"],
+        [sys.executable, "-m", "conflux.paper_ingestion.cli", "load-fixture", "tests/fixtures/papers/arxiv_sample.json"],
         cwd=root,
         text=True,
         capture_output=True,
@@ -128,7 +128,7 @@ def test_papers_cli_load_fixture_and_crawl_dry_run():
         [
             sys.executable,
             "-m",
-            "conflux.papers",
+            "conflux.paper_ingestion.cli",
             "crawl",
             "--profile",
             "profiles/example_gis_agent.yaml",
