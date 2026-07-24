@@ -60,6 +60,7 @@ from conflux.workbench.config_store import (
     WORKBENCH_ENV,
     _reload_env,
     build_sanitized_config,
+    save_config_field,
     save_workbench_env,
 )
 from conflux.workbench.jobs import get_job_manager, _EXECUTION_LOCK
@@ -2361,6 +2362,14 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/config":
             self._send_json(build_sanitized_config())
+            return
+        if parsed.path == "/api/config/save":
+            payload = self._read_json_body()
+            result = save_config_field(
+                str(payload.get("path") or ""),
+                payload.get("value"),
+            )
+            self._send_json(result)
             return
         if parsed.path == "/api/file":
             params = urllib.parse.parse_qs(parsed.query)

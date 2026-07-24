@@ -1,78 +1,62 @@
-# Conflux 配置文件
-# 所有值均可通过环境变量 CONFLUX_<SECTION>__<KEY> 覆盖，例如：
-#   CONFLUX_MODELS__REASONING__API_KEY
-# api_key 不应写入仓库；留空时由模型工厂读取对应环境变量。
-
 models:
-  # These presets are deployment configuration, not backend model choices.
-  # Users may replace every provider/model mapping while keeping the role names.
-  # The values below are the current non-Gemini development-test setup.
   flash:
     provider: openai_compatible
     model: qwen3.7-plus
     base_url: https://www.dmxapi.cn/v1
-    api_key:
+    api_key: null
     temperature: 0.2
     max_tokens: 4096
     timeout: 60
     max_retries: 1
     extra_body:
       enable_thinking: false
-
   balanced:
     provider: openai_compatible
     model: qwen3.7-plus
     base_url: https://www.dmxapi.cn/v1
-    api_key:
+    api_key: null
     temperature: 0.25
     max_tokens: 8192
     timeout: 90
     max_retries: 1
     extra_body:
       enable_thinking: false
-
   reasoning:
     provider: openai_compatible
-    model: deepseek-v4-pro
+    model: deepseek-v4-flash
     base_url: https://www.dmxapi.cn/v1
-    api_key:
+    api_key: null
     temperature: 0.25
     max_tokens: 12288
     timeout: 120
     max_retries: 1
-
   verifier:
     provider: openai_compatible
     model: MiniMax-M3
     base_url: https://www.dmxapi.cn/v1
-    api_key:
+    api_key: null
     temperature: 0.0
     max_tokens: 8192
     timeout: 90
     max_retries: 1
     extra_body:
       enable_thinking: false
-
-  # Legacy alias retained for existing integrations. P1 roles use the
-  # explicit flash/balanced/reasoning/verifier presets below.
   cheap:
     provider: openai_compatible
-    model: qwen3.7-plus
+    model: deepseek-v4-flash
     base_url: https://www.dmxapi.cn/v1
-    api_key:
+    api_key: null
     temperature: 0.0
     max_tokens: 1024
     timeout: 60
     max_retries: 1
     extra_body:
       enable_thinking: false
-
 embedding:
   provider: openai_compatible
   model: text-embedding-3-small
   base_url: https://www.dmxapi.cn/v1
-  api_key:
-
+  api_key: null
 web_search:
   provider: duckduckgo
   max_results: 5
@@ -84,15 +68,15 @@ web_search:
   fetch_timeout_seconds: 12
   max_fetch_bytes: 5242880
   max_pdf_pages: 30
-  # Providers are attempted in order when the current source fails or yields
-  # too few relevant URLs. Bing/Google require their authorized API keys.
-  fallback_providers: [duckduckgo, bing, google, serpapi]
-
+  fallback_providers:
+  - duckduckgo
+  - bing
+  - google
+  - serpapi
 vector_store:
   provider: chromadb
   persist_dir: ./data/chroma_db
   collection_name: conflux_docs
-
 retrieval:
   top_k: 10
   final_k: 5
@@ -100,18 +84,14 @@ retrieval:
   child_chunk_size: 256
   bm25_weight: 0.3
   dense_weight: 0.7
-
 agent:
   max_iterations: 3
-
 research:
-  # Set to p15 for P1.5 pipeline, answer_first for V2 simplified pipeline.
   pipeline: answer_first
   depth: standard
   enable_l4: true
   max_deep_questions: 2
   max_rewrite_attempts: 2
-  # Deterministic seed URLs — false in V2 main path, true to re-enable for P1.5 fallback.
   deterministic_seeds: false
   generalization:
     enabled: true
@@ -238,6 +218,5 @@ research:
       model_timeout_seconds: 240
       max_retries: 0
       timeout_seconds: 480
-
 slo:
   survey_p95_ms: 45000

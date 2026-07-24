@@ -246,3 +246,49 @@ def _reload_env() -> None:
             pass
     _loaded_env_keys = current_keys
     config._config = None  # type: ignore[attr-defined]
+
+
+def save_config_field(path: str, value: Any) -> dict[str, Any]:
+    """Update a single dot-path field in config.yaml and return the new config.
+
+    Only allow-safe paths under `research.profiles.<depth>.*` are accepted.
+    The file is atomically replaced.
+    """
+
+    import yaml
+
+    allowed_prefixes = (
+        "research.profiles.quick.",
+        "research.profiles.standard.",
+        "research.profiles.deep.",
+    )
+    path = str(path or "").strip()
+    if not any(path.startswith(p) for p in allowed_prefixes):
+        return {"ok": False, "error": f"不允许修改的配置路径: {path}"}
+
+    config_path = PROJECT_ROOT / "config.yaml"
+    if not config_path.exists():
+        return {"ok": False, "error": "config.yaml 不存在"}
+
+    raw = config.load()
+
+    # Navigate nested keys
+    keys = path.split(".")
+    target = raw
+    for key in keys[:-1]:
+        if not isinstance(target, dict):
+            return {"ok": False, "error": f"路径 {path} 中的 {key} 不是字典"}
+        target = target.setdefault(key, {})
+    target[keys[-1]] = value
+
+    # Atomic write
+    tmp = config_path.with_suffix(".yaml.tmp")
+    try:
+        tmp.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        tmp.replace(config_path)
+        config._config = None  # type: ignore[attr-defined]
+        return {"ok": True, "path": path, "value": value}
+    except Exception as exc:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        return {"ok": False, "error": str(exc)}

@@ -87,25 +87,24 @@ class ResearchModeProfile:
 
     @property
     def role_timeout_seconds(self) -> dict[str, int]:
-        """Per-role call ceilings; the run deadline may reduce them further."""
+        """Per-role call ceilings derived proportionally from model_timeout_seconds.
 
-        defaults = {
-            "quick": {
-                "planner": 20, "analyst": 20, "reranker": 15,
-                "synthesizer": 30, "verifier": 20,
-            },
-            "standard": {
-                "planner": 25, "analyst": 45, "reranker": 25,
-                "synthesizer": 55, "verifier": 35,
-            },
-            "deep": {
-                "planner": 45, "analyst": 80, "reranker": 35,
-                "synthesizer": 100, "verifier": 60,
-            },
-        }[self.depth]
+        All role timeouts are fractions of the single `model_timeout_seconds`
+        configured in config.yaml.  Changing that one value rescales every role
+        without touching hard-coded magic numbers.
+        """
+
+        base = max(1, self.model_timeout_seconds)
+        fractions = {
+            "planner": 0.25,
+            "analyst": 0.40,
+            "reranker": 0.25,
+            "synthesizer": 0.75,
+            "verifier": 0.35,
+        }
         return {
-            role: max(1, min(self.model_timeout_seconds, seconds))
-            for role, seconds in defaults.items()
+            role: max(8, round(base * fraction))
+            for role, fraction in fractions.items()
         }
 
     @property
