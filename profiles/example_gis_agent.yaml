@@ -39,3 +39,47 @@ report_cadence: weekly
 metadata:
   owner_type: graduate_student
   demo_domain: cs_ai_gis
+tracks:
+  - id: geo_agents
+    name: Geospatial AI Agents
+    description: LLM agents for GIS workflows, data fusion, and knowledge-grounded reasoning
+    related_rqs: [RQ1]
+    queries:
+      - terms: "GIS agent OR geospatial LLM OR spatial reasoning agent"
+        suffix: "workflow OR data fusion OR knowledge graph"
+        categories: [cs.AI, cs.CL, cs.CV]
+        date_window_days: 365
+        priority: 90
+      - terms: "knowledge graph geospatial OR GeoKG"
+        suffix: "agent OR LLM OR retrieval augmented"
+        categories: [cs.AI, cs.IR]
+        date_window_days: 365
+        priority: 85
+    budget_ratio: 0.4
+  - id: agent_verification
+    name: Agent Verification & Audit
+    description: Verification, repair, audit trails, and reproducible agent execution
+    related_rqs: [RQ2, RQ3]
+    queries:
+      - terms: "agent verification OR audit trail OR provenance"
+        suffix: "workflow OR execution OR geospatial"
+        categories: [cs.AI, cs.SE]
+        date_window_days: 365
+        priority: 85
+      - terms: "agent planning OR task decomposition"
+        suffix: "geospatial OR GIS OR spatial"
+        categories: [cs.AI, cs.RO]
+        date_window_days: 365
+        priority: 80
+    budget_ratio: 0.35
+  - id: reproducibility
+    name: Reproducible Geospatial Research
+    description: Benchmarks, evaluation, and reproducibility in GIS + AI research
+    related_rqs: [RQ3]
+    queries:
+      - terms: "reproducible research OR benchmark OR evaluation"
+        suffix: "geospatial OR GIS OR spatial data"
+        categories: [cs.AI, cs.DB, cs.DL]
+        date_window_days: 730
+        priority: 75
+    budget_ratio: 0.25

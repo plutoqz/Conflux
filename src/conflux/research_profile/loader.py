@@ -18,7 +18,8 @@ def load_profile(path: str | Path, *, validate: bool = True) -> ResearchProfile:
     with profile_path.open(encoding="utf-8") as handle:
         payload = yaml.safe_load(handle) or {}
 
-    if "tracks" in payload and "research_questions" in payload:
+    # AcademyHunter detection: tracks + research_questions (as dict, not list)
+    if "tracks" in payload and isinstance(payload.get("research_questions"), dict):
         profile = profile_from_academy_hunter(payload)
     else:
         profile = profile_from_dict(payload)
@@ -45,6 +46,7 @@ def profile_from_dict(payload: dict[str, Any]) -> ResearchProfile:
         "document_paths",
         "paper_sources",
         "report_cadence",
+        "tracks",
     }
     for key, value in payload.items():
         if key not in known and key != "metadata":
@@ -63,6 +65,7 @@ def profile_from_dict(payload: dict[str, Any]) -> ResearchProfile:
         document_paths=_string_list(payload.get("document_paths")),
         paper_sources=_string_list(payload.get("paper_sources")) or ["arxiv"],
         report_cadence=str(payload.get("report_cadence") or "weekly"),
+        tracks=list(payload.get("tracks") or []),
         metadata=metadata,
     )
 

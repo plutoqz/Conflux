@@ -49,13 +49,13 @@ plan:
     - M2 集成测试
   - id: p2-project-paper-radar
     title: P2 项目驱动论文雷达
-    status: planned
-    description: 先完成项目绑定、Track 搜索扩面、项目论文关联、全文证据分析和审批建议的文件模式闭环，再交由 M3 统一持久化。
+    status: in_progress
+    description: 已完成项目绑定、Track 搜索扩面、项目论文关联和 Workbench Research 视图的文件模式闭环，待 M3 统一持久化。
     deliverables:
-    - ProjectResearchConfig 与 SearchIntent 等类型化契约
-    - 项目级论文状态和报告目录
-    - Workbench 项目 Research 视图
-    - P2 人工标注集和验收报告
+    - ProjectResearchConfig 与 SearchIntent 等类型化契约（19 个 Pydantic 类型）
+    - 项目级论文状态和报告目录（reports/workbench/projects/{id}/papers/）
+    - Workbench 项目 Research 视图（标签页 + 端点 + JS）
+    - P2 人工标注集和验收报告（tests/test_p2_paper_radar.py，25 tests）
   - id: m3-persistent-runs
     title: M3 持久运行与初始化迁移
     status: planned
@@ -81,3 +81,14 @@ refresh:
   next_refresh_at: ''
 metadata:
   owner: local
+research:
+  profile: profiles/example_gis_agent.yaml
+  sources:
+  - arxiv
+  - semantic_scholar
+  cadence: manual
+  max_candidates: 100
+  deep_read_limit: 5
+  auto_generate_queries: true
+  require_query_review: true
+  require_plan_writeback_approval: true

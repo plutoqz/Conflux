@@ -109,6 +109,7 @@ class ProjectDefinition:
     refresh: RefreshPolicy = field(default_factory=RefreshPolicy)
     metadata: dict[str, Any] = field(default_factory=dict)
     source_file: str = ""
+    research: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ProjectDefinition":
@@ -134,6 +135,7 @@ class ProjectDefinition:
             plan=ProjectPlan.from_dict(payload.get("plan") or {}),
             refresh=RefreshPolicy.from_dict(payload.get("refresh") or {}),
             metadata=dict(payload.get("metadata") or {}),
+            research=dict(payload.get("research")) if payload.get("research") else None,
         )
 
     def to_dict(self, *, include_source: bool = True) -> dict[str, Any]:
@@ -161,6 +163,8 @@ class ProjectDefinition:
         }
         if include_source:
             payload["source_file"] = self.source_file
+        if self.research is not None:
+            payload["research"] = dict(self.research)
         return payload
 
 

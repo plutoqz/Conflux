@@ -416,6 +416,7 @@
               <div class="project-tabs" role="tablist" aria-label="项目视图">
                 <button class="project-tab active" type="button" role="tab" aria-selected="true" data-project-tab="overview">概览</button>
                 <button class="project-tab" type="button" role="tab" aria-selected="false" data-project-tab="plan">计划</button>
+                <button class="project-tab" type="button" role="tab" aria-selected="false" data-project-tab="research">研究</button>
                 <button class="project-tab" type="button" role="tab" aria-selected="false" data-project-tab="evidence">证据</button>
                 <button class="project-tab" type="button" role="tab" aria-selected="false" data-project-tab="settings">设置</button>
               </div>
@@ -483,6 +484,56 @@
                   <div class="project-section-heading"><div><h3 id="charterDraftTitle">PROJECT.md 草案</h3><p>草案仅保存在工作台缓存中，确认前不会写入项目目录。</p></div><span id="charterDraftModel" class="status-pill neutral">模型草案</span></div>
                   <pre id="charterDraftPreview" class="charter-preview"></pre>
                   <div class="analysis-confirm-row"><label class="confirm-check"><input id="confirmCharterApply" type="checkbox"><span>我已审查草案，同意写入项目目录</span></label><button id="applyProjectCharter" class="button primary compact" type="button" disabled><i data-lucide="file-check-2" aria-hidden="true"></i><span>写入 PROJECT.md</span></button></div>
+                </section>
+              </div>
+
+              <div class="project-tab-panel" data-project-panel="research" role="tabpanel" hidden>
+                <section class="project-detail-section" aria-labelledby="projectResearchTitle">
+                  <div class="project-section-heading">
+                    <div><h3 id="projectResearchTitle">论文雷达</h3><p id="projectResearchSummary">项目驱动的论文发现与关联分析。</p></div>
+                    <div class="project-section-actions">
+                      <span id="projectResearchStatus" class="status-pill neutral">未运行</span>
+                      <button id="runProjectRadar" class="button primary compact" type="button"><i data-lucide="radar" aria-hidden="true"></i><span>运行雷达</span></button>
+                    </div>
+                  </div>
+                  <div id="projectResearchEmpty" class="inline-empty">尚未配置研究画像或运行雷达。请在项目设置中添加 research 配置。</div>
+                  <div id="projectResearchContent" hidden>
+                    <dl class="evidence-metrics">
+                      <div><dt>搜索意图</dt><dd id="researchIntentCount">-</dd></div>
+                      <div><dt>执行查询</dt><dd id="researchQueryCount">-</dd></div>
+                      <div><dt>候选论文</dt><dd id="researchCandidateCount">-</dd></div>
+                      <div><dt>已保存</dt><dd id="researchSavedCount">-</dd></div>
+                      <div><dt>最近运行</dt><dd id="researchLastRun">-</dd></div>
+                    </dl>
+                    <div class="plan-diff-band">
+                      <div><span>数据源</span><strong id="researchSources">-</strong></div>
+                      <div><span>失败源</span><strong id="researchFailedSources">-</strong></div>
+                      <div><span>耗时</span><strong id="researchElapsed">-</strong></div>
+                    </div>
+                    <section class="analysis-group" aria-labelledby="researchIntentsTitle">
+                      <div class="analysis-group-heading"><h4 id="researchIntentsTitle">搜索意图</h4><span id="researchIntentSummary">0 项</span></div>
+                      <div id="researchIntentsList" class="analysis-list"></div>
+                    </section>
+                    <section class="analysis-group" aria-labelledby="researchQueriesTitle">
+                      <div class="analysis-group-heading"><h4 id="researchQueriesTitle">执行查询</h4><span id="researchQuerySummary">0 项</span></div>
+                      <div id="researchQueriesList" class="analysis-list"></div>
+                    </section>
+                    <section class="analysis-group" aria-labelledby="researchPapersTitle">
+                      <div class="analysis-group-heading">
+                        <h4 id="researchPapersTitle">发现论文</h4>
+                        <span id="researchPaperSummary">0 篇</span>
+                      </div>
+                      <div id="researchPapersList" class="analysis-list"></div>
+                    </section>
+                    <section class="analysis-group" aria-labelledby="researchCoverageTitle">
+                      <div class="analysis-group-heading"><h4 id="researchCoverageTitle">覆盖矩阵</h4><span id="researchCoverageSummary">-</span></div>
+                      <div id="researchCoverageList" class="analysis-list"></div>
+                    </section>
+                    <section class="analysis-group" aria-labelledby="researchSuggestionsTitle">
+                      <div class="analysis-group-heading"><h4 id="researchSuggestionsTitle">影响建议</h4><span id="researchSuggestionSummary">0 项</span></div>
+                      <div id="researchSuggestionsList" class="analysis-list"></div>
+                    </section>
+                  </div>
                 </section>
               </div>
 

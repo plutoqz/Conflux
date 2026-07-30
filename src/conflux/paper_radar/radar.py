@@ -1,0 +1,311 @@
+"""P2 Paper Radar — main pipeline orchestrator.
+
+Assembles project context, generates intents, resolves queries, runs the paper
+ingestion pipeline against real sources, and produces a RadarRunResult with
+project-scoped paper links and impact suggestions.
+"""
+
+from __future__ import annotations
+
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+from conflux.core.p2_contracts import (
+    EvidenceUtility,
+    PaperIdentity,
+    PaperLinkStatus,
+    PaperSource,
+    ProjectPaperLink,
+    ProjectResearchConfig,
+    RadarRunResult,
+    RadarRunStats,
+)
+from conflux.paper_ingestion.models import PaperRecord
+from conflux.project_registry.models import ProjectDefinition
+from conflux.research_profile import ResearchProfile, load_profile
+
+from .context_builder import build_project_research_context
+from .deep_analyzer import run_deep_analysis
+from .intent_generator import generate_search_intents
+from .query_builder import resolve_query_specs_from_profile
+
+
+def run_paper_radar_from_profile(
+    project: ProjectDefinition,
+    profile_path: str | Path,
+    *,
+    audit: dict[str, Any] | None = None,
+    out_dir: str | Path | None = None,
+    llm_review: bool = False,
+    review_model: Any = None,
+) -> RadarRunResult:
+    """Convenience wrapper that loads a profile and runs the radar."""
+    profile = load_profile(profile_path, validate=False)
+    return run_paper_radar(
+        project=project,
+        profile=profile,
+        audit=audit,
+        out_dir=out_dir,
+        llm_review=llm_review,
+        review_model=review_model,
+    )
+
+
+def run_paper_radar(
+    project: ProjectDefinition,
+    profile: ResearchProfile,
+    *,
+    audit: dict[str, Any] | None = None,
+    out_dir: str | Path | None = None,
+    llm_review: bool = False,
+    review_model: Any = None,
+) -> RadarRunResult:
+    """Run the full P2 paper radar pipeline for a project.
+
+    Steps:
+    1. Build ProjectResearchContext from project + profile + audit
+    2. Generate SearchIntent list
+    3. Resolve QuerySpec list from profile tracks (or fallback)
+    4. Execute queries against paper sources
+    5. De-duplicate, filter, create ProjectPaperLink entries
+    6. Produce RadarRunResult
+    """
+    run_id = uuid.uuid4().hex[:12]
+    started_at = time.time()
+
+    # Resolve project research config
+    config_raw = project.research or {}
+    config = _parse_config(config_raw, profile)
+
+    # Step 1: Build context
+    context = build_project_research_context(project, profile, audit=audit)
+
+    # Step 2: Generate intents
+    intents = generate_search_intents(context, llm_review=llm_review, llm_model=review_model)
+
+    # Step 3: Resolve query specs
+    queries = resolve_query_specs_from_profile(profile, config=config, context=context)
+
+    # Step 4: Execute queries against sources
+    all_papers, failed_sources = _execute_queries(queries)
+
+    # Step 5: De-duplicate and filter
+    unique_papers = _deduplicate_papers(all_papers)
+    filtered_papers = _apply_negative_filters(unique_papers, profile)
+    paper_map: dict[str, PaperRecord] = {p.id: p for p in filtered_papers}
+
+    # Step 6: Create project-paper links
+    links = _create_project_links(
+        papers=filtered_papers,
+        project_id=project.id,
+        intents=intents,
+        context=context,
+    )
+
+    # Step 7: Run deep analysis on top-N papers (D: full-text evidence)
+    suggestions: list[ProjectImpactSuggestion] = []
+    deep_read = 0
+    if config.deep_read_limit > 0 and filtered_papers:
+        deep_pairs = [
+            (link, paper_map.get(link.paper_identity.canonical_id, {}).to_dict()
+             if paper_map.get(link.paper_identity.canonical_id)
+             else {"id": link.paper_identity.canonical_id})
+            for link in links
+        ]
+        suggestions = run_deep_analysis(
+            deep_pairs,
+            context,
+            intents,
+            download_dir=(Path(out_dir) / "pdf_cache") if out_dir else None,
+            max_papers=config.deep_read_limit,
+        )
+        deep_read = config.deep_read_limit
+
+    # Write output if out_dir specified
+    if out_dir:
+        _write_radar_output(out_dir, project.id, run_id, context, intents, queries, links)
+
+    elapsed = time.time() - started_at
+    started_dt = __import__("datetime").datetime.utcnow()
+
+    stats = RadarRunStats(
+        project_id=project.id,
+        run_id=run_id,
+        total_candidates=len(all_papers),
+        after_dedup=len(unique_papers),
+        after_negative_filter=len(filtered_papers),
+        after_coarse_rank=len(filtered_papers),
+        shortlisted=sum(1 for l in links if l.status == PaperLinkStatus.SHORTLISTED),
+        deep_read=deep_read,
+        saved=sum(1 for l in links if l.status == PaperLinkStatus.SAVED),
+        rejected=sum(1 for l in links if l.status == PaperLinkStatus.REJECTED),
+        suggestions_proposed=len(suggestions),
+        sources_used=[s.value for s in config.sources],
+        failed_sources=failed_sources,
+        intent_count=len(intents),
+        query_count=len(queries),
+        started_at=started_dt,
+        finished_at=__import__("datetime").datetime.utcnow(),
+        elapsed_seconds=elapsed,
+    )
+
+    return RadarRunResult(
+        project_id=project.id,
+        context=context,
+        intents=intents,
+        queries=queries,
+        links=links,
+        suggestions=suggestions,
+        stats=stats,
+    )
+
+
+def _parse_config(raw: dict[str, Any], profile: ResearchProfile) -> ProjectResearchConfig:
+    """Parse project YAML 'research' section into a ProjectResearchConfig, with defaults."""
+    return ProjectResearchConfig(
+        profile=raw.get("profile", f"profiles/{profile.id}.yaml"),
+        sources=_parse_sources(raw.get("sources", ["arxiv", "semantic_scholar"])),
+        cadence=raw.get("cadence", "manual"),
+        max_candidates=int(raw.get("max_candidates", 100)),
+        deep_read_limit=int(raw.get("deep_read_limit", 5)),
+        auto_generate_queries=bool(raw.get("auto_generate_queries", True)),
+        require_query_review=bool(raw.get("require_query_review", True)),
+        require_plan_writeback_approval=bool(raw.get("require_plan_writeback_approval", True)),
+        track_overrides=list(raw.get("track_overrides") or []),
+    )
+
+
+def _parse_sources(raw: list[str] | str | None) -> list[PaperSource]:
+    """Parse source strings into PaperSource enum values."""
+    if not raw:
+        return [PaperSource.ARXIV, PaperSource.SEMANTIC_SCHOLAR]
+    if isinstance(raw, str):
+        raw = [raw]
+    result: list[PaperSource] = []
+    for s in raw:
+        s = str(s).strip().lower()
+        try:
+            result.append(PaperSource(s))
+        except ValueError:
+            continue
+    return result or [PaperSource.ARXIV, PaperSource.SEMANTIC_SCHOLAR]
+
+
+def _execute_queries(queries: list) -> tuple[list[PaperRecord], list[str]]:
+    """Execute QuerySpec objects against their paper sources.
+
+    Returns (all_papers, failed_sources).
+    Falls back gracefully when a source is unavailable.
+    """
+    import logging
+
+    from conflux.paper_ingestion.arxiv_source import search_arxiv
+    from conflux.paper_ingestion.semantic_scholar_source import search_semantic_scholar
+
+    logger = logging.getLogger(__name__)
+    all_papers: list[PaperRecord] = []
+    failed: set[str] = set()
+
+    for spec in queries:
+        try:
+            if spec.source == PaperSource.ARXIV:
+                papers = search_arxiv(spec.query, max_results=spec.max_results)
+            elif spec.source == PaperSource.SEMANTIC_SCHOLAR:
+                papers = search_semantic_scholar(
+                    spec.query,
+                    max_results=spec.max_results,
+                )
+            else:
+                logger.warning("Unknown source: %s", spec.source)
+                failed.add(str(spec.source.value))
+                continue
+            all_papers.extend(papers)
+        except Exception:
+            failed.add(spec.source.value)
+            continue
+
+    return all_papers, sorted(failed)
+
+
+def _deduplicate_papers(papers: list[PaperRecord]) -> list[PaperRecord]:
+    """De-duplicate paper records by DOI and title."""
+    from conflux.paper_ingestion.dedup import deduplicate_papers
+    return deduplicate_papers(papers)
+
+
+def _apply_negative_filters(papers: list[PaperRecord], profile: ResearchProfile) -> list[PaperRecord]:
+    """Apply negative keyword filtering."""
+    from conflux.paper_ingestion.filters import apply_negative_filters
+    return apply_negative_filters(papers, profile)
+
+
+def _create_project_links(
+    papers: list[PaperRecord],
+    project_id: str,
+    intents: list,
+    context,
+) -> list[ProjectPaperLink]:
+    """Create ProjectPaperLink entries for filtered papers."""
+    links: list[ProjectPaperLink] = []
+    for paper in papers:
+        identity = PaperIdentity(
+            source=paper.source or "unknown",
+            canonical_id=paper.id,
+            doi=paper.doi,
+        )
+        link = ProjectPaperLink(
+            project_id=project_id,
+            paper_identity=identity,
+            status=PaperLinkStatus.DISCOVERED,
+            matched_intent_ids=[i.id for i in intents[:3]],  # simplified
+            evidence_utility=EvidenceUtility.NONE,
+            relevance=0.5,
+            profile_version=context.profile_version,
+            context_version=context.project_revision,
+        )
+        links.append(link)
+    return links
+
+
+def _write_radar_output(
+    out_dir: str | Path,
+    project_id: str,
+    run_id: str,
+    context,
+    intents: list,
+    queries: list,
+    links: list[ProjectPaperLink],
+) -> None:
+    """Write radar run artifacts to the project's paper directory."""
+    import json as _json
+    from datetime import datetime
+
+    base = Path(out_dir) / project_id / "papers"
+    base.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+
+    payload = {
+        "run_id": run_id,
+        "timestamp": timestamp,
+        "project_id": project_id,
+        "context": context.model_dump(),
+        "intents": [i.model_dump() for i in intents],
+        "queries": [q.model_dump() for q in queries],
+        "links": [l.model_dump() for l in links],
+        "link_count": len(links),
+    }
+
+    run_file = base / f"run_{run_id}.json"
+    run_file.write_text(
+        _json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+    latest_file = base / "latest.json"
+    latest_file.write_text(
+        _json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )

@@ -1630,13 +1630,17 @@ def build_projects_overview() -> dict[str, Any]:
                     "title": "缺少项目纲领",
                     "detail": "只读监控仍可使用，但智能计划分析的依据不足。可生成 PROJECT.md 草案后人工确认。",
                 })
+            # Inject P2 research config for the frontend research tab
+            cached["research"] = project.research
             projects.append(cached)
         else:
-            projects.append(monitor_project(
+            overview = monitor_project(
                 project,
                 audit_root=PROJECT_ROOT / DEFAULT_PROGRESS_DIR,
                 check_remote=False,
-            ))
+            )
+            overview["research"] = project.research
+            projects.append(overview)
     return {
         "ok": True,
         "projects": projects,
@@ -2035,6 +2039,203 @@ def apply_project_charter(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "path": str(target), "config_path": str(config_path), "project": overview}
 
 
+def run_project_research_radar(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run the P2 paper radar for a project and return results."""
+    project_id = str(payload.get("project_id") or "").strip()
+    if not project_id:
+        return {"ok": False, "error": "project_id required"}
+
+    project = _project_registry().get(project_id)
+    if project is None:
+        return {"ok": False, "error": f"项目未找到：{project_id}"}
+    if not project.research:
+        return {"ok": False, "error": "项目尚未配置研究画像 (research 段)。请先在项目设置中添加。"}
+
+    profile_path = str(project.research.get("profile") or "")
+    if not profile_path:
+        return {"ok": False, "error": "未指定研究画像路径。"}
+
+    from pathlib import Path as _Path
+    resolved = _Path(profile_path)
+    if not resolved.is_absolute():
+        resolved = _Path(project.path).expanduser().resolve() / resolved
+    resolved = resolved.resolve()
+    if not resolved.exists():
+        return {"ok": False, "error": f"研究画像文件不存在：{resolved}"}
+
+    try:
+        from conflux.paper_radar.radar import run_paper_radar_from_profile
+        from conflux.research_profile import load_profile
+
+        profile = load_profile(str(resolved), validate=False)
+        result = run_paper_radar_from_profile(
+            project=project,
+            profile_path=str(resolved),
+            out_dir=str(PROJECT_ROOT / DEFAULT_PROGRESS_DIR / "workbench" / "projects"),
+        )
+
+        # Cache result
+        cache = {
+            "project_id": result.project_id,
+            "context": result.context.model_dump(),
+            "intents": [i.model_dump() for i in result.intents],
+            "queries": [q.model_dump() for q in result.queries],
+            "links": [l.model_dump() for l in result.links],
+            "suggestions": [s.model_dump() for s in result.suggestions],
+            "stats": result.stats.model_dump(),
+        }
+        _write_research_cache(project_id, cache)
+
+        return {
+            "ok": True,
+            "project_id": result.project_id,
+            "intent_count": len(result.intents),
+            "query_count": len(result.queries),
+            "link_count": len(result.links),
+            "candidate_count": result.stats.total_candidates,
+            "saved_count": sum(1 for l in result.links if l.status.value == "saved"),
+            "sources": result.stats.sources_used,
+            "failed_sources": result.stats.failed_sources,
+            "elapsed": round(result.stats.elapsed_seconds, 2),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": f"雷达运行失败：{exc}"}
+
+
+def get_project_research_status(project_id: str) -> dict[str, Any]:
+    """Return cached research radar results for a project."""
+    cache = _load_research_cache(project_id)
+    if cache is None:
+        return {"ok": False, "error": "尚无雷达运行记录。"}
+    return {"ok": True, "project_id": project_id, **cache}
+
+
+_research_cache: dict[str, dict[str, Any]] = {}
+
+
+def _write_research_cache(project_id: str, cache: dict[str, Any]) -> None:
+    _research_cache[project_id] = cache
+    # Also write to file
+    cache_dir = PROJECT_ROOT / DEFAULT_PROGRESS_DIR / "workbench" / "projects" / project_id / "papers"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    import json as _json
+    (cache_dir / "latest.json").write_text(_json.dumps(cache, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+
+def _load_research_cache(project_id: str) -> dict[str, Any] | None:
+    if project_id in _research_cache:
+        return _research_cache[project_id]
+    cache_file = PROJECT_ROOT / DEFAULT_PROGRESS_DIR / "workbench" / "projects" / project_id / "papers" / "latest.json"
+    if cache_file.exists():
+        import json as _json
+        try:
+            return _json.loads(cache_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return None
+
+
+# ── Phase E: Paper list, actions, and coverage ─────────────────────
+
+def get_project_research_papers(project_id: str) -> dict[str, Any]:
+    """Return the paper list with link status for a project's research tab."""
+    cache = _load_research_cache(project_id)
+    if cache is None:
+        return {"ok": False, "error": "尚无雷达运行记录。"}
+
+    links = cache.get("links") or []
+    papers: list[dict[str, Any]] = []
+    for link in links:
+        papers.append({
+            "paper_id": (link.get("paper_identity") or {}).get("canonical_id", ""),
+            "doi": (link.get("paper_identity") or {}).get("doi", ""),
+            "source": (link.get("paper_identity") or {}).get("source", ""),
+            "status": link.get("status", "discovered"),
+            "relevance": link.get("relevance", 0.0),
+            "evidence_utility": link.get("evidence_utility", "none"),
+            "matched_intent_ids": link.get("matched_intent_ids", []),
+        })
+
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "papers": papers,
+        "total": len(papers),
+        "sources": (cache.get("stats") or {}).get("sources_used", []),
+    }
+
+
+def apply_paper_action(payload: dict[str, Any]) -> dict[str, Any]:
+    """Apply a user action: save, ignore, shortlist, or promote."""
+    project_id = str(payload.get("project_id") or "").strip()
+    paper_id = str(payload.get("paper_id") or "").strip()
+    action = str(payload.get("action") or "").strip().lower()
+
+    valid_actions = {"save", "ignore", "shortlist", "promote", "reject"}
+    if action not in valid_actions:
+        return {"ok": False, "error": f"无效操作：{action}。支持：{', '.join(sorted(valid_actions))}"}
+
+    cache = _load_research_cache(project_id)
+    if cache is None:
+        return {"ok": False, "error": "尚无雷达运行记录。"}
+
+    links = cache.get("links") or []
+    updated_count = 0
+    status_map = {
+        "save": "saved", "ignore": "rejected", "shortlist": "shortlisted",
+        "promote": "promoted", "reject": "rejected",
+    }
+
+    for link in links:
+        link_paper_id = (link.get("paper_identity") or {}).get("canonical_id", "")
+        if link_paper_id == paper_id:
+            link["status"] = status_map.get(action, "needs_review")
+            updated_count += 1
+
+    if updated_count == 0:
+        return {"ok": False, "error": f"未找到论文：{paper_id}"}
+
+    _write_research_cache(project_id, cache)
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "paper_id": paper_id,
+        "action": action,
+        "new_status": status_map.get(action),
+    }
+
+
+def get_project_research_coverage(project_id: str) -> dict[str, Any]:
+    """Return coverage matrix: intent × evidence utility."""
+    cache = _load_research_cache(project_id)
+    if cache is None:
+        return {"ok": False, "error": "尚无雷达运行记录。"}
+
+    links = cache.get("links") or []
+    intents = cache.get("intents") or []
+
+    rows: dict[str, int] = {}
+    for link in links:
+        utility = link.get("evidence_utility", "none")
+        if utility == "none":
+            continue
+        for iid in link.get("matched_intent_ids", []):
+            key = f"{iid[:8]}×{utility}"
+            rows[key] = rows.get(key, 0) + 1
+
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "intent_count": len(intents),
+        "coverage": [{"key": k, "count": v} for k, v in sorted(rows.items())],
+        "total_links": len(links),
+        "covered_papers": len({
+            (link.get("paper_identity") or {}).get("canonical_id", "")
+            for link in links if link.get("evidence_utility") != "none"
+        }),
+    }
+
+
 def _plan_model_error(result: dict[str, Any], plan_context: dict[str, Any], *, prefix: str = "计划分析失败") -> dict[str, Any]:
     detail = str(result.get("error") or "模型调用失败")
     status = int(result.get("status") or 0)
@@ -2383,6 +2584,30 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             else:
                 self._send_text(rendered, "text/html; charset=utf-8")
             return
+        if parsed.path == "/api/projects/research/status":
+            params = urllib.parse.parse_qs(parsed.query)
+            project_id = params.get("project_id", [""])[0]
+            if not project_id:
+                self._send_json({"ok": False, "error": "project_id required"}, status=400)
+            else:
+                self._send_json(get_project_research_status(project_id))
+            return
+        if parsed.path == "/api/projects/research/papers":
+            params = urllib.parse.parse_qs(parsed.query)
+            project_id = params.get("project_id", [""])[0]
+            if not project_id:
+                self._send_json({"ok": False, "error": "project_id required"}, status=400)
+            else:
+                self._send_json(get_project_research_papers(project_id))
+            return
+        if parsed.path == "/api/projects/research/coverage":
+            params = urllib.parse.parse_qs(parsed.query)
+            project_id = params.get("project_id", [""])[0]
+            if not project_id:
+                self._send_json({"ok": False, "error": "project_id required"}, status=400)
+            else:
+                self._send_json(get_project_research_coverage(project_id))
+            return
         if parsed.path == "/api/sessions":
             self._send_json(build_session_index())
             return
@@ -2497,6 +2722,12 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/projects/charter/apply":
                 self._send_json(apply_project_charter(payload))
+                return
+            if parsed.path == "/api/projects/research/run":
+                self._send_json(run_project_research_radar(payload))
+                return
+            if parsed.path == "/api/projects/research/papers/action":
+                self._send_json(apply_paper_action(payload))
                 return
             if parsed.path == "/api/query/run":
                 self._send_json(run_query(payload))

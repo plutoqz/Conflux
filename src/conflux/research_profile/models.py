@@ -23,6 +23,7 @@ class ResearchProfile:
     document_paths: list[str] = field(default_factory=list)
     paper_sources: list[str] = field(default_factory=lambda: ["arxiv"])
     report_cadence: str = "weekly"
+    tracks: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
@@ -30,6 +31,17 @@ class ResearchProfile:
         """Return a JSON/YAML-serializable representation."""
 
         return asdict(self)
+
+    def get_tracks(self):
+        """Parse raw track dicts into Pydantic Track objects."""
+        from conflux.core.p2_contracts import Track
+        result = []
+        for t in self.tracks:
+            try:
+                result.append(Track(**t))
+            except Exception:
+                continue
+        return result
 
     def normalized_project_paths(self, base_dir: Path | None = None) -> list[Path]:
         """Return project paths resolved against an optional profile directory."""
