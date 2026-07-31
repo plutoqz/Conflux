@@ -1,0 +1,94 @@
+# Time-sensitive web search evaluation queries.
+# Each query targets information that is likely to have
+# recent (2025-2026) web results.
+# relevance_hint: expected answer type
+
+- id: web_001
+  query: "2026年欧盟AI法案高风险系统最新合规要求"
+  expected_topic: "EU AI Act high-risk compliance 2026"
+  relevance_hint: "recent_regulation"
+
+- id: web_002
+  query: "Claude 4 Opus 发布时间和基准测试结果"
+  expected_topic: "Claude 4 Opus release benchmark"
+  relevance_hint: "recent_release"
+
+- id: web_003
+  query: "US NIST AI 风险管理框架 2025 更新"
+  expected_topic: "NIST AI RMF 2025 update"
+  relevance_hint: "standard_update"
+
+- id: web_004
+  query: "锂离子电池固态电解质最新突破 2026"
+  expected_topic: "solid-state battery 2026 breakthrough"
+  relevance_hint: "research_breakthrough"
+
+- id: web_005
+  query: "OpenAI GPT-5 训练进展和发布时间线"
+  expected_topic: "GPT-5 training timeline"
+  relevance_hint: "industry_rumor"
+
+- id: web_006
+  query: "中国生成式AI服务备案最新数量和合规要求 2025"
+  expected_topic: "China generative AI registration 2025"
+  relevance_hint: "recent_regulation"
+
+- id: web_007
+  query: "GitHub Copilot Workspace 产品更新和定价 2026"
+  expected_topic: "GitHub Copilot Workspace 2026"
+  relevance_hint: "product_update"
+
+- id: web_008
+  query: "Waymo 和 Cruise 自动驾驶出租车运营规模和事故率 2025"
+  expected_topic: "Waymo Cruise robotaxi 2025 stats"
+  relevance_hint: "industry_stats"
+
+- id: web_009
+  query: "2025年全球芯片出口管制新政策对中国AI产业的影响"
+  expected_topic: "chip export control China AI 2025"
+  relevance_hint: "policy_analysis"
+
+- id: web_010
+  query: "Anthropic MCP 协议标准化进展和最新版本"
+  expected_topic: "Anthropic MCP protocol standardization"
+  relevance_hint: "standard_update"
+
+- id: web_011
+  query: "GraphRAG vs 传统RAG 最新benchmark对比 2025"
+  expected_topic: "GraphRAG benchmark 2025"
+  relevance_hint: "tech_comparison"
+
+- id: web_012
+  query: "Qwen3 模型发布和评测成绩 2025"
+  expected_topic: "Qwen3 release benchmark 2025"
+  relevance_hint: "model_release"
+
+- id: web_013
+  query: "Google DeepMind AlphaFold 3 最新应用进展"
+  expected_topic: "AlphaFold 3 applications 2025"
+  relevance_hint: "research_progress"
+
+- id: web_014
+  query: "美国联邦政府AI采购新规和供应商合规要求 2025"
+  expected_topic: "US federal AI procurement 2025"
+  relevance_hint: "recent_regulation"
+
+- id: web_015
+  query: "Llama 4 开源模型发布和性能对比评测"
+  expected_topic: "Llama 4 release benchmark"
+  relevance_hint: "model_release"
+
+- id: web_016
+  query: "2026年AI Agent框架 LangGraph vs CrewAI 功能对比"
+  expected_topic: "AI agent framework comparison 2026"
+  relevance_hint: "tech_comparison"
+
+- id: web_017
+  query: "全球数据中心AI芯片能耗和碳排放最新统计"
+  expected_topic: "AI datacenter energy consumption 2025"
+  relevance_hint: "industry_stats"
+
+- id: web_018
+  query: "RAG与长上下文窗口模型的能力边界最新研究"
+  expected_topic: "RAG vs long context capability boundary"
+  relevance_hint: "research_comparison"

@@ -99,7 +99,7 @@ class ResearchModeProfile:
             "planner": 0.25,
             "analyst": 0.40,
             "reranker": 0.25,
-            "synthesizer": 0.75,
+            "synthesizer": 0.85,
             "verifier": 0.35,
         }
         return {

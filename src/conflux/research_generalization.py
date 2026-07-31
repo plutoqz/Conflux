@@ -29,6 +29,8 @@ from .research_protocol import (
 )
 
 
+# Legacy: P1/P1.5 only — not used by V2 answer_first pipeline.
+# V2 uses LLM-driven sub-question decomposition instead of archetype templates.
 ARCHETYPE_SPECS: dict[str, dict[str, Any]] = {
     "method_survey": {
         "patterns": (
@@ -419,10 +421,9 @@ _BUDGET_HARD_LIMITS: dict[str, dict[str, int]] = {
 }
 
 
+# Legacy: P1/P1.5 only — not used by V2 answer_first pipeline.
 def classify_query_archetype(query: str, *, user_intent: str = "") -> QueryArchetype:
     """Classify a query into one primary and optional secondary archetypes."""
-
-    clean = _normalize_text(query)
     scores: dict[str, float] = {}
     matched: dict[str, list[str]] = {}
     for name, spec in ARCHETYPE_SPECS.items():

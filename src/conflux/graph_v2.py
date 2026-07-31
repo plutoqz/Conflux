@@ -217,6 +217,49 @@ SECTION_PROMPT = """\u8bf7\u6839\u636e\u4ee5\u4e0b\u68c0\u7d22\u6750\u6599\uff0c
 - \u81ea\u7136\u6bb5\u843d\uff0c\u53ef\u8bfb\u6027\u4f18\u5148\u3002
 - \u76ee\u6807\u957f\u5ea6\uff1a\u7ea6 {target_length} \u5b57\u4ee5\u5185\uff0c\u5982\u679c\u8bc1\u636e\u4e30\u5bcc\u53ef\u4ee5\u9002\u5f53\u8d85\u51fa\u3002"""
 
+# Prompt variant used when both RAG and web retrieval return empty results.
+# Instructs the model to rely on background knowledge and mark every
+# conclusion as (分析判断).
+SECTION_NO_EVIDENCE_PROMPT = """\u672c\u8f6e\u68c0\u7d22\u672a\u83b7\u5f97\u5916\u90e8\u8bc1\u636e\u3002\u8bf7\u5b8c\u5168\u57fa\u4e8e\u4f60\u7684\u80cc\u666f\u77e5\u8bc6\uff0c\u5bf9\u4ee5\u4e0b\u5b50\u95ee\u9898\u7ed9\u51fa\u5206\u6790\u5224\u65ad\u3002
+
+## \u7814\u7a76\u95ee\u9898
+{core_question}
+
+## \u672c\u8282\u7684\u5b50\u95ee\u9898
+{sub_question}
+
+## \u5199\u4f5c\u8981\u6c42
+
+### \u5185\u5bb9\u6df1\u5ea6\uff08\u6309\u4f18\u5148\u7ea7\uff09
+1. \u5148\u7ed9\u51fa\u660e\u786e\u3001\u76f4\u63a5\u7684\u6838\u5fc3\u7ed3\u8bba\uff0c\u4e0d\u7ed5\u5f2f\u5b50\u3002
+2. \u5c55\u5f00\u8bf4\u660e\u5f62\u6210\u673a\u5236\u3001\u5177\u4f53\u539f\u56e0\u6216\u6f14\u53d8\u8109\u7edc\u3002
+3. \u7ed9\u51fa\u5b9a\u91cf\u6570\u636e\u3001\u4ee3\u8868\u6027\u6848\u4f8b\u6216\u5b9e\u73b0\u7ec6\u8282\uff08\u5982\u6709\uff09\u3002
+4. \u8bf4\u660e\u9002\u7528\u8303\u56f4\u3001\u8fb9\u754c\u6761\u4ef6\u3001\u5df2\u77e5\u4f8b\u5916\u3002
+5. \u6307\u51fa\u73b0\u6709\u7f13\u89e3\u63aa\u65bd\u7684\u6548\u679c\u548c\u5269\u4f59\u7f3a\u53e3\u3002
+
+### \u6765\u6e90\u6807\u6ce8\u89c4\u5219
+- \u6240\u6709\u5185\u5bb9\u5747\u6765\u81ea\u4f60\u7684\u5206\u6790\u5224\u65ad\uff0c\u7528\uff08\u5206\u6790\u5224\u65ad\uff09\u6807\u6ce8\u6bcf\u4e2a\u4e3b\u8981\u7ed3\u8bba\u3002
+- \u5982\u679c\u4f60\u5bf9\u67d0\u4e2a\u7ed3\u8bba\u4e0d\u786e\u5b9a\uff0c\u8bf7\u8bda\u5b9e\u8bf4\u660e\u3002
+- \u4e0d\u8981\u7f16\u9020\u5f15\u7528\u6216\u865a\u5047\u7684\u6765\u6e90\u6807\u53f7\u3002
+
+### \u7ed3\u6784\u5316\u6458\u8981\uff08\u9644\u5728\u6b63\u6587\u540e\u9762\uff0c\u4ee5 "---summary---" \u4e3a\u5206\u9694\uff09
+\u8bf7\u5728\u672c\u8282\u6b63\u6587\u4e4b\u540e\uff0c\u9644\u52a0\u4e00\u4e2a\u7b80\u77ed\u7684\u7ed3\u6784\u5316\u6458\u8981\uff08\u4e0d\u8ba1\u7b97\u5728\u76ee\u6807\u957f\u5ea6\u5185\uff09\uff0c\u5305\u542b\uff1a
+- \u672c\u8282\u7684\u6838\u5fc3\u7ed3\u8bba\uff081 \u53e5\uff09
+- \u57fa\u4e8e\u5206\u6790\u5224\u65ad\u7684\u5173\u952e\u58f0\u660e\uff08\u6bcf\u6761\u4ee5 \"claim: \" \u5f00\u5934\uff09
+- \u54ea\u4e9b\u7ed3\u8bba\u6765\u81ea\u5206\u6790\u5224\u65ad\uff08\u7b80\u8ff0\uff09
+- \u672c\u8282\u4ecd\u672a\u89e3\u51b3\u7684\u95ee\u9898\uff08\u5982\u6709\uff09
+
+### \u683c\u5f0f
+- \u76f4\u63a5\u8f93\u51fa\u7ae0\u8282\u6b63\u6587\uff0c\u4e0d\u9700\u8981\u7ae0\u8282\u6807\u9898\uff0c\u4e0d\u9700\u8981 JSON \u5305\u88f9\u3002
+- \u81ea\u7136\u6bb5\u843d\uff0c\u53ef\u8bfb\u6027\u4f18\u5148\u3002
+- \u76ee\u6807\u957f\u5ea6\uff1a\u7ea6 {target_length} \u5b57\u4ee5\u5185\u3002"""
+
+# Detectable marker for empty evidence in retrieve_node output
+_EMPTY_EVIDENCE_MARKERS = (
+    "\uff08\u672c\u5730\u77e5\u8bc6\u5e93\u4e2d\u6682\u672a\u68c0\u7d22\u5230\u76f8\u5173\u5185\u5bb9\uff09",
+    "\uff08\u7f51\u7edc\u641c\u7d22\u6682\u672a\u68c0\u7d22\u5230\u76f8\u5173\u5185\u5bb9\uff09",
+)
+
 GLOBAL_SYSTEM = (
     "\u4f60\u662f\u7814\u7a76\u62a5\u544a\u7684\u603b\u7f16\u3002"
     "\u57fa\u4e8e\u5404\u7ae0\u8282\u6458\u8981\u64b0\u5199\u62a5\u544a\u9876\u5c42\u90e8\u5206\u3002"
@@ -402,6 +445,12 @@ def _parse_section_summary(body: str) -> dict[str, Any]:
     analysis: list[str] = []
     key_claims: list[str] = []
 
+    # Collect citation refs from both the summary (structured list)
+    # AND the body text (inline citations like [1], [3]).
+    # The regex ^\\[\\d+\\] only catches summary-format refs on their
+    # own line; inline refs like "根据[1]的研究" were previously missed,
+    # causing every section to report zero external citations and
+    # confidence to be permanently "low".
     for line in text_to_parse.split("\n"):
         line = line.strip().lstrip("- *").strip()
         line_lower = line.lower()
@@ -421,6 +470,17 @@ def _parse_section_summary(body: str) -> dict[str, Any]:
             analysis.append(line)
         elif any(kw in line for kw in ("\u672a\u89e3\u51b3", "\u7f3a\u53e3", "\u4e0d\u8db3")):  # 未解决/缺口/不足
             gaps.append(line)
+
+    # Also scan the body text for inline citation patterns like [1], [3]
+    # that aren't already captured by the summary-format lines.
+    inline_refs = set(re.findall(r"\[(\d+)\]", body_text))
+    summary_ref_numbers = set()
+    for ref_line in citation_refs:
+        for num in re.findall(r"\[(\d+)\]", ref_line):
+            summary_ref_numbers.add(num)
+    new_inline_refs = inline_refs - summary_ref_numbers
+    for num in sorted(new_inline_refs, key=int):
+        citation_refs.append(f"[{num}]")
 
     return {
         "summary": summary_text[:200] if summary_text else body_text[:200],
@@ -563,14 +623,27 @@ def _generate_section(
 ) -> SectionResult:
     sq_id = str(sub_question.get("id") or "")
     title = str(sub_question.get("question") or "")
-    prompt = SECTION_PROMPT.format(
-        core_question=core_question,
-        sub_question=title,
-        rag_results=rag_results or "\uff08\u672c\u5730\u77e5\u8bc6\u5e93\u4e2d\u6682\u672a\u68c0\u7d22\u5230\u76f8\u5173\u5185\u5bb9\uff09",
-        web_results=web_results or "\uff08\u7f51\u7edc\u641c\u7d22\u6682\u672a\u68c0\u7d22\u5230\u76f8\u5173\u5185\u5bb9\uff09",
-        citation_map_json=json.dumps(citation_map, ensure_ascii=False),
-        target_length=target_length,
-    )
+
+    # Detect empty evidence: both RAG and web returned nothing usable
+    rag_empty = not rag_results or rag_results.strip() in _EMPTY_EVIDENCE_MARKERS
+    web_empty = not web_results or web_results.strip() in _EMPTY_EVIDENCE_MARKERS
+    no_evidence = rag_empty and web_empty
+
+    if no_evidence:
+        prompt = SECTION_NO_EVIDENCE_PROMPT.format(
+            core_question=core_question,
+            sub_question=title,
+            target_length=target_length,
+        )
+    else:
+        prompt = SECTION_PROMPT.format(
+            core_question=core_question,
+            sub_question=title,
+            rag_results=rag_results or _EMPTY_EVIDENCE_MARKERS[0],
+            web_results=web_results or _EMPTY_EVIDENCE_MARKERS[1],
+            citation_map_json=json.dumps(citation_map, ensure_ascii=False),
+            target_length=target_length,
+        )
 
     try:
         response = model.invoke([
@@ -617,7 +690,7 @@ def generate_node(state: dict[str, Any], model: Any, profile: ResearchModeProfil
         return {"_pipeline_stage": "generate_skipped", "_section_results": []}
 
     max_concurrency = max(1, profile.max_parallel_subquestions) if profile else 3
-    section_timeout = float(profile.model_timeout_seconds) if profile else 90.0
+    section_timeout = float(profile.role_timeout_seconds.get("synthesizer", profile.model_timeout_seconds)) if profile else 90.0
     deadline_s = state.get("_deadline_at", 0)
     results: list[SectionResult] = []
     errors: list[str] = []
@@ -674,16 +747,24 @@ def synthesize_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
 
     if not sections:
         # No sections were generated (all timed out or evidence was empty).
-        # Produce a direct answer from model background knowledge, clearly
-        # marked as analysis judgment.
+        # Produce a structured analysis from model background knowledge,
+        # clearly marked as analysis judgment with explicit uncertainty notes.
         fallback_answer = ""
         if _model_available(state, minimum=15.0):
             fallback_prompt = (
-                f"请基于你的背景知识，直接回答以下研究问题。\n\n"
+                f"请基于你的背景知识，对以下研究问题给出结构化的分析判断。\n\n"
                 f"研究问题：{core_question}\n\n"
-                f"注意：本次检索未获得有引用价值的证据。请用（分析判断）标注你的回答，"
-                f"诚实地说明哪些结论有不确定性，不要编造引用。\n\n"
-                f"请用 300-600 字给出当前已知的最佳答案。"
+                f"要求：\n"
+                f"1. 先给出直接、明确的核心结论（1-2句）\n"
+                f"2. 从2-4个关键维度展开分析，说明形成机制、具体原因或演变脉络\n"
+                f"3. 给出定量数据、代表性案例或实现细节（如有已知的）\n"
+                f"4. 说明适用范围、边界条件和已知例外\n"
+                f"5. 指出现有缓解措施的效果和剩余缺口\n\n"
+                f"标注规则：\n"
+                f"- 所有结论均来自你的分析判断，用（分析判断）标注每个主要结论\n"
+                f"- 诚实地说明哪些结论有不确定性，不要编造引用或来源编号\n"
+                f"- 如果某个维度你不确定，请明确说'该维度缺乏可靠信息'\n\n"
+                f"请用 600-1200 字给出当前已知的最佳答案。"
             )
             try:
                 fallback_answer = _invoke_text(

@@ -1,0 +1,57 @@
+# Self-contained retrieval labels for R1 ablation.
+# Targets: Chinese GIS markdown documents in data/documents/
+# Grade semantics (same as p1_retrieval_eval.yaml):
+#   3 = exact page+section match
+#   2 = page or section match
+#   1 = correct doc, wrong page+section
+#   0 = wrong doc
+
+- id: zh_gis_001
+  query: "ArcGIS Pro 中如何进行空间参考设置？"
+  doc_source: "esri--arcgis-pro-spatial-reference.md"
+  expected_keywords: ["空间参考", "坐标系", "投影", "地理变换"]
+
+- id: zh_gis_002
+  query: "ArcGIS Online 的概述和主要功能是什么？"
+  doc_source: "esri--arcgis-online-overview.md"
+  expected_keywords: ["ArcGIS Online", "Web GIS", "地图", "共享"]
+
+- id: zh_gis_003
+  query: "ArcGIS Pro 中如何管理地理数据库？"
+  doc_source: "esri--arcgis-pro-geodatabase.md"
+  expected_keywords: ["地理数据库", "要素类", "拓扑", "关系类"]
+
+- id: zh_gis_004
+  query: "ArcGIS Pro 的 ModelBuilder 如何实现自动化工作流？"
+  doc_source: "esri--arcgis-pro-modelbuilder.md"
+  expected_keywords: ["ModelBuilder", "模型", "迭代", "自动化"]
+
+- id: zh_gis_005
+  query: "ArcGIS 空间分析的核心工具有哪些？"
+  doc_source: "esri--arcgis-spatial-analysis.md"
+  expected_keywords: ["空间分析", "缓冲区", "叠加", "插值"]
+
+- id: zh_gis_006
+  query: "ArcGIS Python API 的概述和 GIS 模块用法？"
+  doc_source: "esri--arcgis-python-api-overview.md"
+  expected_keywords: ["Python", "GIS", "地图", "分析"]
+
+- id: zh_gis_007
+  query: "ArcGIS Pro 图层管理的基本操作有哪些？"
+  doc_source: "esri--arcgis-pro-layers.md"
+  expected_keywords: ["图层", "符号", "标注", "可见性"]
+
+- id: zh_gis_008
+  query: "ArcGIS 网络分析的功能和应用场景？"
+  doc_source: "esri--arcgis-network-analyst.md"
+  expected_keywords: ["网络分析", "路径", "服务区", "OD成本矩阵"]
+
+- id: zh_gis_009
+  query: "ArcGIS Pro 入门教程的核心内容？"
+  doc_source: "esri--arcgis-pro-get-started.md"
+  expected_keywords: ["ArcGIS Pro", "项目", "地图", "布局"]
+
+- id: zh_gis_010
+  query: "ArcGIS 地理统计工具的介绍和使用？"
+  doc_source: "esri--arcgis-geostatistics.md"
+  expected_keywords: ["地统计", "插值", "克里金", "半变异函数"]

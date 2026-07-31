@@ -161,27 +161,12 @@ def run_config(config_name: str, case: dict) -> dict[str, Any]:
 
     Returns metrics dict.
     """
-    from conflux.agent import ResearchAgent, create_sub_agent
-    from conflux.graph import create_graph
+    from conflux.agent import create_sub_agent
     from conflux.graph_v2 import create_multi_agent_graph
 
     query = case["query"]
 
-    if config_name == "single_agent":
-        # Phase 1: one agent with all 3 tools
-        reasoning = FakeModel([
-            f"```final\n## 回答\nSingle-agent answer for: {query}\n## 信息来源\n基于三个工具检索。\n## 不确定性\n单Agent可能存在信息遗漏。\n## 置信度评估\n整体置信度：中\n```",
-        ])
-        agent = ResearchAgent(reasoning, [case["rag_tool"], case["web_tool"], case["model_tool"]])
-        graph = create_graph(agent)
-        state = {"query": query, "messages": agent.build_messages(query), "final_answer": "", "iteration_count": 0}
-        result = graph.invoke(state)
-        source_count = 3
-        has_arbitration = False
-        has_factcheck = False
-        has_l4 = False
-
-    elif config_name == "multi_no_arbitration":
+    if config_name == "multi_no_arbitration":
         reasoning = FakeModel([
             f"```final\nRAG answer for: {query}\n```",
             f"```final\nWeb answer for: {query}\n```",
@@ -339,14 +324,12 @@ def _get_failed_sources(result: dict) -> set:
 # ── Main ────────────────────────────────────────────────────────
 
 CONFIGS = [
-    "single_agent",
     "multi_no_arbitration",
     "multi_arbitration",
     "multi_full",
 ]
 
 CONFIG_LABELS = {
-    "single_agent": "Single Agent (ReAct only)",
     "multi_no_arbitration": "Multi-Agent (no Arbitration)",
     "multi_arbitration": "Multi-Agent + Arbitration",
     "multi_full": "Multi-Agent + Arbitration + FactCheck + L4",
@@ -488,7 +471,7 @@ def main() -> int:
     # Print key findings
     print("\n=== Key Findings ===")
     best = aggregated["multi_full"]
-    worst = aggregated["single_agent"]
+    worst = aggregated["multi_no_arbitration"]
     print(f"Quality improvement: {worst['quality_pass_rate']:.0%} → {best['quality_pass_rate']:.0%}")
     print(f"Leakage reduction: {worst['failed_source_leakage_rate']:.0%} → {best['failed_source_leakage_rate']:.0%}")
     print(f"Uncertainty coverage: {worst['uncertainty_coverage']:.0%} → {best['uncertainty_coverage']:.0%}")

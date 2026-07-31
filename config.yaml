@@ -92,6 +92,7 @@ research:
   enable_l4: true
   max_deep_questions: 2
   max_rewrite_attempts: 2
+  # Legacy: P1/P1.5 only. V2 does not inject hardcoded seed URLs into search results.
   deterministic_seeds: false
   generalization:
     enabled: true

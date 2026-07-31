@@ -1,0 +1,61 @@
+# English translations of p1_retrieval_eval.yaml queries.
+# Same ground truth (paper_id / section / pages) — only query text differs.
+- id: rag_geo_001
+  query: "What are the main limitations and future work of Autonomous GIS?"
+  paper_id: "2305.06453v4"
+  section: limitations
+  pages: [14, 16]
+
+- id: rag_geo_002
+  query: "Why does LLM-Geo fail due to generated code errors, and can it currently auto-test and debug?"
+  paper_id: "2305.06453v4"
+  section: limitations
+  pages: [14, 15]
+
+- id: rag_geo_003
+  query: "What are the explicit limitations of LLM-Geo for raster data processing?"
+  paper_id: "2305.06453v4"
+  section: limitations
+  pages: [14, 15]
+
+- id: rag_geo_004
+  query: "What are the limitations of LLM-Find in online geodata discovery and handbook extension?"
+  paper_id: "2407.21024v2"
+  section: discussion
+  pages: [14, 15]
+
+- id: rag_geo_005
+  query: "How does LLM-Find debug data acquisition code, and what is the loop stop ceiling?"
+  paper_id: "2407.21024v2"
+  section: method
+  pages: [7, 7]
+
+- id: rag_geo_006
+  query: "Why does LLM-Find still struggle to judge data scale, resolution, and application suitability?"
+  paper_id: "2407.21024v2"
+  section: discussion
+  pages: [15, 15]
+
+- id: rag_geo_007
+  query: "How do ShapefileGPT's hallucinations and randomness affect complex boundary processing?"
+  paper_id: "2410.12376v2"
+  section: limitations
+  pages: [17, 17]
+
+- id: rag_geo_008
+  query: "What are the token consumption and computational cost limitations of ShapefileGPT?"
+  paper_id: "2410.12376v2"
+  section: limitations
+  pages: [17, 17]
+
+- id: rag_geo_009
+  query: "Why is ShapefileGPT's evaluation dataset insufficient to prove generalization on diverse complex tasks?"
+  paper_id: "2410.12376v2"
+  section: limitations
+  pages: [17, 18]
+
+- id: rag_geo_010
+  query: "How does ShapefileGPT's planner detect worker errors and retry, and what efficiency cost does this incur?"
+  paper_id: "2410.12376v2"
+  section: results
+  pages: [15, 17]

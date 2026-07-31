@@ -108,6 +108,7 @@ LOW_QUALITY_DOMAINS = {
 }
 
 
+# Legacy: P1/P1.5 only — not used by V2 answer_first pipeline.
 CONCEPT_EXPANSIONS = {
     "地理处理": ["geoprocessing", "geospatial analysis", "spatial data processing"],
     "地理数据": ["geospatial data", "spatial data"],
@@ -237,6 +238,8 @@ TECHNICAL_ENTITIES = {
 }
 
 
+# Legacy: P1/P1.5 only — not used by V2 answer_first pipeline.
+# Preserved as fallback for pre-V2 pipelines.
 BILINGUAL_TERM_MAP = {
     "主要司法辖区": "major jurisdictions",
     "透明度义务": "transparency obligations",

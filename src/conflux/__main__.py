@@ -10,10 +10,9 @@ from pathlib import Path
 
 from langchain_core.documents import Document
 
-from .agent import ResearchAgent, create_sub_agent
+from .agent import create_sub_agent
 from .checkpointing import create_checkpointer, graph_config
 from .config import load as load_config
-from .graph import create_graph
 from .graph_v2 import create_multi_agent_graph, create_v2_research_graph
 from .graph_p1 import create_p1_research_graph
 from .graph_p15 import create_p15_research_graph
@@ -232,7 +231,7 @@ def query_command(
         enabled = generalization_config.get("enabled", True)
         if str(enabled).strip().casefold() in {"0", "false", "no", "off"}:
             pipeline = "p1"
-    use_p1_roles = mode == "phase2" and pipeline in {"p1", "p15", "answer_first"}
+    use_p1_roles = pipeline in {"p1", "p15", "answer_first"}
     credential_problems = validate_runtime_credentials(
         research_profile.depth,
         include_legacy_presets=not use_p1_roles,
@@ -247,7 +246,7 @@ def query_command(
     vector_store = create_vector_store()
     retriever = HybridRetriever(vector_store)
     print("-> Initializing models...")
-    if mode == "phase2" and pipeline in {"p1", "p15", "answer_first"}:
+    if pipeline in {"p1", "p15", "answer_first"}:
         role_models, model_trace = create_research_models(
             research_profile.depth,
             deadline_at=deadline_at,
@@ -281,7 +280,7 @@ def query_command(
     effective_thread_id = resume or thread_id or run_id
     checkpoint = create_checkpointer(checkpoint_backend)
     print(f"-> Mode: {mode}")
-    print(f"-> Research pipeline: {pipeline if mode == 'phase2' else 'phase1'}")
+    print(f"-> Research pipeline: {pipeline}")
     print(f"-> Research depth: {research_profile.depth}")
     if model_trace:
         for role, identity in model_trace.get("roles", {}).items():
@@ -290,18 +289,7 @@ def query_command(
     print(f"-> Thread id: {effective_thread_id}")
     print(f"-> Checkpoint backend: {checkpoint.backend}")
 
-    if mode == "phase1":
-        tools = [rag_tool, search_web, ask_model]
-        agent = ResearchAgent(reasoning_model, tools)
-        graph = create_graph(agent)
-        initial_state = {
-            "query": query,
-            "messages": agent.build_messages(query),
-            "final_answer": "",
-            "iteration_count": 0,
-        }
-        final_state, trace_events = _run_phase1_graph(graph, initial_state, query)
-    elif pipeline == "answer_first":
+    if pipeline == "answer_first":
         # V2 answer_first pipeline — simplified 4-step flow
         retriever = HybridRetriever(vector_store)
         rag_agent = create_sub_agent("rag", role_models["reranker"], rag_tool)
@@ -548,29 +536,6 @@ def query_command(
     print(f"Run summary: {summary_path.resolve()}")
 
     return final_state
-
-
-def _run_phase1_graph(graph, initial_state: dict, query: str) -> tuple[dict, list]:
-    print(f"-> Starting single-agent research: {query}\n")
-    print("=" * 60)
-    event = initial_state
-    step = 0
-    for event in graph.stream(initial_state, stream_mode="values"):
-        step += 1
-        messages = event.get("messages", [])
-        if messages:
-            last_msg = messages[-1]
-            prefix = f"[Step {step}]"
-            if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-                for tool_call in last_msg.tool_calls:
-                    print(f"{prefix} tool: {tool_call['name']}({tool_call['args']})")
-            elif hasattr(last_msg, "content") and last_msg.content:
-                content = last_msg.content
-                if isinstance(content, str) and len(content) > 200:
-                    content = content[:200] + "..."
-                print(f"{prefix} {type(last_msg).__name__}: {content}")
-    print("=" * 60)
-    return event, []
 
 
 def _run_phase2_graph(
@@ -821,7 +786,7 @@ def main() -> None:
     research_parser.add_argument("query", nargs="?", help="Research question")
     research_parser.add_argument("--index", help="Index a document directory")
     research_parser.add_argument("--query", dest="query_opt", help="Research question used with --index")
-    research_parser.add_argument("--mode", choices=["phase1", "phase2"], default="phase2", help="Run mode")
+    research_parser.add_argument("--mode", choices=["phase2"], default="phase2", help="Run mode (phase2 only)")
     research_parser.add_argument("--depth", choices=["quick", "standard", "deep", "low", "medium", "high"], default="standard", help="Research depth and model tier")
     research_parser.add_argument("--output-dir", default="reports", help="Markdown/HTML output directory")
     research_parser.add_argument("--thread-id", help="LangGraph checkpoint thread id")
@@ -834,7 +799,7 @@ def main() -> None:
     parser.add_argument("query", nargs="?", help="Research question (legacy mode)")
     parser.add_argument("--index", help="Index a document directory")
     parser.add_argument("--query", dest="query_opt", help="Research question used with --index")
-    parser.add_argument("--mode", choices=["phase1", "phase2"], default="phase2", help="Run mode")
+    parser.add_argument("--mode", choices=["phase2"], default="phase2", help="Run mode (phase2 only)")
     parser.add_argument("--depth", choices=["quick", "standard", "deep", "low", "medium", "high"], default="standard", help="Research depth and model tier")
     parser.add_argument("--output-dir", default="reports", help="Markdown/HTML output directory")
     parser.add_argument("--thread-id", help="LangGraph checkpoint thread id")

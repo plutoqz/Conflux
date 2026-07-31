@@ -853,8 +853,13 @@ def _claim_from_web_result(title: str, snippet: str, max_length: int = 220) -> s
     return ""
 
 
+# Legacy: P1/P1.5 only — not used by V2 answer_first pipeline.
+# Preserved as fallback for deterministic seed URL injection.
 def _official_seed_results(query: str) -> list[dict]:
-    """Resolve a few canonical primary documents before provider ranking."""
+    """Resolve a few canonical primary documents before provider ranking.
+
+    Controlled by config key research.deterministic_seeds (default false).
+    """
 
     lowered = str(query or "").casefold()
     results: list[dict] = []
