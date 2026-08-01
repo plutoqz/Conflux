@@ -1,0 +1,104 @@
+- id: case_001
+  query: What are the main limitations and future work of Autonomous GIS?
+  relevant_sources:
+  - paper-2305.06453v4#summary.md
+  must_contain:
+  - Autonomous GIS
+  - five autonomous goals
+  - self-verifying
+  - code testing
+  language: en-en
+- id: case_002
+  query: Why does LLM-Geo fail due to generated code errors, and can it currently
+    auto-test and debug?
+  relevant_sources:
+  - paper-2305.06453v4#summary.md
+  must_contain:
+  - LLM-Geo
+  - code
+  - GPT-4
+  - logging
+  language: en-en
+- id: case_003
+  query: What are the explicit limitations of LLM-Geo for spatial data collection
+    and visualization?
+  relevant_sources:
+  - paper-2305.06453v4#summary.md
+  must_contain:
+  - LLM-Geo
+  - spatial data collection
+  - visualization
+  - case studies
+  language: en-en
+- id: case_004
+  query: What are the limitations of LLM-Find in online geodata discovery and handbook
+    extension?
+  relevant_sources:
+  - paper-2407.21024v2#summary.md
+  must_contain:
+  - discover
+  - handbook
+  - data source
+  - metadata
+  language: en-en
+- id: case_005
+  query: How does LLM-Find debug data acquisition code, and what is the generation-execution
+    loop?
+  relevant_sources:
+  - paper-2407.21024v2#summary.md
+  must_contain:
+  - debugging
+  - generating
+  - executing
+  - program
+  language: en-en
+- id: case_006
+  query: Which data sources does the prototype geodata retrieval agent support?
+  relevant_sources:
+  - paper-2407.21024v2#summary.md
+  must_contain:
+  - OpenStreetMap
+  - US Census Bureau
+  - OpenTopography
+  - NYTimes
+  language: en-en
+- id: case_007
+  query: How do ShapefileGPT's multi-agent design handle complex vector data processing?
+  relevant_sources:
+  - paper-2410.12376v2#summary.md
+  must_contain:
+  - ShapefileGPT
+  - topological relationships
+  - vector data
+  - multi-agent
+  language: en-en
+- id: case_008
+  query: What mechanisms does ShapefileGPT use to operate Shapefiles efficiently?
+  relevant_sources:
+  - paper-2410.12376v2#summary.md
+  must_contain:
+  - ShapefileGPT
+  - function library
+  - API documentation
+  - function calling
+  language: en-en
+- id: case_009
+  query: What evaluation setup and success rate does ShapefileGPT report?
+  relevant_sources:
+  - paper-2410.12376v2#summary.md
+  must_contain:
+  - ShapefileGPT
+  - benchmark dataset
+  - 95.24%
+  - textbooks
+  language: en-en
+- id: case_010
+  query: How does ShapefileGPT's planner decompose and supervise tasks?
+  relevant_sources:
+  - paper-2410.12376v2#summary.md
+  must_contain:
+  - planner agent
+  - worker agent
+  - task decomposition
+  - supervision
+  language: en-en

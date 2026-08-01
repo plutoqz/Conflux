@@ -1,0 +1,158 @@
+{
+  "text-embedding-v4|512/128": {
+    "embedding": "text-embedding-v4",
+    "chunk": "512/128",
+    "dataset": "zh_zh",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 1.0,
+      "ndcg@5": 1.0,
+      "ndcg@10": 1.0
+    },
+    "elapsed_s": 23.1
+  },
+  "text-embedding-v4|1024/256": {
+    "embedding": "text-embedding-v4",
+    "chunk": "1024/256",
+    "dataset": "zh_zh",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 1.0,
+      "ndcg@5": 1.0,
+      "ndcg@10": 1.0
+    },
+    "elapsed_s": 6.8
+  },
+  "text-embedding-v4|2048/512": {
+    "embedding": "text-embedding-v4",
+    "chunk": "2048/512",
+    "dataset": "zh_zh",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 1.0,
+      "ndcg@5": 1.0,
+      "ndcg@10": 1.0
+    },
+    "elapsed_s": 5.7
+  },
+  "bge-m3|512/128": {
+    "embedding": "bge-m3",
+    "chunk": "512/128",
+    "dataset": "zh_zh",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 0.95,
+      "ndcg@5": 0.9630929753571458,
+      "ndcg@10": 0.9630929753571458
+    },
+    "elapsed_s": 6.0
+  },
+  "bge-m3|1024/256": {
+    "embedding": "bge-m3",
+    "chunk": "1024/256",
+    "dataset": "zh_zh",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 0.7583333333333333,
+      "ndcg@5": 0.8192536065216309,
+      "ndcg@10": 0.8192536065216309
+    },
+    "elapsed_s": 3.3
+  },
+  "bge-m3|2048/512": {
+    "embedding": "bge-m3",
+    "chunk": "2048/512",
+    "dataset": "zh_zh",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 0.95,
+      "ndcg@5": 0.9630929753571458,
+      "ndcg@10": 0.9630929753571458
+    },
+    "elapsed_s": 4.5
+  },
+  "qwen3-embedding-8b|512/128": {
+    "embedding": "qwen3-embedding-8b",
+    "chunk": "512/128",
+    "dataset": "zh_zh",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 1.0,
+      "ndcg@5": 1.0,
+      "ndcg@10": 1.0
+    },
+    "elapsed_s": 6.8
+  },
+  "qwen3-embedding-8b|1024/256": {
+    "embedding": "qwen3-embedding-8b",
+    "chunk": "1024/256",
+    "dataset": "zh_zh",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 1.0,
+      "ndcg@5": 1.0,
+      "ndcg@10": 1.0
+    },
+    "elapsed_s": 5.7
+  },
+  "qwen3-embedding-8b|2048/512": {
+    "embedding": "qwen3-embedding-8b",
+    "chunk": "2048/512",
+    "dataset": "zh_zh",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 1.0,
+      "ndcg@5": 1.0,
+      "ndcg@10": 1.0
+    },
+    "elapsed_s": 4.9
+  },
+  "jina-embeddings-v4|512/128": {
+    "embedding": "jina-embeddings-v4",
+    "chunk": "512/128",
+    "dataset": "zh_zh",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 0.85,
+      "ndcg@5": 0.8892789260714373,
+      "ndcg@10": 0.8892789260714373
+    },
+    "elapsed_s": 33.0
+  },
+  "jina-embeddings-v4|1024/256": {
+    "embedding": "jina-embeddings-v4",
+    "chunk": "1024/256",
+    "dataset": "zh_zh",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 0.95,
+      "ndcg@5": 0.9630929753571458,
+      "ndcg@10": 0.9630929753571458
+    },
+    "elapsed_s": 15.9
+  },
+  "jina-embeddings-v4|2048/512": {
+    "embedding": "jina-embeddings-v4",
+    "chunk": "2048/512",
+    "dataset": "zh_zh",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 0.95,
+      "ndcg@5": 0.9630929753571458,
+      "ndcg@10": 0.9630929753571458
+    },
+    "elapsed_s": 10.9
+  }
+}

@@ -1,0 +1,99 @@
+- id: case_001
+  query: GIS系统通常由哪五个基本部分组成？
+  relevant_sources:
+  - zh-gis-basics.md
+  must_contain:
+  - 硬件
+  - 软件
+  - 数据
+  - 人员
+  - 方法
+  language: zh-zh
+- id: case_002
+  query: 中国常用的地图投影坐标系有哪些？
+  relevant_sources:
+  - zh-gis-basics.md
+  must_contain:
+  - 高斯-克吕格
+  - UTM
+  - 墨卡托
+  - 阿尔伯斯
+  language: zh-zh
+- id: case_003
+  query: 矢量数据和栅格数据有什么区别？
+  relevant_sources:
+  - chinese-qa-sample.md
+  must_contain:
+  - 矢量数据
+  - 栅格数据
+  - 点、线、面
+  - 连续现象
+  language: zh-zh
+- id: case_004
+  query: 量子比特与经典比特有什么不同？
+  relevant_sources:
+  - chinese-qa-sample.md
+  must_contain:
+  - 量子比特
+  - 叠加态
+  - 0和1
+  language: zh-zh
+- id: case_005
+  query: 多智能体RAG系统中三源仲裁的规则是什么？
+  relevant_sources:
+  - multi-agent-rag-arbitration.md
+  must_contain:
+  - 仲裁
+  - success
+  - 共识投票
+  - fallback
+  language: zh-zh
+- id: case_006
+  query: 多智能体RAG的核心流程包含哪些步骤？
+  relevant_sources:
+  - multi-agent-rag-arbitration.md
+  must_contain:
+  - 问题分解
+  - 证据合并
+  - FactCheck
+  - 报告生成
+  language: zh-zh
+- id: case_007
+  query: 欧盟AI法案采用哪四级风险分类？
+  relevant_sources:
+  - zh-ai-regulation-comparison.md
+  must_contain:
+  - 不可接受风险
+  - 高风险
+  - 有限风险
+  - 最低风险
+  language: zh-zh
+- id: case_008
+  query: 中国AI监管体系的主要法规有哪些？
+  relevant_sources:
+  - zh-ai-regulation-comparison.md
+  must_contain:
+  - 生成式人工智能服务管理暂行办法
+  - 算法推荐
+  - 个人信息保护法
+  - 数据安全法
+  language: zh-zh
+- id: case_009
+  query: Shor算法对哪些公钥密码系统构成威胁？
+  relevant_sources:
+  - zh-quantum-crypto.md
+  must_contain:
+  - RSA
+  - ECC
+  - 大整数分解
+  - 离散对数
+  language: zh-zh
+- id: case_010
+  query: Grover算法如何影响AES对称加密的安全性？
+  relevant_sources:
+  - zh-quantum-crypto.md
+  must_contain:
+  - Grover
+  - AES-128
+  - AES-256
+  language: zh-zh

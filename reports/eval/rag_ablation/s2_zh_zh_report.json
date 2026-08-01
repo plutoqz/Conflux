@@ -1,0 +1,54 @@
+{
+  "无重排（下界）": {
+    "reranker": "none",
+    "embedding": "text-embedding-v4",
+    "chunk": "512/128",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 1.0,
+      "ndcg@5": 1.0,
+      "ndcg@10": 1.0
+    },
+    "elapsed_s": 15.1
+  },
+  "LLM judge（SemanticReranker）": {
+    "reranker": "llm_judge",
+    "embedding": "text-embedding-v4",
+    "chunk": "512/128",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 0.9,
+      "ndcg@5": 0.9261859507142916,
+      "ndcg@10": 0.9261859507142916
+    },
+    "elapsed_s": 1391.1
+  },
+  "Cross-Encoder bge-reranker-v2-m3-free": {
+    "reranker": "bge-reranker-v2-m3-free",
+    "embedding": "text-embedding-v4",
+    "chunk": "512/128",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 0.8333333333333333,
+      "ndcg@5": 0.8761859507142915,
+      "ndcg@10": 0.8761859507142915
+    },
+    "elapsed_s": 19.3
+  },
+  "Cross-Encoder jina-reranker-m0": {
+    "reranker": "jina-reranker-m0",
+    "embedding": "text-embedding-v4",
+    "chunk": "512/128",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 0.8833333333333332,
+      "ndcg@5": 0.9130929753571457,
+      "ndcg@10": 0.9130929753571457
+    },
+    "elapsed_s": 21.9
+  }
+}

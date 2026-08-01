@@ -1,0 +1,67 @@
+{
+  "zh_en|text-embedding-v4|512/128": {
+    "dataset": "zh_en",
+    "embedding": "text-embedding-v4",
+    "chunk": "512/128",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 0.7583333333333333,
+      "ndcg@5": 0.8192536065216307,
+      "ndcg@10": 0.8192536065216307
+    },
+    "elapsed_s": 33.0
+  },
+  "zh_en|bge-m3|512/128": {
+    "dataset": "zh_en",
+    "embedding": "bge-m3",
+    "chunk": "512/128",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 0.575,
+      "ndcg@5": 0.6823465818787764,
+      "ndcg@10": 0.6823465818787764
+    },
+    "elapsed_s": 22.2
+  },
+  "zh_en|qwen3-embedding-8b|512/128": {
+    "dataset": "zh_en",
+    "embedding": "qwen3-embedding-8b",
+    "chunk": "512/128",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 0.7416666666666666,
+      "ndcg@5": 0.806160631164485,
+      "ndcg@10": 0.806160631164485
+    },
+    "elapsed_s": 20.8
+  },
+  "zh_en|jina-embeddings-v4|512/128": {
+    "dataset": "zh_en",
+    "embedding": "jina-embeddings-v4",
+    "chunk": "512/128",
+    "metrics": {
+      "recall@10": 1.0,
+      "recall@20": 1.0,
+      "mrr@10": 0.7533333333333333,
+      "ndcg@5": 0.8148712314377458,
+      "ndcg@10": 0.8148712314377458
+    },
+    "elapsed_s": 30.2
+  },
+  "en_en|text-embedding-v4|512/128": {
+    "dataset": "en_en",
+    "embedding": "text-embedding-v4",
+    "chunk": "512/128",
+    "metrics": {
+      "recall@10": 0.8,
+      "recall@20": 1.0,
+      "mrr@10": 0.3227777777777778,
+      "ndcg@5": 0.3430676558073393,
+      "ndcg@10": 0.43098362063731505
+    },
+    "elapsed_s": 42.8
+  }
+}

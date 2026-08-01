@@ -1,0 +1,30 @@
+{
+ "none": {
+  "metrics": {
+   "recall@20": 1.0,
+   "ndcg@10": 0.819,
+   "note": "stdout-only metrics"
+  }
+ },
+ "llm_judge": {
+  "metrics": {
+   "recall@20": 1.0,
+   "ndcg@10": 0.798,
+   "note": "stdout-only metrics"
+  }
+ },
+ "bge-reranker-v2-m3-free": {
+  "metrics": {
+   "recall@20": 1.0,
+   "ndcg@10": 0.742,
+   "note": "stdout-only metrics"
+  }
+ },
+ "jina-reranker-m0": {
+  "metrics": {
+   "recall@20": 1.0,
+   "ndcg@10": 0.819,
+   "note": "stdout-only metrics"
+  }
+ }
+}

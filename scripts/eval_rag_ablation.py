@@ -1,602 +1,596 @@
-"""RAG retrieval ablation matrix — 5 configs × N languages.
+"""R1 RAG retrieval ablation — S1 (chunk×embedding) + S2 (rerank) + cross-lingual (Step 5).
 
-Compares keyword, dense-only, hybrid, hybrid+rerank, and cross-lingual
-retrieval pipelines across language scenarios.
+Plan: docs/plans/R1检索消融实验方案.md
+Datasets: data/rag_eval/{zh_zh,zh_en,en_en}.yaml (new format)
 
-Outputs: reports/eval/rag_ablation/rag_ablation.md + rag_ablation.json
+Usage:
+    python scripts/eval_rag_ablation.py --stage s1 [--embedding <m>] [--chunk 1024/256] [--reindex] [--dry-run]
+    python scripts/eval_rag_ablation.py --stage s2 --embedding <best> --chunk <best>
+    python scripts/eval_rag_ablation.py --stage cross
+    python scripts/eval_rag_ablation.py --stage all
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import statistics
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import Any
 
-import yaml
-from dotenv import load_dotenv
+# ── env overrides must be set before conflux.config.load() caches ──
+os.environ["CONFLUX_RETRIEVAL__TOP_K"] = "80"
+os.environ["CONFLUX_RETRIEVAL__FINAL_K"] = "60"
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(ROOT / "src"))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
 
-# ── Shared definitions ──────────────────────────────────────────────
+import yaml  # noqa: E402
+from langchain_core.documents import Document  # noqa: E402
 
-
-def load_labels(path: Path) -> list[dict[str, Any]]:
-    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, list):
-        raise ValueError(f"retrieval labels must be a list: {path}")
-    return [item for item in payload if isinstance(item, dict)]
-
-
-def _grade_keyword(document: Any, label: dict[str, Any]) -> int:
-    """Grade by keyword overlap with ground-truth doc source match."""
-    metadata = document.metadata or {}
-    doc_source = str(metadata.get("source") or metadata.get("file") or "")
-    expected_source = str(label.get("doc_source") or "")
-    expected_kw = [kw.casefold() for kw in label.get("expected_keywords") or []]
-    content = str(document.page_content or "").casefold()
-
-    if doc_source != expected_source:
-        return 0  # wrong document
-    if not expected_kw:
-        return 1  # correct doc, no keyword check
-    matched = sum(kw in content for kw in expected_kw)
-    if matched >= len(expected_kw):
-        return 3
-    if matched >= len(expected_kw) * 0.5:
-        return 2
-    return 1
-
-
-def _grade_paper(document: Any, label: dict[str, Any]) -> int:
-    """Grade by paper_id + page + section overlap."""
-    metadata = document.metadata or {}
-    if str(metadata.get("paper_id") or "") != str(label.get("paper_id") or ""):
-        return 0
-    # page match
-    expected_start, expected_end = [int(v) for v in label.get("pages") or (0, 0)]
-    actual_start = int(metadata.get("page_start") or 0)
-    actual_end = int(metadata.get("page_end") or actual_start)
-    page_ok = actual_start <= expected_end and actual_end >= expected_start
-    # section match
-    expected_sec = str(label.get("section") or "").casefold()
-    actual_sec = str(metadata.get("paper_section") or "").casefold()
-    section_ok = False
-    if expected_sec == "discussion":
-        section_ok = actual_sec in {"discussion", "limitations", "future_work"}
-    elif expected_sec == "method":
-        section_ok = actual_sec in {"method", "methods", "methodology"}
-    elif expected_sec == "results":
-        section_ok = actual_sec in {"results", "discussion", "limitations"}
-    else:
-        section_ok = actual_sec == expected_sec
-    if page_ok and section_ok:
-        return 3
-    if page_ok or section_ok:
-        return 2
-    return 1
-
-
-def _ndcg(grades: list[int], k: int) -> float:
-    dcg = sum((2**grade - 1) / math.log2(index + 2) for index, grade in enumerate(grades[:k]))
-    ideal_grades = sorted([*grades, 3], reverse=True)[:k]
-    ideal = sum((2**grade - 1) / math.log2(index + 2) for index, grade in enumerate(ideal_grades))
-    return dcg / ideal if ideal else 0.0
-
-
-def offline_rank(query: str, documents: list[Any], k: int) -> list[Any]:
-    """Simple term-frequency keyword rank — no API needed."""
-    q_lower = query.casefold()
-    ranked = []
-    for document in documents:
-        text = (document.page_content or "").casefold()
-        source = str((document.metadata or {}).get("source") or "")
-        score = sum(1 for c in q_lower if c in text) / max(1, len(q_lower))
-        # Bonus for source name match
-        if source.casefold() in q_lower or any(w in source.casefold() for w in q_lower.split()):
-            score += 0.3
-        ranked.append((score, document))
-    ranked.sort(key=lambda item: item[0], reverse=True)
-    return [item[1] for item in ranked[:k]]
-
-
-def _load_documents_from_dir(doc_dir: Path) -> list[Any]:
-    """Load .md and .txt files from a directory as LangChain Documents."""
-    from langchain_core.documents import Document
-
-    docs: list[Document] = []
-    for path in sorted(doc_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in (".md", ".txt"):
-            continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if not text.strip():
-            continue
-        source = path.relative_to(doc_dir).as_posix()
-        docs.append(Document(page_content=text, metadata={"source": source, "file": source}))
-    return docs
-
-
-def real_rank(query: str, retriever: Any, reranker: Any | None, k: int) -> tuple[list[Any], list[Any] | None]:
-    from conflux.query_planner import plan_queries
-
-    candidates: dict[str, Any] = {}
-    scores: dict[str, float] = {}
-    for subquery in plan_queries(query, target="rag").subqueries:
-        for document in retriever.search(subquery):
-            key = str((document.metadata or {}).get("chunk_id") or document.page_content[:120])
-            score = float((document.metadata or {}).get("rrf_score") or 0.0)
-            if key not in candidates or score > scores[key]:
-                candidates[key] = document
-                scores[key] = score
-    baseline = [candidates[key] for key in sorted(candidates, key=scores.get, reverse=True)[:max(k, 16)]]
-    if reranker is None:
-        return baseline[:k], None
-    scored = [
-        {
-            "doc": document,
-            "score": float((document.metadata or {}).get("rrf_score") or 0.0),
-            "breakdown": {
-                "dense_score": (document.metadata or {}).get("dense_score"),
-                "bm25_score": (document.metadata or {}).get("bm25_score"),
-                "rrf_score": (document.metadata or {}).get("rrf_score"),
-            },
-        }
-        for document in baseline
-    ]
-    reranked = reranker.rerank(query, scored, limit=k)
-    return baseline[:k], [item["doc"] for item in reranked[:k]]
-    from conflux.query_planner import plan_queries
-
-    candidates: dict[str, Any] = {}
-    scores: dict[str, float] = {}
-    for subquery in plan_queries(query, target="rag").subqueries:
-        for document in retriever.search(subquery):
-            key = str((document.metadata or {}).get("chunk_id") or document.page_content[:120])
-            score = float((document.metadata or {}).get("rrf_score") or 0.0)
-            if key not in candidates or score > scores[key]:
-                candidates[key] = document
-                scores[key] = score
-    baseline = [candidates[key] for key in sorted(candidates, key=scores.get, reverse=True)[:max(k, 16)]]
-    if reranker is None:
-        return baseline[:k], None
-    scored = [
-        {
-            "doc": document,
-            "score": float((document.metadata or {}).get("rrf_score") or 0.0),
-            "breakdown": {
-                "dense_score": (document.metadata or {}).get("dense_score"),
-                "bm25_score": (document.metadata or {}).get("bm25_score"),
-                "rrf_score": (document.metadata or {}).get("rrf_score"),
-            },
-        }
-        for document in baseline
-    ]
-    reranked = reranker.rerank(query, scored, limit=k)
-    return baseline[:k], [item["doc"] for item in reranked[:k]]
-
-# ============================================================
-# Retrieval configurations
-# ============================================================
-
-RetrievalConfig = dict[str, Any]
-
-FIVE_CONFIGS: dict[str, RetrievalConfig] = {
-    "keyword": {
-        "label": "Keyword (offline)",
-        "description": "Exact term match + heuristic section bonus.",
-        "offline": True,
-    },
-    "dense_only": {
-        "label": "Dense only",
-        "description": "Pure vector similarity, BM25 disabled.",
-        "offline": False,
-        "env": {
-            "CONFLUX_RETRIEVAL__DENSE_WEIGHT": "1.0",
-            "CONFLUX_RETRIEVAL__BM25_WEIGHT": "0.0",
-        },
-        "rerank": False,
-    },
-    "hybrid": {
-        "label": "Hybrid (Dense+BM25)",
-        "description": "Dense 0.7 + BM25 0.3, RRF fusion.",
-        "offline": False,
-        "env": {
-            "CONFLUX_RETRIEVAL__DENSE_WEIGHT": "0.7",
-            "CONFLUX_RETRIEVAL__BM25_WEIGHT": "0.3",
-        },
-        "rerank": False,
-    },
-    "hybrid_rerank": {
-        "label": "Hybrid + Rerank",
-        "description": "Hybrid retrieval followed by LLM semantic reranking.",
-        "offline": False,
-        "env": {
-            "CONFLUX_RETRIEVAL__DENSE_WEIGHT": "0.7",
-            "CONFLUX_RETRIEVAL__BM25_WEIGHT": "0.3",
-        },
-        "rerank": True,
-    },
-    "cross_lingual": {
-        "label": "Cross-lingual (dense≥0.9)",
-        "description": "Dense-heavy config for cross-language retrieval.",
-        "offline": False,
-        "env": {
-            "CONFLUX_RETRIEVAL__DENSE_WEIGHT": "0.9",
-            "CONFLUX_RETRIEVAL__BM25_WEIGHT": "0.1",
-        },
-        "rerank": True,
-    },
+EMBEDDINGS = ["text-embedding-v4", "bge-m3", "qwen3-embedding-8b", "jina-embeddings-v4"]
+CHUNKS = ["512/128", "1024/256", "2048/512"]
+RERANKERS = {
+    "none": "无重排（下界）",
+    "llm_judge": "LLM judge（SemanticReranker）",
+    "bge-reranker-v2-m3-free": "Cross-Encoder bge-reranker-v2-m3-free",
+    "jina-reranker-m0": "Cross-Encoder jina-reranker-m0",
 }
-
-# ============================================================
-# Language scenarios
-# ============================================================
-
-LanguageScenario = dict[str, Any]
-
-LANG_SCENARIOS: dict[str, LanguageScenario] = {
-    "zh-zh": {
-        "label": "zh query → zh documents",
-        "description": "Chinese queries against Chinese GIS markdown docs.",
-        "labels_file": "data/p1_retrieval_eval_zh.yaml",
+DATASETS = {
+    "zh_zh": {
+        "labels": "data/rag_eval/zh_zh.yaml",
         "doc_dir": "data/documents",
-        "grading": "keyword",  # keyword-based grading for markdown docs
+        "label": "zh-zh",
+        "min_cjk": 0.2,  # only Chinese docs (5 docs) for zh-zh scenario
     },
-    # Paper-based scenarios (require PDFs in tmp/pdfs/):
-    # "zh-en": { ... "labels_file": "data/p1_retrieval_eval.yaml", "grading": "paper" },
-    # "en-en": { ... "labels_file": "data/p1_retrieval_eval_en.yaml", "grading": "paper" },
+    "zh_en": {
+        "labels": "data/rag_eval/zh_en.yaml",
+        "doc_dir": "data/documents",
+        "label": "zh-en",
+        "skip_dirs": ("papers",),  # root .md only (esri docs)
+    },
+    "en_en": {
+        "labels": "data/rag_eval/en_en.yaml",
+        "doc_dir": "data/documents/papers",
+        "label": "en-en",
+    },
 }
+PERSIST = ROOT / "tmp" / "chroma_ablation"
+OUT_DIR = ROOT / "reports" / "eval" / "rag_ablation"
+METRICS = ["recall@10", "recall@20", "mrr@10", "ndcg@5", "ndcg@10"]
 
 
 # ============================================================
-# Full evaluation (includes MRR)
+# Embedding / store / indexing
 # ============================================================
 
-def evaluate_ranking_full(
-    labels: list[dict[str, Any]], rankings: dict[str, list[Any]], k: int,
-    grade_fn: Any = _grade_keyword,
-) -> dict[str, Any]:
-    """Compute recall@k, ndcg@5/10, section_hit_rate, irrelevant_hit_rate, MRR."""
-    cases = []
-    recalls = []
-    ndcgs_5 = []
-    ndcgs_10 = []
-    section_hits = []
-    irrelevant = []
-    mrrs = []
+class DmxEmbeddings:
+    """Minimal OpenAI-compatible embeddings wrapper.
 
-    for label in labels:
-        docs = rankings.get(str(label["id"])) or []
-        grades = [grade_fn(document, label) for document in docs[:k]]
-        recall = 1.0 if any(grade >= 2 for grade in grades) else 0.0
-        ndcg_5 = _ndcg(grades, 5)
-        ndcg_10 = _ndcg(grades, k)
-        section_hit = 1.0 if any(grade >= 3 for grade in grades) else 0.0  # grade 3 = perfect match
-        irrelevant_rate = sum(grade == 0 for grade in grades) / len(grades) if grades else 1.0
-        # MRR: first relevant doc (grade ≥ 2)
-        first_rel = next((i + 1 for i, g in enumerate(grades) if g >= 2), 0)
-        mrr = 1.0 / first_rel if first_rel else 0.0
+    Bypasses langchain's tiktoken token-id path (dmxapi adapters for several
+    models reject token-id input); always sends plain text lists in small
+    batches under the API token limit.
+    """
 
-        recalls.append(recall)
-        ndcgs_5.append(ndcg_5)
-        ndcgs_10.append(ndcg_10)
-        section_hits.append(section_hit)
-        irrelevant.append(irrelevant_rate)
-        mrrs.append(mrr)
+    def __init__(self, model: str, base_url: str, api_key: str, batch: int = 10):
+        from openai import OpenAI
 
-        cases.append({
-            "id": label["id"],
-            "query": label["query"],
-            "recall": recall,
-            "ndcg": round(ndcg_10, 4),
-            "ndcg_5": round(ndcg_5, 4),
-            "section_hit": section_hit,
-            "irrelevant_rate": round(irrelevant_rate, 4),
-            "mrr": round(mrr, 4),
-        })
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.model = model
+        self.batch = batch
 
-    return {
-        "metrics": {
-            f"recall_at_{k}": round(statistics.mean(recalls), 4) if recalls else 0.0,
-            "ndcg_at_5": round(statistics.mean(ndcgs_5), 4) if ndcgs_5 else 0.0,
-            "ndcg_at_10": round(statistics.mean(ndcgs_10), 4) if ndcgs_10 else 0.0,
-            "mrr": round(statistics.mean(mrrs), 4) if mrrs else 0.0,
-            "section_hit_rate": round(statistics.mean(section_hits), 4) if section_hits else 0.0,
-            "irrelevant_hit_rate": round(statistics.mean(irrelevant), 4) if irrelevant else 1.0,
-            "case_count": len(labels),
-        },
-        "cases": cases,
-    }
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        out: list[list[float]] = []
+        for i in range(0, len(texts), self.batch):
+            resp = self.client.embeddings.create(model=self.model, input=texts[i : i + self.batch])
+            out.extend(item.embedding for item in resp.data)
+        return out
+
+    def embed_query(self, text: str) -> list[float]:
+        resp = self.client.embeddings.create(model=self.model, input=text)
+        return resp.data[0].embedding
 
 
-# ============================================================
-# One config run
-# ============================================================
+def make_embedding(model: str):
+    from conflux.config import get
 
-def run_one_config(
-    cfg: RetrievalConfig,
-    labels: list[dict[str, Any]],
-    documents: list[Any],
-    k: int,
-    store_factory,
-    embedding_model,
-    models: dict[str, Any],
-    grade_fn: Any = _grade_keyword,
-) -> dict[str, Any]:
-    """Run retrieval evaluation for a single configuration."""
-    if cfg.get("offline"):
-        rankings = {str(item["id"]): offline_rank(str(item["query"]), documents, k) for item in labels}
-        return evaluate_ranking_full(labels, rankings, k, grade_fn=grade_fn)
-
-    # Apply env overrides for this config
-    for key, value in cfg.get("env", {}).items():
-        os.environ[key] = value
-
-    from conflux.rag.indexer import index_documents
-    from conflux.rag.reranker import SemanticReranker
-    from conflux.rag.retriever import HybridRetriever
-
-    store = store_factory()
-    index_documents(store, documents)
-    retriever = HybridRetriever(store)
-    reranker = SemanticReranker(models["reranker"]) if cfg.get("rerank") else None
-
-    rankings: dict[str, list[Any]] = {}
-    for item in labels:
-        query = str(item["query"])
-        if reranker:
-            before, after = real_rank(query, retriever, reranker, k)
-            rankings[str(item["id"])] = after
-        else:
-            # Run retriever directly without reranker
-            docs = retriever.search(query)[:k]
-            rankings[str(item["id"])] = docs
-
-    result = evaluate_ranking_full(labels, rankings, k, grade_fn=grade_fn)
-    return result
+    cfg = get("embedding") or {}
+    base_url = cfg.get("base_url") or "https://www.dmxapi.cn/v1"
+    api_key = cfg.get("api_key") or os.environ.get("OPENAI_API_KEY", "")
+    return DmxEmbeddings(model, base_url, api_key)
 
 
-# ============================================================
-# Matrix builder
-# ============================================================
-
-def build_ablation_matrix(
-    configs: dict[str, RetrievalConfig],
-    languages: dict[str, LanguageScenario],
-    k: int,
-    store_factory,
-    embedding_model,
-    models: dict[str, Any],
-) -> dict[str, Any]:
-    """Run all (config × language) combinations and return comparison matrix."""
-
-    matrix: dict[str, dict[str, dict[str, Any]]] = {}
-    summaries: dict[str, dict[str, dict[str, float]]] = {}
-
-    for lang_key, lang_info in languages.items():
-        matrix[lang_key] = {}
-        summaries[lang_key] = {}
-        labels_path = ROOT / lang_info["labels_file"]
-        labels = load_labels(labels_path)
-
-        # Select grading function
-        grading = lang_info.get("grading", "keyword")
-        grade_fn = _grade_keyword if grading == "keyword" else _grade_paper
-
-        # Load documents
-        doc_dir = lang_info.get("doc_dir")
-        if doc_dir:
-            all_docs = _load_documents_from_dir(ROOT / doc_dir)
-        else:
-            all_docs = _load_documents_from_dir(ROOT / "data/documents")
-        print(f"  [{lang_key}] {len(labels)} labels, {len(all_docs)} docs")
-
-        for cfg_key, cfg in configs.items():
-            print(f"  [{lang_key}] {cfg['label']} ... ", end="", flush=True)
-            t0 = time.time()
-            result = run_one_config(cfg, labels, all_docs, k, store_factory, embedding_model, models, grade_fn=grade_fn)
-            elapsed = time.time() - t0
-            print(f"{elapsed:.1f}s  recall@{k}={result['metrics'].get(f'recall_at_{k}', '-')}  mrr={result['metrics'].get('mrr', '-')}")
-
-            matrix[lang_key][cfg_key] = result
-            summaries[lang_key][cfg_key] = {
-                f"recall_at_{k}": result["metrics"].get(f"recall_at_{k}"),
-                "ndcg_at_5": result["metrics"].get("ndcg_at_5"),
-                "ndcg_at_10": result["metrics"].get("ndcg_at_10"),
-                "mrr": result["metrics"].get("mrr"),
-                "section_hit_rate": result["metrics"].get("section_hit_rate"),
-                "irrelevant_hit_rate": result["metrics"].get("irrelevant_hit_rate"),
-            }
-
-    return {
-        "configs": {key: cfg["label"] for key, cfg in configs.items()},
-        "languages": {key: lang_info["label"] for key, lang_info in languages.items()},
-        "k": k,
-        "matrix": matrix,
-        "summaries": summaries,
-    }
-
-
-# ============================================================
-# Output writers
-# ============================================================
-
-def write_ablation_outputs(payload: dict[str, Any], out_dir: Path) -> tuple[Path, Path]:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    json_path = out_dir / "rag_ablation.json"
-    md_path = out_dir / "rag_ablation.md"
-
-    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    k = payload["k"]
-    lines = [
-        "# RAG Retrieval Ablation Matrix",
-        "",
-        f"**K**: {k}",
-        "",
-    ]
-
-    for lang_key, summaries in payload["summaries"].items():
-        lang_label = payload["languages"][lang_key]
-        lines.extend([f"## {lang_label}", ""])
-
-        # Header row
-        header = ["Metric"] + [payload["configs"].get(c, c) for c in summaries]
-        lines.append("| " + " | ".join(header) + " |")
-        lines.append("|" + "---|" * len(header))
-
-        # Metric rows
-        for metric in [f"recall_at_{k}", "ndcg_at_5", "ndcg_at_10", "mrr", "section_hit_rate", "irrelevant_hit_rate"]:
-            row = [metric]
-            for cfg_key in summaries:
-                val = summaries[cfg_key].get(metric)
-                if val is None:
-                    row.append("—")
-                elif metric == "irrelevant_hit_rate":
-                    row.append(f"{val:.4f}")  # lower is better
-                else:
-                    row.append(f"{val:.4f}")  # higher is better
-            lines.append("| " + " | ".join(row) + " |")
-        lines.append("")
-
-        # Per-case detail tables
-        lines.append("### Per-case detail")
-        lines.append("")
-        for cfg_key in summaries:
-            cfg_label = payload["configs"].get(cfg_key, cfg_key)
-            lines.append(f"**{cfg_label}**")
-            lines.append("")
-            lines.append("| Case | Recall | NDCG | Section | Irrelevant | MRR |")
-            lines.append("|---|---:|---:|---:|---:|---:|")
-            cfg_cases = payload["matrix"][lang_key][cfg_key].get("cases") or []
-            for case in cfg_cases:
-                lines.append(
-                    f"| {case['id']} | {case['recall']} | {case['ndcg']} | "
-                    f"{case['section_hit']} | {case['irrelevant_rate']} | — |"
-                )
-            lines.append("")
-
-    # Cross-language comparison
-    if len(payload["languages"]) > 1:
-        lines.extend([
-            "## Cross-language Comparison",
-            "",
-            "Primary metric: MRR drop across languages.",
-            "",
-            "| Config | Metric | " + " | ".join(f"{payload['languages'][lk]}" for lk in payload["languages"]) + " |",
-            "|---|---|" + "---|" * len(payload["languages"]),
-        ])
-        for metric in ["mrr", f"recall_at_{k}", "ndcg_at_5"]:
-            for cfg_key in payload["configs"]:
-                row = [payload["configs"][cfg_key], metric]
-                for lk in payload["languages"]:
-                    val = payload["summaries"][lk][cfg_key].get(metric)
-                    row.append(f"{val:.4f}" if val else "—")
-                lines.append("| " + " | ".join(row) + " |")
-        lines.append("")
-
-    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return md_path, json_path
-
-
-# ============================================================
-# CLI
-# ============================================================
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="RAG retrieval ablation matrix.")
-    parser.add_argument("--out-dir", default="reports/eval/rag_ablation")
-    parser.add_argument("--k", type=int, default=10)
-    parser.add_argument("--depth", choices=("quick", "standard", "deep"), default="standard")
-    parser.add_argument("--configs", nargs="*", default=list(FIVE_CONFIGS.keys()),
-                        help=f"Configs to run (default: all 5). Choices: {list(FIVE_CONFIGS.keys())}")
-    parser.add_argument("--languages", nargs="*", default=list(LANG_SCENARIOS.keys()),
-                        help=f"Languages to run (default: all). Choices: {list(LANG_SCENARIOS.keys())}")
-    args = parser.parse_args()
-
-    load_dotenv(ROOT / ".env", override=False)
-    load_dotenv(ROOT / ".env.workbench", override=False)
-
-    # Select configs and languages
-    selected_configs = {key: FIVE_CONFIGS[key] for key in args.configs if key in FIVE_CONFIGS}
-    selected_langs = {key: LANG_SCENARIOS[key] for key in args.languages if key in LANG_SCENARIOS}
-
-    if not selected_configs:
-        print("No valid configs selected.")
-        return 1
-    if not selected_langs:
-        print("No valid languages selected.")
-        return 1
-
-    # Set up API backends
-    os.environ["CONFLUX_RETRIEVAL__TOP_K"] = str(max(args.k * 2, 20))
-    os.environ["CONFLUX_RETRIEVAL__FINAL_K"] = str(args.k)
-
-    from conflux import config
-    from conflux.model_factory import create_embedding_model, create_research_models
-    from conflux.rag.indexer import index_documents
-    from conflux.rag.retriever import HybridRetriever
+def get_store(embedding_model, collection: str, reset: bool = False):
     import chromadb
     from chromadb.config import Settings as ChromaSettings
     from langchain_chroma import Chroma
 
-    # Reset config so env overrides take effect per-config
-    config._config = None
-    embedding_model = create_embedding_model()
-    models, model_trace = create_research_models(args.depth)
-
-    # Store factory: creates a fresh in-memory Chroma collection for each config
-    store_counter = 0
-
-    def store_factory():
-        nonlocal store_counter
-        store_counter += 1
-        return Chroma(
-            client=chromadb.Client(settings=ChromaSettings(anonymized_telemetry=False)),
-            collection_name=f"r1_ablation_{int(time.time())}_{store_counter}",
-            embedding_function=embedding_model,
-        )
-
-    print(f"RAG ablation: {len(selected_configs)} configs × {len(selected_langs)} languages = {len(selected_configs)*len(selected_langs)} runs")
-    print(f"Depth: {args.depth}  k: {args.k}")
-    print(f"Models: {model_trace}")
-    print()
-
-    payload = build_ablation_matrix(
-        selected_configs, selected_langs, args.k,
-        store_factory, embedding_model, models,
+    PERSIST.mkdir(parents=True, exist_ok=True)
+    client = chromadb.PersistentClient(
+        path=str(PERSIST),
+        settings=ChromaSettings(anonymized_telemetry=False),
     )
-    payload["model_trace"] = model_trace
+    if reset:
+        try:
+            client.delete_collection(collection)
+        except Exception:
+            pass
+    return Chroma(
+        client=client,
+        collection_name=collection,
+        embedding_function=embedding_model,
+    )
 
-    md_path, json_path = write_ablation_outputs(payload, ROOT / args.out_dir)
-    print(f"\nMarkdown: {md_path}")
-    print(f"JSON: {json_path}")
 
-    # Quick summary
-    for lang_key, summaries in payload["summaries"].items():
-        print(f"\n--- {payload['languages'][lang_key]} ---")
-        header = f"{'Config':<20} {'recall@{:d}':>10} {'NDCG@5':>8} {'NDCG@10':>8} {'MRR':>8} {'Section':>8} {'Irrel':>8}".format(args.k)
-        print(header)
-        print("-" * len(header))
-        for cfg_key, metrics in summaries.items():
-            print(
-                f"{payload['configs'][cfg_key]:<20} "
-                f"{metrics.get(f'recall_at_{args.k}', 0) or 0:>10.4f} "
-                f"{metrics.get('ndcg_at_5', 0) or 0:>8.4f} "
-                f"{metrics.get('ndcg_at_10', 0) or 0:>8.4f} "
-                f"{metrics.get('mrr', 0) or 0:>8.4f} "
-                f"{metrics.get('section_hit_rate', 0) or 0:>8.4f} "
-                f"{metrics.get('irrelevant_hit_rate', 0) or 0:>8.4f}"
-            )
+def _load_documents_from_dir(doc_dir: Path, min_cjk: float | None = None, skip_dirs: tuple[str, ...] = ()) -> list[Document]:
+    supported = {".txt", ".md", ".pdf"}
+    docs: list[Document] = []
+    for path in sorted(p for p in doc_dir.rglob("*") if p.is_file() and p.suffix.lower() in supported):
+        if any(part in skip_dirs for part in path.parts):
+            continue
+        source = path.relative_to(doc_dir).as_posix()
+        try:
+            if path.suffix.lower() == ".pdf":
+                continue  # PDF extraction is out of scope for R1 (summary .md used)
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        if not text.strip():
+            continue
+        if min_cjk:
+            cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff") / max(1, len(text))
+            if cjk < min_cjk:
+                continue
+        docs.append(Document(page_content=text, metadata={"source": source}))
+    return docs
+
+
+def index_dataset(store, doc_dir: Path, parent_size: int, child_size: int, batch: int = 1000,
+                  min_cjk: float | None = None, skip_dirs: tuple[str, ...] = ()) -> int:
+    from conflux.rag import chunk_documents
+
+    documents = _load_documents_from_dir(doc_dir, min_cjk=min_cjk, skip_dirs=skip_dirs)
+    parents, children = chunk_documents(documents, parent_size=parent_size, child_size=child_size)
+    for start in range(0, len(children), batch):
+        store.add_documents(children[start : start + batch])
+    return len(children)
+
+
+def collection_count(store) -> int:
+    try:
+        return store._collection.count()
+    except Exception:
+        return 0
+
+
+# ============================================================
+# Retrieval / aggregation / grading
+# ============================================================
+
+def retrieve(store, query: str) -> list[Document]:
+    from conflux.rag.retriever import HybridRetriever
+
+    return HybridRetriever(store).search(query)
+
+
+def aggregate_docs(docs: list[Document]) -> dict[str, dict]:
+    """Aggregate chunks to doc level: {source_basename: {score, text}}."""
+    agg: dict[str, dict] = {}
+    for doc in docs:
+        meta = doc.metadata or {}
+        source = str(meta.get("source") or "")
+        key = Path(source).name
+        score = float(meta.get("rrf_score") or 0.0)
+        entry = agg.get(key)
+        if entry is None:
+            agg[key] = {"score": score, "text": doc.page_content, "chunks": 1}
+        else:
+            entry["score"] = max(entry["score"], score)
+            entry["text"] += "\n" + doc.page_content
+            entry["chunks"] += 1
+    return agg
+
+
+def label_relevant_names(label: dict) -> list[str]:
+    return [Path(s).name for s in label["relevant_sources"]]
+
+
+def grade_doc(source_name: str, text: str, label: dict) -> int:
+    """R1 grading: 3 = source match + >=50% must_contain; 2 = source match;
+    1 = no source match but partial must_contain; 0 = nothing."""
+    kws = label["must_contain"] or []
+    hits = sum(1 for k in kws if k in text)
+    if source_name in label_relevant_names(label):
+        return 3 if hits >= max(2, len(kws) * 0.5) else 2
+    return 1 if hits else 0
+
+
+def load_labels(path: Path) -> list[dict]:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def build_qrels(labels: list[dict], doc_dir: Path) -> dict:
+    """qrels: qid -> {doc_basename: 2|3} based on full-document keyword presence."""
+    qrels: dict[str, dict] = {}
+    for label in labels:
+        qrels[label["id"]] = {}
+        for src in label["relevant_sources"]:
+            path = doc_dir / src
+            if not path.exists():
+                matches = list(doc_dir.rglob(Path(src).name))
+                path = matches[0] if matches else None
+            if path is None or not path.exists():
+                print(f"  [warn] label source not found: {src}")
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            kws = label["must_contain"] or []
+            hits = sum(1 for k in kws if k in text)
+            grade = 3 if hits >= max(2, len(kws) * 0.5) else 2
+            qrels[label["id"]][Path(src).name] = grade
+    return qrels
+
+
+def build_run(rankings: dict[str, list[Document]]) -> dict:
+    """Build a run keyed by doc basename with rank-position scores.
+
+    Position-based scores (1/(rank+1)) preserve the exact ordering of the
+    returned documents — which is what rerankers change — while being
+    equivalent for ranking metrics (recall/mrr/ndcg only depend on order).
+    """
+    run: dict[str, dict] = {}
+    for qid, docs in rankings.items():
+        seen: dict[str, float] = {}
+        for rank, doc in enumerate(docs):
+            source = str((doc.metadata or {}).get("source") or "")
+            name = Path(source).name
+            if name and name not in seen:
+                seen[name] = 1.0 / (rank + 1)
+        run[qid] = seen
+    return run
+
+
+def evaluate_ranx(qrels: dict, run: dict) -> dict:
+    from ranx import Qrels, Run, evaluate
+
+    qrels_obj = Qrels(qrels)
+    run_obj = Run(run)
+    return evaluate(qrels_obj, run_obj, metrics=METRICS)
+
+
+# ============================================================
+# Rerankers
+# ============================================================
+
+def rerank_none(scored_docs, limit=None):
+    return scored_docs[:limit] if limit else scored_docs
+
+
+def rerank_llm_judge(query, scored_docs, limit=None):
+    from conflux.model_factory import create_chat_model
+    from conflux.rag.reranker import SemanticReranker
+
+    candidates = scored_docs[:limit] if limit else scored_docs
+    reranker = SemanticReranker(create_chat_model("flash"), batch_size=16)
+    return reranker.rerank(query, candidates, limit=len(candidates))
+
+
+class CrossEncoderReranker:
+    """POST /v1/rerank wrapper for bge-reranker-v2-m3-free / jina-reranker-m0."""
+
+    def __init__(self, model: str, base_url: str = "https://www.dmxapi.cn/v1"):
+        self.model = model
+        self.base_url = base_url
+        from conflux.config import get
+
+        cfg = get("embedding") or {}
+        self.api_key = cfg.get("api_key") or os.environ.get("OPENAI_API_KEY", "")
+
+    def rerank(self, query, scored_docs, *, limit=None):
+        candidates = scored_docs[:limit] if limit else scored_docs
+        if not candidates:
+            return []
+        payload = {
+            "model": self.model,
+            "query": query,
+            "documents": [str(d["doc"].page_content)[:4000] for d in candidates],
+            "top_n": len(candidates),
+        }
+        req = urllib.request.Request(
+            f"{self.base_url}/rerank",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"rerank {self.model} failed: {e.code} {e.read().decode('utf-8')[:200]}")
+        results = sorted(body.get("results", []), key=lambda r: r.get("relevance_score", 0.0), reverse=True)
+        ordered = []
+        for item in results:
+            idx = int(item.get("index", 0))
+            if 0 <= idx < len(candidates):
+                src = dict(candidates[idx])
+                src["score"] = float(item.get("relevance_score", 0.0))
+                ordered.append(src)
+        return ordered
+
+
+def make_reranker(name: str):
+    if name == "none":
+        return rerank_none
+    if name == "llm_judge":
+        return rerank_llm_judge
+    reranker = CrossEncoderReranker(name)
+
+    def _rerank(query, scored_docs, limit=None):
+        return reranker.rerank(query, scored_docs, limit=limit)
+
+    return _rerank
+
+
+# ============================================================
+# Run helpers
+# ============================================================
+
+def run_one_retrieval(store, labels: list[dict], rerank_name: str = "none", top_k: int = 60) -> dict:
+    reranker = make_reranker(rerank_name)
+    rankings: dict[str, list[Document]] = {}
+    for label in labels:
+        query = str(label["query"])
+        docs = retrieve(store, query)
+        scored = [
+            {
+                "doc": doc,
+                "score": float((doc.metadata or {}).get("rrf_score") or 0.0),
+                "breakdown": {
+                    "dense_score": (doc.metadata or {}).get("dense_score"),
+                    "bm25_score": (doc.metadata or {}).get("bm25_score"),
+                    "rrf_score": (doc.metadata or {}).get("rrf_score"),
+                },
+            }
+            for doc in docs[:top_k]
+        ]
+        if rerank_name != "none":
+            ordered = reranker(query, scored, limit=top_k)
+            rankings[label["id"]] = [item["doc"] for item in ordered]
+        else:
+            rankings[label["id"]] = [item["doc"] for item in scored]
+    return rankings
+
+
+def config_key(embedding: str, chunk: str) -> str:
+    return f"{embedding}|{chunk}"
+
+
+def parse_chunk(chunk: str) -> tuple[int, int]:
+    parent, child = chunk.split("/")
+    return int(parent), int(child)
+
+
+def best_of_s1(s1_results: dict) -> tuple[str, str]:
+    """Pick best (embedding, chunk) by recall@20 then ndcg@10."""
+    ranked = sorted(
+        s1_results.items(),
+        key=lambda kv: (kv[1]["metrics"].get("recall@20", 0.0), kv[1]["metrics"].get("ndcg@10", 0.0)),
+        reverse=True,
+    )
+    return ranked[0][0].split("|")
+
+
+# ============================================================
+# Stages
+# ============================================================
+
+def run_s1(args) -> dict:
+    from conflux.config import load as config_load
+
+    config_load()
+    dataset = DATASETS[args.dataset]
+    labels = load_labels(ROOT / dataset["labels"])
+    doc_dir = ROOT / dataset["doc_dir"]
+    qrels = build_qrels(labels, doc_dir)
+
+    embeddings = [args.embedding] if args.embedding else EMBEDDINGS
+    chunks = [args.chunk] if args.chunk else CHUNKS
+    results: dict[str, dict] = {}
+    for emb in embeddings:
+        for chunk in chunks:
+            parent, child = parse_chunk(chunk)
+            key = config_key(emb, chunk)
+            collection = f"{dataset['label'].replace('-', '_')}-{emb}-{parent}-{child}"
+            print(f"[S1] {key} ... ", end="", flush=True)
+            t0 = time.time()
+            emb_model = make_embedding(emb)
+            store = get_store(emb_model, collection, reset=args.reindex)
+            if args.reindex or collection_count(store) == 0:
+                n = index_dataset(store, doc_dir, parent, child,
+                                  min_cjk=dataset.get("min_cjk"), skip_dirs=dataset.get("skip_dirs", ()))
+                print(f"indexed {n} chunks, ", end="", flush=True)
+            rankings = run_one_retrieval(store, labels, rerank_name="none")
+            metrics = evaluate_ranx(qrels, build_run(rankings))
+            elapsed = time.time() - t0
+            results[key] = {
+                "embedding": emb, "chunk": chunk, "dataset": args.dataset,
+                "metrics": metrics, "elapsed_s": round(elapsed, 1),
+            }
+            print(f"recall@20={metrics.get('recall@20', 0):.3f} ndcg@10={metrics.get('ndcg@10', 0):.3f} ({elapsed:.0f}s)")
+    return results
+
+
+def run_s2(args, best_embedding: str, best_chunk: str) -> dict:
+    from conflux.config import load as config_load
+
+    config_load()
+    dataset = DATASETS[args.dataset]
+    labels = load_labels(ROOT / dataset["labels"])
+    doc_dir = ROOT / dataset["doc_dir"]
+    qrels = build_qrels(labels, doc_dir)
+    parent, child = parse_chunk(best_chunk)
+    collection = f"{dataset['label'].replace('-', '_')}-{best_embedding}-{parent}-{child}"
+    store = get_store(make_embedding(best_embedding), collection)
+    if collection_count(store) == 0:
+        index_dataset(store, doc_dir, parent, child,
+                      min_cjk=dataset.get("min_cjk"), skip_dirs=dataset.get("skip_dirs", ()))
+
+    results: dict[str, dict] = {}
+    rerankers = (args.rerankers or "").split(",") if args.rerankers else list(RERANKERS)
+    for name in rerankers:
+        name = name.strip()
+        if name not in RERANKERS:
+            continue
+        print(f"[S2] {name} ... ", end="", flush=True)
+        t0 = time.time()
+        rankings = run_one_retrieval(store, labels, rerank_name=name)
+        metrics = evaluate_ranx(qrels, build_run(rankings))
+        elapsed = time.time() - t0
+        results[name] = {
+            "reranker": name, "embedding": best_embedding, "chunk": best_chunk,
+            "metrics": metrics, "elapsed_s": round(elapsed, 1),
+        }
+        print(f"recall@20={metrics.get('recall@20', 0):.3f} ndcg@10={metrics.get('ndcg@10', 0):.3f} ({elapsed:.0f}s)")
+    return results
+
+
+def run_cross(args, s1_results: dict) -> dict:
+    from conflux.config import load as config_load
+
+    config_load()
+    best_emb, best_chunk = best_of_s1(s1_results)
+    print(f"[cross] global best from S1: {best_emb} / {best_chunk}")
+    results: dict[str, dict] = {}
+
+    # 5a: 4 embeddings x zh_en (each on its own S1-best chunk)
+    zh_en = DATASETS["zh_en"]
+    labels = load_labels(ROOT / zh_en["labels"])
+    doc_dir = ROOT / zh_en["doc_dir"]
+    qrels = build_qrels(labels, doc_dir)
+    for emb in EMBEDDINGS:
+        emb_best_chunk = best_chunk
+        # per-embedding best chunk from S1 results
+        candidates = {k.split("|")[1]: v for k, v in s1_results.items() if k.startswith(emb + "|")}
+        if candidates:
+            emb_best_chunk = sorted(candidates.items(), key=lambda kv: kv[1]["metrics"].get("recall@20", 0), reverse=True)[0][0]
+        parent, child = parse_chunk(emb_best_chunk)
+        collection = f"zh_en-{emb}-{parent}-{child}"
+        store = get_store(make_embedding(emb), collection)
+        if collection_count(store) == 0:
+            index_dataset(store, doc_dir, parent, child,
+                          min_cjk=zh_en.get("min_cjk"), skip_dirs=zh_en.get("skip_dirs", ()))
+        print(f"[cross] zh_en {emb} @ {emb_best_chunk} ... ", end="", flush=True)
+        t0 = time.time()
+        rankings = run_one_retrieval(store, labels, rerank_name="none")
+        metrics = evaluate_ranx(qrels, build_run(rankings))
+        results[f"zh_en|{emb}|{emb_best_chunk}"] = {
+            "dataset": "zh_en", "embedding": emb, "chunk": emb_best_chunk,
+            "metrics": metrics, "elapsed_s": round(time.time() - t0, 1),
+        }
+        print(f"recall@20={metrics.get('recall@20', 0):.3f}")
+
+    # 5b: global best config x en_en
+    en_en = DATASETS["en_en"]
+    labels = load_labels(ROOT / en_en["labels"])
+    doc_dir = ROOT / en_en["doc_dir"]
+    qrels = build_qrels(labels, doc_dir)
+    parent, child = parse_chunk(best_chunk)
+    collection = f"en_en-{best_emb}-{parent}-{child}"
+    store = get_store(make_embedding(best_emb), collection)
+    if collection_count(store) == 0:
+        index_dataset(store, doc_dir, parent, child,
+                      min_cjk=en_en.get("min_cjk"), skip_dirs=en_en.get("skip_dirs", ()))
+    print(f"[cross] en_en {best_emb} @ {best_chunk} ... ", end="", flush=True)
+    t0 = time.time()
+    rankings = run_one_retrieval(store, labels, rerank_name="none")
+    metrics = evaluate_ranx(qrels, build_run(rankings))
+    results[f"en_en|{best_emb}|{best_chunk}"] = {
+        "dataset": "en_en", "embedding": best_emb, "chunk": best_chunk,
+        "metrics": metrics, "elapsed_s": round(time.time() - t0, 1),
+    }
+    print(f"recall@20={metrics.get('recall@20', 0):.3f}")
+    return results
+
+
+# ============================================================
+# Reports
+# ============================================================
+
+def fmt_metrics(m: dict) -> str:
+    return "  ".join(f"{k}={m.get(k, 0):.3f}" for k in METRICS)
+
+
+def write_report(name: str, title: str, rows: list[tuple[str, dict]], extra: str = "") -> Path:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    md = [f"# {title}", "", "| 配置 | " + " | ".join(METRICS) + " |", "|---|---" + "---|" * len(METRICS)]
+    for label, item in rows:
+        m = item["metrics"]
+        md.append(f"| {label} | " + " | ".join(f"{m.get(k, 0):.3f}" for k in METRICS) + " |")
+    if extra:
+        md += ["", extra]
+    md += ["", f"时间：{time.strftime('%Y-%m-%d %H:%M:%S')}"]
+    path = OUT_DIR / name
+    path.write_text("\n".join(md), encoding="utf-8")
+    json_path = OUT_DIR / name.replace(".md", ".json")
+    json_path.write_text(json.dumps({r[0]: r[1] for r in rows}, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="R1 RAG retrieval ablation")
+    parser.add_argument("--stage", choices=["s1", "s2", "cross", "all"], default="all")
+    parser.add_argument("--embedding", choices=EMBEDDINGS, default=None)
+    parser.add_argument("--chunk", choices=CHUNKS, default=None)
+    parser.add_argument("--dataset", choices=list(DATASETS), default="zh_zh")
+    parser.add_argument("--rerankers", default=None, help="comma list for S2 (default: all 4)")
+    parser.add_argument("--reindex", action="store_true")
+    parser.add_argument("--dry-run", action="store_true", help="single embedding/chunk, 2 labels only")
+    args = parser.parse_args()
+
+    if args.dry_run:
+        args.embedding = args.embedding or "bge-m3"
+        args.chunk = args.chunk or "1024/256"
+
+    results: dict = {}
+    if args.stage in ("s1", "all"):
+        s1 = run_s1(args)
+        results["s1"] = s1
+        best_emb, best_chunk = best_of_s1(s1)
+        print(f"\n>>> S1 best: {best_emb} / {best_chunk} (recall@20={s1[config_key(best_emb, best_chunk)]['metrics'].get('recall@20'):.3f})\n")
+        rows = [(k, v) for k, v in s1.items()]
+        path = write_report("s1_report.md", f"R1 S1 — 底座选择（{args.dataset}）", rows,
+                            extra=f"**S1 最佳配置**：`{best_emb}` / `{best_chunk}`（主指标 Recall@20，辅助 NDCG@10）")
+        print(f"report: {path}")
+    else:
+        s1 = results.get("s1", {})
+        best_emb, best_chunk = args.embedding or "bge-m3", args.chunk or "1024/256"
+
+    if args.stage in ("s2", "all"):
+        if args.stage == "all":
+            best_emb, best_chunk = best_of_s1(results["s1"])
+        s2 = run_s2(args, best_emb, best_chunk)
+        results["s2"] = s2
+        rows = [(f"{RERANKERS[k]}", v) for k, v in s2.items()]
+        path = write_report("s2_report.md", f"R1 S2 — 重排消融（底座 {best_emb} / {best_chunk}，{args.dataset}）", rows)
+        print(f"report: {path}")
+
+    if args.stage in ("cross", "all"):
+        s1_for_cross = results.get("s1")
+        if s1_for_cross is None:
+            s1_path = OUT_DIR / "s1_report.json"
+            if s1_path.exists():
+                s1_for_cross = json.loads(s1_path.read_text(encoding="utf-8"))
+            else:
+                print("[cross] requires S1 results; run --stage s1 first or use --stage all")
+                return 1
+        cross = run_cross(args, s1_for_cross)
+        results["cross"] = cross
+        rows = [(k, v) for k, v in cross.items()]
+        path = write_report("cross_report.md", "R1 Step5 — 跨语言验证（zh-en 4 模型对比 + en-en 最佳配置）", rows)
+        print(f"report: {path}")
 
     return 0
 

@@ -1,0 +1,100 @@
+- id: case_001
+  query: ArcGIS Pro 中如何进行空间参考设置？
+  relevant_sources:
+  - esri--arcgis-pro-spatial-reference.md
+  must_contain:
+  - coordinate system
+  - projection
+  - transformation
+  - geographic
+  language: zh-en
+- id: case_002
+  query: ArcGIS Online 的概述和主要功能是什么？
+  relevant_sources:
+  - esri--arcgis-online-overview.md
+  must_contain:
+  - ArcGIS Online
+  - share
+  - maps
+  - analysis
+  language: zh-en
+- id: case_003
+  query: ArcGIS Pro 中如何管理地理数据库？
+  relevant_sources:
+  - esri--arcgis-pro-geodatabase.md
+  must_contain:
+  - geodatabase
+  - geographic datasets
+  - relational database
+  - database
+  language: zh-en
+- id: case_004
+  query: ArcGIS Pro 的 ModelBuilder 如何实现自动化工作流？
+  relevant_sources:
+  - esri--arcgis-pro-modelbuilder.md
+  must_contain:
+  - ModelBuilder
+  - model
+  - tool
+  - process
+  language: zh-en
+- id: case_005
+  query: ArcGIS 空间分析的核心工具有哪些？
+  relevant_sources:
+  - esri--arcgis-spatial-analysis.md
+  must_contain:
+  - Spatial Analyst
+  - raster
+  - modeling
+  - feature
+  language: zh-en
+- id: case_006
+  query: ArcGIS Python API 的概述和 GIS 模块用法？
+  relevant_sources:
+  - esri--arcgis-python-api-overview.md
+  must_contain:
+  - Python
+  - GIS
+  - mapping
+  - analysis
+  language: zh-en
+- id: case_007
+  query: ArcGIS Pro 图层管理的基本操作有哪些？
+  relevant_sources:
+  - esri--arcgis-pro-layers.md
+  must_contain:
+  - layer
+  - symbols
+  - data source
+  - points
+  language: zh-en
+- id: case_008
+  query: ArcGIS 网络分析的功能和应用场景？
+  relevant_sources:
+  - esri--arcgis-network-analyst.md
+  must_contain:
+  - Network Analyst
+  - network dataset
+  - transportation
+  - analysis
+  language: zh-en
+- id: case_009
+  query: ArcGIS Pro 入门教程的核心内容？
+  relevant_sources:
+  - esri--arcgis-pro-get-started.md
+  must_contain:
+  - project
+  - map
+  - ribbon
+  - tutorial
+  language: zh-en
+- id: case_010
+  query: ArcGIS 地统计工具的介绍和使用？
+  relevant_sources:
+  - esri--arcgis-geostatistics.md
+  must_contain:
+  - Geostatistical Analyst
+  - interpolation
+  - surface
+  - spatial phenomena
+  language: zh-en
