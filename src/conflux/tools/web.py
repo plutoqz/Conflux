@@ -26,6 +26,7 @@ from ..config import get
 from ..query_planner import (
     DOMAIN_PRIORITY,
     LOW_QUALITY_DOMAINS,
+    QueryRewriteProvider,
     entity_score,
     extract_entities,
     important_terms,
@@ -274,6 +275,7 @@ def create_web_tool(
     *,
     run_id: str = "",
     corpus_provider: RunScopedCorpusProvider | None = None,
+    query_rewriter: QueryRewriteProvider | None = None,
     deadline_at: float | None = None,
     commit_reserve_seconds: float = 20.0,
 ):
@@ -363,6 +365,7 @@ def create_web_tool(
                 ),
             ),
             "corpus_provider": run_corpus,
+            "query_rewriter": query_rewriter,
         }
         if deadline_at:
             search_kwargs.update({
@@ -392,6 +395,7 @@ def _search_web(
     fetch_attempts: int | None = None,
     rewrite_attempts: int | None = None,
     corpus_provider: RunScopedCorpusProvider | None = None,
+    query_rewriter: QueryRewriteProvider | None = None,
     deadline_at: float | None = None,
     commit_reserve_seconds: float = 20.0,
 ) -> str:
@@ -412,7 +416,12 @@ def _search_web(
     max_subqueries = max(1, int(
         max_subqueries if max_subqueries is not None else get("web_search", "max_subqueries", default=6)
     ))
-    plan = plan_queries(query, target="web", max_subqueries=max_subqueries)
+    plan = plan_queries(
+        query,
+        target="web",
+        max_subqueries=max_subqueries,
+        rewrite_provider=query_rewriter,
+    )
     retry_queries: list[str] = []
     preferred_provider = str(provider)
     provider_trace: list[dict] = []

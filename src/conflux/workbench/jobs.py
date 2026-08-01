@@ -111,11 +111,6 @@ class ResearchJob:
         self.has_report = bool(
             (self.has_report or self.final_answer)
             and self.delivery_status != "diagnostic_only"
-            and (
-                self.pipeline not in {"p15", "answer_first"}
-                or self.pipeline == "answer_first"
-                or self.delivery_status in {"deliverable", "limited"}
-            )
         )
 
     @property
@@ -147,11 +142,7 @@ def _finish_job(
     preserve_report: bool = True,
 ) -> None:
     job.ended_at = time.time()
-    formal_delivery = (
-        job.pipeline == "answer_first"
-        or job.pipeline not in {"p15", "answer_first"}
-        or job.delivery_status in {"deliverable", "limited"}
-    )
+    formal_delivery = True
     has_report = bool(
         preserve_report
         and formal_delivery
@@ -190,18 +181,10 @@ def _capture_report_snapshot(
     if not answer.strip():
         return
     job.final_answer = answer
-    is_p15 = bool(state.get("_scope_contract")) or str(
-        (state.get("_run_summary") or {}).get("mode") or ""
-    ) == "p15"
-    if is_p15:
-        job.pipeline = "p15"
     delivery_status = str(state.get("_delivery_status") or "")
     if delivery_status:
         job.delivery_status = delivery_status
-    if not is_p15:
-        job.has_report = True
-    elif delivery_status in {"deliverable", "limited"}:
-        job.has_report = True
+    job.has_report = True
     job.factcheck_status = str(state.get("_factcheck_status") or job.factcheck_status)
     try:
         path = write_staged_markdown_report(
@@ -218,8 +201,7 @@ def _capture_report_snapshot(
         return
     key = "verified_markdown_path" if stage == "verified" else "draft_markdown_path"
     job.artifacts[key] = str(path.resolve())
-    if not is_p15:
-        job.artifacts["markdown_path"] = str(path.resolve())
+    job.artifacts["markdown_path"] = str(path.resolve())
 
 
 def _persist_trace_snapshot(job: ResearchJob, events: list[Any], output_dir: str) -> None:
@@ -474,7 +456,7 @@ class JobManager:
                             if pipeline_stage in {"synthesized", "dynamically_synthesized"}:
                                 emit_stage(events, "report_draft", "completed", "报告初稿已生成")
                                 emit_stage(events, "verification_round", "running", "第一轮核验")
-                            elif pipeline_stage in {"verified_revised", "p15_verified_revised"}:
+                            elif pipeline_stage == "verified_revised":
                                 emit_stage(events, "verification_round", "completed", "第一轮核验完成")
                                 statuses = event.get("_source_statuses") or {}
                                 external_available = any(
@@ -596,14 +578,6 @@ class JobManager:
                     job.artifacts["verified_markdown_path"] = final_markdown
                 if job.artifacts.get("draft_markdown_path") == staged_markdown:
                     job.artifacts["draft_markdown_path"] = final_markdown
-            if job.pipeline == "p15":
-                job.has_report = bool(
-                    job.delivery_status in {"deliverable", "limited"}
-                    and job.artifacts.get("markdown_path")
-                )
-                if job.delivery_status == "diagnostic_only":
-                    job.artifacts.pop("markdown_path", None)
-                    job.artifacts.pop("html_path", None)
             emit_stage(live_events, "final_commit", "completed", "最终提交完成")
             _persist_trace_snapshot(job, live_events, output_dir)
             job.warnings.extend(

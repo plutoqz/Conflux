@@ -13,11 +13,8 @@ from langchain_core.documents import Document
 from .agent import create_sub_agent
 from .checkpointing import create_checkpointer, graph_config
 from .config import load as load_config
-from .graph_v2 import create_multi_agent_graph, create_v2_research_graph
-from .graph_p1 import create_p1_research_graph
-from .graph_p15 import create_p15_research_graph
+from .graph_v2 import create_v2_research_graph
 from .model_factory import (
-    create_chat_model,
     create_research_models,
     validate_embedding_credentials,
     validate_runtime_credentials,
@@ -25,8 +22,7 @@ from .model_factory import (
 from .query_planner import QueryRewriteProvider
 from .rag import HybridRetriever, SemanticReranker, chunk_documents, clear_index, create_vector_store, index_documents
 from .research_modes import resolve_research_profile
-from .report import write_report_artifacts
-from .tools import ask_model, create_rag_tool, create_web_tool, search_web, set_model
+from .tools import create_rag_tool, create_web_tool, set_model
 from .trace import (
     event_from_state_key,
     events_from_source_results,
@@ -129,73 +125,6 @@ def _new_v2_state(
     return _new_state(query, deadline_at=deadline_at)
 
 
-def _empty_multi_agent_state(
-    query: str,
-    *,
-    run_id: str | None = None,
-    thread_id: str | None = None,
-    checkpoint_backend: str = "none",
-    resumed: bool = False,
-    started_at: float | None = None,
-    deadline_at: float | None = None,
-    commit_reserve_seconds: float = 20.0,
-) -> dict:
-    run_id = run_id or new_run_id()
-    thread_id = thread_id or run_id
-    return {
-        "query": query,
-        "rag_result": "",
-        "web_result": "",
-        "model_result": "",
-        "source_results": {},
-        "_merged": "",
-        "_arbitration": "",
-        "_evidence_json": "",
-        "_source_statuses": {},
-        "_verified_answer": "",
-        "_factcheck_status": "",
-        "_factcheck_report": "",
-        "_deep_research": "",
-        "_run_summary": {},
-        "_quality_report": {},
-        "_pipeline_stage": "",
-        "_run_id": run_id,
-        "_thread_id": thread_id,
-        "_checkpoint_backend": checkpoint_backend,
-        "_resumed": resumed,
-        "_started_at": float(started_at or time.time()),
-        "_deadline_at": float(deadline_at or 0.0),
-        "_commit_reserve_seconds": max(0.0, float(commit_reserve_seconds)),
-        "_review_status": "",
-        "_research_plan": {},
-        "_research_profile": {},
-        "_model_trace": {},
-        "_query_archetype": {},
-        "_research_strategy": {},
-        "_domain_map": {},
-        "_coverage_matrix": {},
-        "_research_budget": {},
-        "_source_plans": [],
-        "_report_outline": {},
-        "_section_contracts": [],
-        "_section_drafts": [],
-        "_section_verification": [],
-        "_coverage_iteration": 0,
-        "_coverage_gap_questions": [],
-        "_coverage_gaps": [],
-        "_coverage_stop": False,
-        "_budget_usage": {},
-        "_claim_assessments": [],
-        "_source_coverage": [],
-        "_research_gaps": [],
-        "_conflicts": [],
-        "_verification_issues": [],
-        "_gap_questions": [],
-        "_gap_iteration": 0,
-        "final_answer": "",
-    }
-
-
 def query_command(
     query: str,
     mode: str = "phase2",
@@ -225,16 +154,14 @@ def query_command(
     )
     run_id = run_id or new_run_id()
     research_config = loaded_config.get("research", {}) or {}
-    pipeline = str(research_config.get("pipeline") or "p1").casefold()
-    generalization_config = research_config.get("generalization", {}) or {}
-    if pipeline == "p15" and isinstance(generalization_config, dict):
-        enabled = generalization_config.get("enabled", True)
-        if str(enabled).strip().casefold() in {"0", "false", "no", "off"}:
-            pipeline = "p1"
-    use_p1_roles = pipeline in {"p1", "p15", "answer_first"}
+    pipeline = str(research_config.get("pipeline") or "answer_first").casefold()
+    if pipeline != "answer_first":
+        # P1/P1.5 pipelines were removed (plan stage K); normalize to V2.
+        print(f"-> Warning: research.pipeline '{pipeline}' is no longer supported; using answer_first.")
+        pipeline = "answer_first"
     credential_problems = validate_runtime_credentials(
         research_profile.depth,
-        include_legacy_presets=not use_p1_roles,
+        include_legacy_presets=False,
     )
     if credential_problems:
         print("Error: real API execution is missing required credentials.")
@@ -246,36 +173,26 @@ def query_command(
     vector_store = create_vector_store()
     retriever = HybridRetriever(vector_store)
     print("-> Initializing models...")
-    if pipeline in {"p1", "p15", "answer_first"}:
-        role_models, model_trace = create_research_models(
-            research_profile.depth,
-            deadline_at=deadline_at,
-            commit_reserve_seconds=commit_reserve_seconds,
-            preserve_stage_budgets=(pipeline == "p15"),
-        )
-        set_model(role_models["analyst"])
-        rag_tool = create_rag_tool(
-            retriever,
-            QueryRewriteProvider(),
-            SemanticReranker(role_models["reranker"], batch_size=research_profile.candidate_limit),
-            research_profile,
-        )
-        web_tool = create_web_tool(
-            research_profile,
-            run_id=run_id,
-            deadline_at=deadline_at,
-            commit_reserve_seconds=commit_reserve_seconds,
-        )
-        reasoning_model = role_models["synthesizer"]
-        cheap_model = role_models["verifier"]
-    else:
-        reasoning_model = create_chat_model("reasoning")
-        cheap_model = create_chat_model("cheap")
-        set_model(reasoning_model)
-        rag_tool = create_rag_tool(retriever, QueryRewriteProvider(cheap_model))
-        web_tool = search_web
-        role_models = {}
-        model_trace = {}
+    role_models, model_trace = create_research_models(
+        research_profile.depth,
+        deadline_at=deadline_at,
+        commit_reserve_seconds=commit_reserve_seconds,
+    )
+    set_model(role_models["analyst"])
+    v2_rewriter = QueryRewriteProvider(role_models["verifier"])
+    rag_tool = create_rag_tool(
+        retriever,
+        v2_rewriter,
+        SemanticReranker(role_models["reranker"], batch_size=research_profile.candidate_limit),
+        research_profile,
+    )
+    web_tool = create_web_tool(
+        research_profile,
+        run_id=run_id,
+        query_rewriter=v2_rewriter,
+        deadline_at=deadline_at,
+        commit_reserve_seconds=commit_reserve_seconds,
+    )
 
     effective_thread_id = resume or thread_id or run_id
     checkpoint = create_checkpointer(checkpoint_backend)
@@ -289,165 +206,76 @@ def query_command(
     print(f"-> Thread id: {effective_thread_id}")
     print(f"-> Checkpoint backend: {checkpoint.backend}")
 
-    if pipeline == "answer_first":
-        # V2 answer_first pipeline — simplified 4-step flow
-        retriever = HybridRetriever(vector_store)
-        rag_agent = create_sub_agent("rag", role_models["reranker"], rag_tool)
-        web_agent = create_sub_agent("web", role_models["reranker"], web_tool)
-        graph = create_v2_research_graph(
-            rag_agent,
-            web_agent,
-            planner_model=role_models["planner"],
-            synthesizer_model=role_models["synthesizer"],
-            profile=research_profile,
-            retriever=retriever,
-            reranker_model=role_models.get("reranker"),
-            deadline_at=deadline_at,
-            commit_reserve_seconds=commit_reserve_seconds,
-        )
-        initial_state = _new_v2_state(
-            query,
-            deadline_at=deadline_at,
-        )
-        final_state, trace_events = _run_phase2_graph(
-            graph,
-            initial_state,
-            query,
-            stream_events=stream_events,
-            thread_id=effective_thread_id,
-        )
-    elif pipeline in {"p1", "p15"}:
-        rag_agent = create_sub_agent("rag", role_models["reranker"], rag_tool)
-        web_agent = create_sub_agent("web", role_models["reranker"], web_tool)
-        graph_factory = create_p15_research_graph if pipeline == "p15" else create_p1_research_graph
-        graph = graph_factory(
-            rag_agent,
-            web_agent,
-            planner_model=role_models["planner"],
-            analyst_model=role_models["analyst"],
-            synthesizer_model=role_models["synthesizer"],
-            verifier_model=role_models["verifier"],
-            profile=research_profile,
-            model_trace=model_trace,
-            checkpointer=checkpoint.checkpointer,
-        )
-        initial_state = _empty_multi_agent_state(
-            query,
-            run_id=run_id,
-            thread_id=effective_thread_id,
-            checkpoint_backend=checkpoint.backend,
-            resumed=bool(resume),
-            started_at=started_at,
-            deadline_at=deadline_at,
-            commit_reserve_seconds=commit_reserve_seconds,
-        )
-        final_state, trace_events = _run_phase2_graph(
-            graph,
-            initial_state,
-            query,
-            stream_events=stream_events,
-            thread_id=effective_thread_id,
-        )
-    else:
-        rag_agent = create_sub_agent("rag", reasoning_model, rag_tool)
-        web_agent = create_sub_agent("web", reasoning_model, search_web)
-        model_agent = create_sub_agent("model", reasoning_model, ask_model)
-        graph = create_multi_agent_graph(
-            rag_agent,
-            web_agent,
-            model_agent,
-            synthesizer_model=reasoning_model,
-            arbitrator_model=cheap_model,
-            checkpointer=checkpoint.checkpointer,
-        )
-        initial_state = _empty_multi_agent_state(
-            query,
-            run_id=run_id,
-            thread_id=effective_thread_id,
-            checkpoint_backend=checkpoint.backend,
-            resumed=bool(resume),
-            started_at=started_at,
-            deadline_at=deadline_at,
-            commit_reserve_seconds=commit_reserve_seconds,
-        )
-        final_state, trace_events = _run_phase2_graph(
-            graph,
-            initial_state,
-            query,
-            stream_events=stream_events,
-            thread_id=effective_thread_id,
-        )
+    # V2 answer_first pipeline — simplified 4-step flow
+    retriever = HybridRetriever(vector_store)
+    rag_agent = create_sub_agent("rag", role_models["reranker"], rag_tool)
+    web_agent = create_sub_agent("web", role_models["reranker"], web_tool)
+    graph = create_v2_research_graph(
+        rag_agent,
+        web_agent,
+        planner_model=role_models["planner"],
+        synthesizer_model=role_models["synthesizer"],
+        profile=research_profile,
+        retriever=retriever,
+        reranker_model=role_models.get("reranker"),
+        deadline_at=deadline_at,
+        commit_reserve_seconds=commit_reserve_seconds,
+    )
+    initial_state = _new_v2_state(
+        query,
+        deadline_at=deadline_at,
+    )
+    final_state, trace_events = _run_phase2_graph(
+        graph,
+        initial_state,
+        query,
+        stream_events=stream_events,
+        thread_id=effective_thread_id,
+    )
 
-    if pipeline == "answer_first":
-        # V2: 报告已在管道内完成组装
-        answer = final_state.get("_report_markdown") or ""
-        if not answer:
-            answer = final_state.get("final_answer") or ""
-    else:
-        answer = final_state.get("final_answer", "")
+    # V2: 报告已在管道内完成组装
+    answer = final_state.get("_report_markdown") or final_state.get("final_answer") or ""
     artifacts = None
-    delivery_status = str(final_state.get("_delivery_status") or "")
-    diagnostic_only = pipeline == "p15" and delivery_status == "diagnostic_only"
-    is_v2 = pipeline == "answer_first"
     if answer:
         print(f"\n{answer[:3000]}\n")
-        if is_v2:
-            # V2: write report directly, bypass old delivery-gate write path
-            from .report import (
-                _atomic_write_text,
-                _strip_code_fence,
-                markdown_to_html,
-                slugify,
-            )
-            from datetime import datetime
-            out_dir = Path(output_dir)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            answer_clean = _strip_code_fence(answer)
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            stem = f"{stamp}-{slugify(query)}"
-            md_path = out_dir / f"{stem}.md"
-            html_path = out_dir / f"{stem}.html"
-            _atomic_write_text(md_path, answer_clean)
-            _atomic_write_text(html_path, markdown_to_html(query, answer_clean))
-            # Also stage in workbench query dir for results visibility
-            wb_dir = Path("reports/workbench/query")
-            wb_dir.mkdir(parents=True, exist_ok=True)
-            wb_draft = wb_dir / f"{stem}.draft.md"
-            try:
-                _atomic_write_text(wb_draft, answer_clean)
-            except Exception:
-                pass
-            artifacts = type("Artifacts", (), {
-                "markdown_path": md_path,
-                "html_path": html_path,
-                "evidence_json_path": None,
-                "raw_sources_path": None,
-                "deep_evidence_json_path": None,
-                "audit_markdown_path": None,
-            })()
-            confidence = final_state.get("_confidence", "unverified")
-            confidence_label = {"high": "高可信", "medium": "中可信", "low": "低可信", "unverified": "未核验"}.get(confidence, confidence)
-            print(f"Report Markdown: {md_path.resolve()}")
-            print(f"Report HTML: {html_path.resolve()}")
-            print(f"可信度：{confidence_label}")
-        else:
-            artifacts = write_report_artifacts(
-                query,
-                final_state,
-                output_dir=output_dir,
-                diagnostic=diagnostic_only,
-            )
-            label = "Diagnostic" if diagnostic_only else "Report"
-            print(f"{label} Markdown: {artifacts.markdown_path.resolve()}")
-            print(f"{label} HTML: {artifacts.html_path.resolve()}")
-            if artifacts.evidence_json_path:
-                print(f"Evidence JSON: {artifacts.evidence_json_path.resolve()}")
-            if artifacts.raw_sources_path:
-                print(f"Raw sources: {artifacts.raw_sources_path.resolve()}")
-            if artifacts.deep_evidence_json_path:
-                print(f"Deep evidence JSON: {artifacts.deep_evidence_json_path.resolve()}")
-            if artifacts.audit_markdown_path:
-                print(f"Research audit: {artifacts.audit_markdown_path.resolve()}")
+        # V2: write report directly, bypass old delivery-gate write path
+        from .report import (
+            _atomic_write_text,
+            _strip_code_fence,
+            markdown_to_html,
+            slugify,
+        )
+        from datetime import datetime
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        answer_clean = _strip_code_fence(answer)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        stem = f"{stamp}-{slugify(query)}"
+        md_path = out_dir / f"{stem}.md"
+        html_path = out_dir / f"{stem}.html"
+        _atomic_write_text(md_path, answer_clean)
+        _atomic_write_text(html_path, markdown_to_html(query, answer_clean))
+        # Also stage in workbench query dir for results visibility
+        wb_dir = Path("reports/workbench/query")
+        wb_dir.mkdir(parents=True, exist_ok=True)
+        wb_draft = wb_dir / f"{stem}.draft.md"
+        try:
+            _atomic_write_text(wb_draft, answer_clean)
+        except Exception:
+            pass
+        artifacts = type("Artifacts", (), {
+            "markdown_path": md_path,
+            "html_path": html_path,
+            "evidence_json_path": None,
+            "raw_sources_path": None,
+            "deep_evidence_json_path": None,
+            "audit_markdown_path": None,
+        })()
+        confidence = final_state.get("_confidence", "unverified")
+        confidence_label = {"high": "高可信", "medium": "中可信", "low": "低可信", "unverified": "未核验"}.get(confidence, confidence)
+        print(f"Report Markdown: {md_path.resolve()}")
+        print(f"Report HTML: {html_path.resolve()}")
+        print(f"可信度：{confidence_label}")
     else:
         print("\nWarning: no final answer was generated. Check API, embedding, and tool configuration.\n")
 
@@ -456,9 +284,8 @@ def query_command(
     summary_path = trace_root / f"{run_id}.summary.json"
     write_trace_jsonl(trace_events, trace_path)
     summary = dict(final_state.get("_run_summary") or {})
-    if is_v2:
-        # V2 summary
-        summary.update({
+    # V2 summary
+    summary.update({
             "delivery_status": final_state.get("_confidence", "unverified"),
             "delivery_assessment": {},
             "report_md_path": str(artifacts.markdown_path.resolve()) if artifacts and artifacts.markdown_path else "",
@@ -487,36 +314,6 @@ def query_command(
             "factcheck_status": "",
             "quality": {},
         })
-    else:
-        summary.update({
-        "run_id": run_id,
-        "thread_id": effective_thread_id,
-        "query": query,
-        "final_answer": answer[:2000] if answer else "",
-        "checkpoint_backend": checkpoint.backend,
-        "resumed": bool(resume),
-        "trace_path": str(trace_path),
-        "delivery_status": delivery_status,
-        "delivery_assessment": final_state.get("_delivery_assessment") or {},
-        "report_md_path": str(artifacts.markdown_path.resolve()) if artifacts and not diagnostic_only else "",
-        "report_html_path": str(artifacts.html_path.resolve()) if artifacts and not diagnostic_only else "",
-        "report_evidence_path": str(artifacts.evidence_json_path.resolve()) if artifacts and artifacts.evidence_json_path and not diagnostic_only else "",
-        "report_sources_path": str(artifacts.raw_sources_path.resolve()) if artifacts and artifacts.raw_sources_path and not diagnostic_only else "",
-        "report_deep_evidence_path": str(artifacts.deep_evidence_json_path.resolve()) if artifacts and artifacts.deep_evidence_json_path and not diagnostic_only else "",
-        "report_audit_path": str(artifacts.audit_markdown_path.resolve()) if artifacts and artifacts.audit_markdown_path and not diagnostic_only else "",
-        "diagnostic_markdown_path": str(artifacts.markdown_path.resolve()) if artifacts and diagnostic_only else "",
-        "diagnostic_html_path": str(artifacts.html_path.resolve()) if artifacts and diagnostic_only else "",
-        "diagnostic_evidence_path": str(artifacts.evidence_json_path.resolve()) if artifacts and artifacts.evidence_json_path and diagnostic_only else "",
-        "diagnostic_sources_path": str(artifacts.raw_sources_path.resolve()) if artifacts and artifacts.raw_sources_path and diagnostic_only else "",
-        "diagnostic_deep_evidence_path": str(artifacts.deep_evidence_json_path.resolve()) if artifacts and artifacts.deep_evidence_json_path and diagnostic_only else "",
-        "diagnostic_audit_path": str(artifacts.audit_markdown_path.resolve()) if artifacts and artifacts.audit_markdown_path and diagnostic_only else "",
-        "source_statuses": {
-            source: payload.get("status")
-            for source, payload in (final_state.get("_source_statuses") or {}).items()
-        },
-        "factcheck_status": final_state.get("_factcheck_status"),
-        "quality": final_state.get("_quality_report") or {},
-    })
     write_run_summary(summary, summary_path)
     final_state["_report_artifacts"] = {
         "markdown_path": summary["report_md_path"],

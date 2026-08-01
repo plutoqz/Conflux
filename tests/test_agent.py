@@ -14,7 +14,7 @@ def test_imports():
     from conflux.rag import chunk_documents, create_vector_store, HybridRetriever
     from conflux.tools import create_rag_tool, search_web
     from conflux.agent import ResearchAgent, SYSTEM_PROMPT
-    from conflux.graph import create_graph, AgentState
+    from conflux.graph_v2 import create_v2_research_graph
     assert True
 
 
@@ -40,13 +40,13 @@ def test_chunking():
 
 
 def test_graph_compiles():
-    """验证 LangGraph 可编译（不需要真实 API key）"""
+    """验证 V2 LangGraph 可编译（不需要真实 API key）"""
     from unittest.mock import MagicMock
     from langchain_core.language_models import BaseChatModel
     from langchain_core.tools import tool as tool_decorator
 
-    from conflux.agent import ResearchAgent
-    from conflux.graph import create_graph
+    from conflux.graph_v2 import create_v2_research_graph
+    from conflux.research_modes import resolve_research_profile
 
     @tool_decorator
     def dummy_search(query: str) -> str:
@@ -55,16 +55,20 @@ def test_graph_compiles():
 
     # 用 mock 模型
     mock_model = MagicMock(spec=BaseChatModel)
-    mock_model.bind_tools.return_value = mock_model
-
-    agent = ResearchAgent(mock_model, [dummy_search])
-    graph = create_graph(agent)
+    profile = resolve_research_profile("quick")
+    graph = create_v2_research_graph(
+        dummy_search,
+        dummy_search,
+        planner_model=mock_model,
+        synthesizer_model=mock_model,
+        profile=profile,
+    )
 
     # 验证图可编译
     assert graph is not None
     # 验证节点存在
     nodes = graph.get_graph().nodes
-    assert "agent" in nodes
+    assert "decompose" in nodes
     assert "finalize" in nodes
 
 

@@ -1,7 +1,7 @@
 models:
   flash:
     provider: openai_compatible
-    model: qwen3.7-plus
+    model: deepseek-v4-flash-guan
     base_url: https://www.dmxapi.cn/v1
     api_key: null
     temperature: 0.2
@@ -12,7 +12,7 @@ models:
       enable_thinking: false
   balanced:
     provider: openai_compatible
-    model: qwen3.7-plus
+    model: deepseek-v4-flash-guan
     base_url: https://www.dmxapi.cn/v1
     api_key: null
     temperature: 0.25
@@ -32,7 +32,7 @@ models:
     max_retries: 1
   verifier:
     provider: openai_compatible
-    model: MiniMax-M3
+    model: deepseek-v4-flash-guan
     base_url: https://www.dmxapi.cn/v1
     api_key: null
     temperature: 0.0

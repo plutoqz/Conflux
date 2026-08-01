@@ -374,14 +374,16 @@ class QueryRewriteProvider:
         self.model = model
 
     def rewrite(self, query: str, *, target: str = "rag") -> list[str]:
-        variants = _deterministic_bilingual_queries(query, target=target)
         if self.model is None:
-            return variants
+            return _deterministic_bilingual_queries(query, target=target)
         try:
             generated = self._model_rewrite(query, target=target)
         except Exception:
             generated = []
-        return _dedupe_texts([*variants, *generated])
+        if generated:
+            return _dedupe_texts(generated)
+        # LLM rewrite unavailable/failed → deterministic term map as fallback.
+        return _deterministic_bilingual_queries(query, target=target)
 
     def _model_rewrite(self, query: str, *, target: str) -> list[str]:
         from langchain_core.messages import HumanMessage
@@ -404,14 +406,20 @@ Query: {query}"""
         return [line.strip(" -*\t") for line in content.splitlines() if len(line.strip()) >= 8]
 
 
-def plan_queries(query: str, *, target: str, max_subqueries: int = 4) -> QueryPlan:
+def plan_queries(
+    query: str,
+    *,
+    target: str,
+    max_subqueries: int = 4,
+    rewrite_provider: QueryRewriteProvider | None = None,
+) -> QueryPlan:
     """Create a compact query plan for RAG or Web retrieval."""
 
     terms = sorted(important_terms(query))
     entities = sorted(extract_entities(query))
     expansions = _expansions_for_query(query)
 
-    bilingual_queries = QueryRewriteProvider().rewrite(query, target=target)
+    bilingual_queries = (rewrite_provider or QueryRewriteProvider()).rewrite(query, target=target)
     combined = _dedupe_words([*entities, *expansions])
 
     if target == "web":

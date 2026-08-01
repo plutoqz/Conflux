@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""V2 batch blind evaluation with deepseek-v4-flash.
+"""V2 batch blind evaluation with deepseek-v4-flash-guan.
 
 Runs V2 answer_first pipeline on remaining 9 representative cases,
 blind-reviews each report, and stops after 3 consecutive successes.
@@ -49,7 +49,7 @@ BLIND_PROMPT_TEMPLATE = """Score each dimension 1-5 (1=poor, 5=excellent):
 - decision_value: 1=no suggestions or sloganeering; 3=relevant suggestions but lack conditions; 5=actionable with priority, conditions and tradeoffs.
 
 Output ONLY this JSON (1-5 integers for each dimension):
-{"scores":{"factual_citation_match":3,"scope_and_coverage":3,"mechanism_rigor":3,"quantitative_and_implementation_detail":3,"comparative_synthesis":3,"decision_value":3},"overall":3.0,"reason":"brief comment","is_empty":false}
+{{"scores":{{"factual_citation_match":3,"scope_and_coverage":3,"mechanism_rigor":3,"quantitative_and_implementation_detail":3,"comparative_synthesis":3,"decision_value":3}},"overall":3.0,"reason":"brief comment","is_empty":false}}
 
 Evaluation date: {date}
 Research question: {query}
@@ -106,6 +106,8 @@ def main() -> int:
                 cwd=str(PROJECT_ROOT),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=600,
             )
         except subprocess.TimeoutExpired:
@@ -207,7 +209,7 @@ def main() -> int:
 
     batch_result = {
         "batch_date": datetime.now().isoformat(),
-        "model": "deepseek-v4-flash",
+        "model": "deepseek-v4-flash-guan",
         "pipeline": "answer_first",
         "depth": "standard",
         "total_pending": len(pending),
