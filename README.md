@@ -2,27 +2,26 @@
 
 Conflux 是一个本地优先的研究工作台，将论文发现、知识入库、多源证据调研和项目进度审计连接起来，并生成可追溯的 Markdown、HTML 和结构化运行产物。
 
-当前项目适合个人研究和工程能力展示，重点包括多源检索编排、Evidence Graph、FactCheck、Chunk 级引用、离线评测和结构化 Trace。可扩展 ResearchOps 架构改造已完成 M0-M2，三源研究质量闭环 P1 已通过真实 Deep/full 验收，P1.5 泛化深度研究已完成实现和离线合同验收；跨领域真实 API 盲评仍待预算确认，P2 和持久运行时 M3 尚未启动。
+当前项目适合个人研究和工程能力展示，重点包括多源检索编排、Evidence Graph、FactCheck、Chunk 级引用、离线评测和结构化 Trace。可扩展 ResearchOps 架构改造已完成 M0-M2；**V2 `answer_first` 为唯一管道（P1/P1.5 已清理）**，已通过**三批真实 API 盲评退出判定**（均分 3.2/5，deepseek-v4-flash-guan）；I/J/K（参数调优 / 硬编码退出主路径 / 废弃代码清理）已完成；**R1 检索消融实验**完成（`text-embedding-v4` 胜出、rerank 负面结论）；P2 paper radar 核心已实现，M3 持久化待启动。详见 [项目总体进展报告](docs/plans/done/项目总体进展报告.md)。
 
 ## 当前技术能力
 
-- LangGraph 工作流：V2 默认管道 (`answer_first`) 是线性 6 步 decompose→retrieve→generate→synthesize→audit→finalize；旧版并行 RAG+Web→Model Analyst 模式在 p1/p15 管道中仍可用。
+- LangGraph 工作流：唯一管道 V2 `answer_first`（线性 6 步 decompose→retrieve→generate→synthesize→audit→finalize）；P1/P1.5 旧管道已于 2026-08 清理（stage K）。
 - 来源状态协议包含 `success`、`low_relevance`、`no_evidence`、`failed` 和 `fallback`。
 - `no_evidence`、`failed` 和 `fallback` 来源不会进入 Evidence Graph 共识投票。
 - 来源结果包含声明级 `evidence_refs`、`confidence` 和 `limitations`。
 - RAG 结果使用 `[RAG:quantum-crypto.txt#chunk-p0-c0]` 等 Chunk 级引用。
 - FactCheck 包含确定性追溯检查、独立模型核查、主答案修订和轻量复核闭环。
 - Deep 档支持六维研究计划、RunScoped 临时全文、数字引用编译、置信度附录和匿名成对盲评。
-- P1.5 支持通用问题原型、动态领域地图、覆盖矩阵、按证据需求的来源路由、动态预算、章节级/全局分层综合和动态报告契约。
-- P1.5 通过 `research.pipeline: p15` 启用；V2 简化管道 (`answer_first`) 是当前默认值，走 decompose→retrieve→generate→synthesize→audit→finalize 流程。
+- V2 `answer_first` 是唯一管道，走 decompose→retrieve→generate→synthesize→audit→finalize 流程；`research.pipeline` 中其他取值会归一化为 `answer_first` 并提示。
 - Trace JSONL 和 Run Summary JSON 用于检查每次运行的阶段和来源状态。
-- 离线评测覆盖检索质量、报告验收、来源故障矩阵、预算硬上限、失败来源泄漏、Prompt Injection 和章节追溯；不包含付费真实 API 盲评。
+- 离线评测覆盖检索质量、报告验收、来源故障矩阵、预算硬上限、失败来源泄漏、Prompt Injection 和章节追溯；真实 API 三批盲评已于 2026-08-01 执行（连续三批退出判定达成）。
 
 ## 为什么使用 LangGraph
 
 当前调研流程需要明确状态边界、并行检索分支、条件路由和可选 Checkpointer。仓库已接入内存 Checkpointer，并记录 `run_id`、`thread_id`、Checkpoint 后端、来源状态和阶段进度；内存后端不会在进程重启后保留状态，因此当前不能宣称已经支持持久断点恢复。
 
-下图展示旧版 (p1/p15) 并行 agent 流程；当前默认 V2 pipeline 为线性 6 步：
+下图展示历史 p1/p15 并行 agent 流程（已删除）；当前唯一 V2 pipeline 为线性 6 步：
 
 ```mermaid
 flowchart TD
@@ -56,29 +55,37 @@ flowchart TD
 ├── .env.example
 ├── examples/
 ├── docs/
-│   ├── architecture.md
+│   ├── README.md
+│   ├── 架构设计.md
 │   ├── plans/
-│   │   └── execution_plan_v1.md  # P1.5 已实现并完成离线验收 / 真实盲评待预算 / P2+ 未启动
+│   │   ├── 执行计划v1.md        # 执行主线；V2 已完成，P2/M3 待启动
+│   │   ├── R1检索消融实验方案.md  # R1 实验方案（4 embedding × 3 chunk + rerank）
+│   │   └── done/
+│   │       ├── 项目总体进展报告.md # 全部阶段状态总览
+│   │       ├── V2实现总结.md
+│   │       └── 阶段R完成摘要.md
+│   ├── benchmarks/
+│   │   └── V2退出报告h3.md      # V2 盲评退出判定
 │   └── retrospectives/
-│       └── p1_execution_retrospective.md
-├── data/documents/
+│       └── P1执行回顾.md
+├── data/
+│   ├── documents/              # 本地语料（65 md + 190 论文摘要 + 34 PDF）
+│   └── rag_eval/               # R1 三语评测集（zh_zh/zh_en/en_en 各 10 题）
 ├── prompts/
 ├── scripts/
-│   ├── eval_retrieval.py
-│   ├── eval_reports.py
-│   └── eval_end_to_end.py
+│   ├── eval_rag_ablation.py    # R1 检索消融（S1/S2/跨语言，ranx）
+│   ├── eval_web_search.py      # R2 Web 搜索质量评测
+│   ├── eval_ablation.py        # R3 P1 消融
+│   ├── eval_gates.py           # R4 端到端门禁统计
+│   ├── run_v2_blind_batch.py   # V2 批量盲评（连续三批退出）
+│   └── eval_retrieval.py / eval_reports.py / eval_end_to_end.py
 ├── src/conflux/
 │   ├── __main__.py
-│   ├── graph_v2.py
-│   ├── checkpointing.py
-│   ├── trace.py
-│   ├── source_status.py
-│   ├── evidence.py
-│   ├── report.py
-│   ├── acceptance.py
-│   ├── tools/
-│   └── rag/
-└── tests/
+│   ├── graph_v2.py             # V2 answer_first 管道
+│   ├── graph_p15.py 等已删除     # P1/P1.5 旧管道（stage K）
+│   ├── checkpointing.py / trace.py / source_status.py / evidence.py / report.py
+│   ├── tools/ / rag/ / paper_radar/ / workbench/
+└── tests/                      # 287 个测试（pytest）
 ```
 
 ## 文档与后续方向
@@ -86,11 +93,14 @@ flowchart TD
 - [PRODUCT.md](PRODUCT.md)：当前产品定位和设计原则。
 - [DESIGN.md](DESIGN.md)：当前工作台视觉和交互约束。
 - [docs/README.md](docs/README.md)：项目文档索引与分类说明。
-- [docs/architecture.md](docs/architecture.md)：已批准的可扩展 ResearchOps 长期架构蓝图。
-- [docs/plans/execution_plan_v1.md](docs/plans/execution_plan_v1.md)：M0-M2、P0、P1 已完成验收，P1.5 已实现并完成离线合同验收，真实跨领域盲评待预算确认，P2/M3+ 尚未启动的实施方案和验收记录。
-- [docs/retrospectives/p1_execution_retrospective.md](docs/retrospectives/p1_execution_retrospective.md)：P1 从失败基线到最终 Deep/full 验收的执行与技术复盘。
+- [docs/架构设计.md](docs/架构设计.md)：已批准的可扩展 ResearchOps 长期架构蓝图。
+- [docs/plans/done/项目总体进展报告.md](docs/plans/done/项目总体进展报告.md)：**全部阶段（A/R/B/C、V2 H-K、P2/M3）状态总览**。
+- [docs/plans/执行计划v1.md](docs/plans/执行计划v1.md)：M0-M2、P0、P1 已完成验收，V2 H-K 已闭合，P2/M3+ 尚未启动的实施方案和验收记录。
+- [docs/benchmarks/V2退出报告h3.md](docs/benchmarks/V2退出报告h3.md)：V2 与 P1.5 基线匿名配对盲评及退出判定。
+- [reports/eval/rag_ablation/R1_summary.md](reports/eval/rag_ablation/R1_summary.md)：R1 检索消融综合报告（embedding 选择 / rerank 结论 / 生产配置建议）。
+- [docs/retrospectives/P1执行回顾.md](docs/retrospectives/P1执行回顾.md)：P1 从失败基线到最终 Deep/full 验收的执行与技术复盘。
 
-蓝图负责把握项目方向，执行方案负责实现方法和验收标准。M1/M2 已完成核心协议、第一方能力、动态来源和 YAML 工作流，P1 已完成研究质量闭环，P1.5 已完成通用规划、覆盖驱动研究和报告契约的离线实现；真实跨领域质量对标以及持久 Run Store、Evidence Ledger 等后续内容尚未完成或开始实施。
+蓝图负责把握项目方向，执行方案负责实现方法和验收标准。M1/M2 已完成核心协议、第一方能力、动态来源和 YAML 工作流，P1 已完成研究质量闭环；**V2 `answer_first` 已通过三批真实 API 盲评退出，I/J/K 与 R1 检索消融已完成**；持久 Run Store、Evidence Ledger 等 M3 内容尚未开始实施。
 
 ## 安装
 
@@ -114,7 +124,7 @@ models:
     base_url: https://your-gateway.example/v1
 
 research:
-  pipeline: answer_first  # answer_first 是当前默认；p15 启用 P1.5，p1 回退到 P1
+  pipeline: answer_first  # answer_first 是唯一管道；其他取值会归一化并提示
   profiles:
     quick:
       planner_model: fast
@@ -126,7 +136,7 @@ research:
       max_parallel_subquestions: 3
 
 embedding:
-  model: text-embedding-3-small
+  model: text-embedding-v4  # R1 消融结论：text-embedding-v4 全面胜出（zh-zh 满分 + zh-en 跨语言最强）
   base_url: https://your-gateway.example/v1
 ```
 
@@ -269,10 +279,28 @@ python scripts/eval_retrieval.py --offline
 python scripts/eval_reports.py --offline
 ```
 
-运行 P1.5 泛化深度研究离线合同评测（不调用真实 API）：
+运行 R1 检索消融（需 API key；`--stage s1` 为底座选择，`--stage s2` 为 rerank 消融）：
 
 ```powershell
-python scripts/eval_p1_5.py --out-dir .tmp/p15-eval
+python scripts/eval_rag_ablation.py --stage s1
+```
+
+运行 Web 搜索质量评测（R2）：
+
+```powershell
+python scripts/eval_web_search.py --depth standard --k 18
+```
+
+运行 V2 批量盲评（连续三批退出判定）：
+
+```powershell
+python scripts/run_v2_blind_batch.py
+```
+
+运行 P1 消融（R3）：
+
+```powershell
+python scripts/eval_ablation.py
 ```
 
 显式选择运行真实 API 冒烟测试：
@@ -280,6 +308,21 @@ python scripts/eval_p1_5.py --out-dir .tmp/p15-eval
 ```powershell
 python scripts/eval_end_to_end.py --real
 ```
+
+## 评测与实验结论（2026-08）
+
+### V2 三批盲评（deepseek-v4-flash-guan，标准深度）
+
+连续三批真实 API 运行全部 PASS（均分 3.2/5）：`policy-ai-governance` 3.3、`gis-architecture-design` 3.3、`materials-method-comparison` 3.0；三份报告均 `conf=high`。结果：`reports/evaluation/v2_batch_deepseek/batch_result.json`。盲评后完成 I/J/K（参数调优 / BILINGUAL_TERM_MAP 退出主路径 / P1+P1.5 全套删除）。
+
+### R1 RAG 检索消融（ranx，三语数据集各 10 题）
+
+- **底座选择（zh-zh）**：`text-embedding-v4` 与 `qwen3-embedding-8b` 全档 NDCG@10=1.000；`bge-m3` 0.819–0.963；`jina-embeddings-v4` 0.889–0.963。
+- **跨语言（zh-en）**：`text-embedding-v4` **0.819** > `jina-embeddings-v4` 0.815 > `qwen3-embedding-8b` 0.806 > `bge-m3` 0.682——**8B 大模型未兑现跨语言优势**。
+- **rerank（3 数据集 × 4 方法）**：12 组合中 **10 降、1 平、1 微升**（en-en jina-reranker-m0 +0.013）→ **rerank 不推荐默认**。
+- **生产配置建议**：`text-embedding-v4` + chunk `512/128` + hybrid top_k=60，不启用 rerank。
+
+完整结论与逐配置指标：`reports/eval/rag_ablation/R1_summary.md`。
 
 ## 当前离线基线
 
@@ -295,7 +338,7 @@ python scripts/eval_end_to_end.py --real
 
 这些产物包含 recall@k、hit rate、来源覆盖、无关结果比例、验收通过率、失败来源泄漏、Prompt Injection 泄漏、延迟和成本估算。
 
-P1.5 离线测试与评测共同覆盖 7 个领域、7 类问题原型的宽窄组合，RAG/Web 来源故障矩阵，动态预算与实际调度用量，Prompt Injection 清洗，以及 `ReportOutline/SectionContract` 到章节证据的追溯。当前基线为 P1.5 定向 `75 passed`、全量 `444 passed`；真实跨领域报告运行、Token/成本/延迟记录和匿名盲评必须显式批准预算后单独执行。
+全量测试基线：**287 passed**（`python -m pytest -q`）；R1 三语评测集关键词自检 100% 命中（`data/rag_eval/`）。真实 API 盲评与 R1 消融已于 2026-08-01 执行，无需再批准预算。
 
 ## 示例
 
