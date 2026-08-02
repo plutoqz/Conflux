@@ -18,50 +18,21 @@ import time
 from datetime import datetime, date
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from conflux.evaluation_v2 import (
+    V2_REVIEW_DIMENSIONS as RUBRIC_DIMENSIONS,
+    build_v2_review_prompt,
+    normalize_v2_review,
+)
+from conflux.p1_evaluation import PAIRWISE_SYSTEM
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CASES_FILE = PROJECT_ROOT / "evaluation" / "generalized_research_representative_set.json"
 OUTPUT_DIR = PROJECT_ROOT / "reports" / "evaluation" / "v2_batch_deepseek"
 RESULT_FILE = OUTPUT_DIR / "batch_result.json"
 
 ALREADY_RUN = {"gis-limitations", "software-agent-limitations", "empty-rag-policy"}
-
-RUBRIC_DIMENSIONS = (
-    "factual_citation_match",
-    "scope_and_coverage",
-    "mechanism_rigor",
-    "quantitative_and_implementation_detail",
-    "comparative_synthesis",
-    "decision_value",
-)
-
-BLIND_SYSTEM = (
-    "You are an independent research quality reviewer. Score the report objectively. "
-    "Output valid JSON only, no markdown or commentary."
-)
-
-BLIND_PROMPT_TEMPLATE = """Score each dimension 1-5 (1=poor, 5=excellent):
-
-- factual_citation_match: 1=core factual errors; 3=mostly correct but overconfident; 5=key facts, boundaries and citations all accurate.
-- scope_and_coverage: 1=covers only one narrow area; 3=covers about half of important dimensions; 5=all important dimensions have substance.
-- mechanism_rigor: 1=lists conclusions only; 3=some causal explanation; 5=persistent mechanism, cause-effect, tradeoffs, boundaries.
-- quantitative_and_implementation_detail: 1=no concrete examples/data; 3=few weakly-connected examples; 5=core dimensions have direct verifiable cases.
-- comparative_synthesis: 1=fragmented or source-stitched; 3=cross-dimension links but repetitive; 5=coherent whole with cross-section comparison and synthesis.
-- decision_value: 1=no suggestions or sloganeering; 3=relevant suggestions but lack conditions; 5=actionable with priority, conditions and tradeoffs.
-
-Output ONLY this JSON (1-5 integers for each dimension):
-{{"scores":{{"factual_citation_match":3,"scope_and_coverage":3,"mechanism_rigor":3,"quantitative_and_implementation_detail":3,"comparative_synthesis":3,"decision_value":3}},"overall":3.0,"reason":"brief comment","is_empty":false}}
-
-Evaluation date: {date}
-Research question: {query}
-
-Report text:
-{report}
-
-Notes:
-- If the report is nearly empty (<200 chars of body), set is_empty=true, all scores=1
-- Content marked as "analysis judgment" or "model analysis" should NOT be penalized, but score 2-3 if lacking concrete evidence
-- Do NOT penalize short reports if they substantively answer the core question
-"""
 
 SUCCESS_THRESHOLD = 3.0
 
@@ -248,25 +219,20 @@ def _fail_entry(case_id: str, query: str, elapsed: float, error: str) -> dict:
 
 
 def _blind_review_single(query: str, report: str) -> dict:
-    """Run a single-side blind review using the configured LLM."""
+    """Run a single-side blind review using the configured LLM.
+
+    复用 evaluation_v2 的评审 prompt 与分数归一化（后者复用 p1_evaluation）。
+    """
     from conflux.model_factory import create_chat_model
     from langchain_core.messages import HumanMessage, SystemMessage
 
     model = create_chat_model("balanced")
 
-    max_report_chars = 12000
-    if len(report) > max_report_chars:
-        report = report[:max_report_chars] + "\n\n[... report truncated ...]"
-
-    prompt = BLIND_PROMPT_TEMPLATE.format(
-        date=date.today().isoformat(),
-        query=query,
-        report=report,
-    )
+    prompt = build_v2_review_prompt(query, report, evaluation_date=date.today().isoformat())
 
     try:
         response = model.invoke([
-            SystemMessage(content=BLIND_SYSTEM),
+            SystemMessage(content=PAIRWISE_SYSTEM),
             HumanMessage(content=prompt),
         ])
         text = str(response.content) if hasattr(response, "content") else str(response)
@@ -298,23 +264,7 @@ def _blind_review_single(query: str, report: str) -> dict:
         else:
             return _empty_review(text)
 
-    scores = payload.get("scores", {})
-    overall = float(payload.get("overall", 0.0))
-    if overall == 0.0 and scores:
-        score_values = [float(v) for v in scores.values() if isinstance(v, (int, float))]
-        overall = sum(score_values) / len(score_values) if score_values else 1.0
-
-    validated_scores = {}
-    for dim in RUBRIC_DIMENSIONS:
-        val = scores.get(dim)
-        validated_scores[dim] = max(1, min(5, int(val))) if isinstance(val, (int, float)) else 1
-
-    return {
-        "scores": validated_scores,
-        "overall": round(overall, 1),
-        "reason": str(payload.get("reason", ""))[:500],
-        "is_empty": bool(payload.get("is_empty", False)),
-    }
+    return normalize_v2_review(payload)
 
 
 def _empty_review(raw_text: str) -> dict:

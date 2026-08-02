@@ -1652,29 +1652,13 @@ def _extract_pdf_body(raw: bytes, *, title_hint: str) -> tuple[str, str, str, st
 
 
 def _sanitize_untrusted_content(text: str) -> tuple[str, bool]:
-    """Remove instruction-like lines while preserving factual body content."""
+    """Remove instruction-like lines while preserving factual body content.
 
-    patterns = (
-        r"ignore (?:all |any )?(?:previous|prior) instructions",
-        r"system prompt",
-        r"developer message",
-        r"reveal (?:your |the )?(?:prompt|secret|api key)",
-        r"忽略(?:以上|之前|所有)指令",
-        r"系统提示词",
-        r"开发者消息",
-        r"泄露.*(?:密钥|提示词)",
-    )
-    kept = []
-    detected = False
-    for raw_line in str(text or "").splitlines():
-        line = re.sub(r"\s+", " ", raw_line).strip()
-        if not line:
-            continue
-        if any(re.search(pattern, line, flags=re.IGNORECASE) for pattern in patterns):
-            detected = True
-            continue
-        kept.append(line)
-    return "\n".join(kept), detected
+    委托给公共 sanitize 模块，与 RAG 路径共用同一套消毒规则。
+    """
+    from ..sanitize import sanitize_untrusted_content
+
+    return sanitize_untrusted_content(text)
 
 
 def _fetch_url_content_with_retry(

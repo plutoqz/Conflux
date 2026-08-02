@@ -19,6 +19,7 @@ from ..query_planner import (
 from ..rag.retriever import HybridRetriever
 from ..rag.reranker import SemanticReranker
 from ..research_modes import ResearchModeProfile
+from ..sanitize import sanitize_untrusted_content
 from ..source_status import AgentClaim, SourceResult
 
 
@@ -141,6 +142,7 @@ def create_rag_tool(
         parts: list[str] = []
         claims: list[AgentClaim] = []
         citations: list[dict] = []
+        sanitized_docs: list[tuple[dict, str, bool]] = []
         for i, scored in enumerate(kept_docs):
             doc = scored["doc"]
             source = str(doc.metadata.get("source", "unknown"))
@@ -152,9 +154,13 @@ def create_rag_tool(
             page_end = doc.metadata.get("page_end") or page_start
             evidence_ref = _rag_evidence_ref(source, chunk_id)
             text = doc.page_content.strip()
+            # Untrusted local documents may carry instruction-like lines;
+            # sanitize before the text becomes evidence or a claim quote.
+            text, injection_detected = sanitize_untrusted_content(text)
             paper_id = _paper_id(doc.metadata, source)
             paper_section = _paper_section(doc.metadata, text)
             evidence_class = _rag_evidence_class(doc.metadata, source)
+            sanitized_docs.append((scored, text, injection_detected))
 
             citations.append({
                 "ref": evidence_ref,
@@ -175,6 +181,7 @@ def create_rag_tool(
                 "paper_id": paper_id,
                 "paper_section": paper_section,
                 "evidence_class": evidence_class,
+                "prompt_injection_detected": injection_detected,
             })
             parts.append(
                 f"[Source {i + 1}] {evidence_ref} {source} ({chunk_id}) "
@@ -194,6 +201,8 @@ def create_rag_tool(
                     else _heuristic_directness(claim_text, paper_section)
                 )
                 claim_limitations = [limitation]
+                if injection_detected:
+                    claim_limitations.append("instruction-like content was removed from this chunk")
                 if scored.get("rerank_status") != "reviewed":
                     claim_limitations.append("semantic reranker unavailable; deterministic directness only")
                 claims.append(AgentClaim(
@@ -236,6 +245,7 @@ def create_rag_tool(
                 "citations": citations,
                 "score_breakdown": _score_breakdown_for_metadata(scored_docs),
                 "rerank_status": "reviewed" if any(item.get("rerank_status") == "reviewed" for item in scored_docs) else "unreviewed",
+                "prompt_injection_detected": any(detected for _, _, detected in sanitized_docs),
             },
         ).to_tool_text()
 

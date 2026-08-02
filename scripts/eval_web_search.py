@@ -38,9 +38,12 @@ def run_one_query(
     item: dict[str, Any],
     web_tool,
     deadline_at: float,
-    fetch_timeout: int = 8,
 ) -> dict[str, Any]:
-    """Execute one web search and collect structured metrics."""
+    """Execute one web search and collect structured metrics.
+
+    注意：fetch 层超时由 web 工具内部控制（config `web_search.fetch_timeout_seconds`
+    与 run deadline），本函数不重复传入 fetch_timeout，避免死参数误导。
+    """
     query = str(item["query"])
     t0 = time.time()
 
@@ -305,7 +308,7 @@ def main() -> int:
     for item in items:
         qid = item.get("id", "?")
         print(f"  [{qid}] {item['query'][:60]} ... ", end="", flush=True)
-        result = run_one_query(item, web_tool, deadline_at, fetch_timeout=args.timeout)
+        result = run_one_query(item, web_tool, deadline_at)
         results.append(result)
         print(f"{result.get('result_count', 0)} results, {result['elapsed_seconds']}s")
         time.sleep(0.5)  # rate-limit between queries
