@@ -14,7 +14,9 @@ Evidence strength model (ascending):
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,7 @@ from conflux.core.p2_contracts import (
     ProjectImpactSuggestion,
     ProjectPaperLink,
     ProjectResearchContext,
+    RadarRunStats,
     SearchIntent,
 )
 from conflux.paper_ingestion.pdf_downloader import PDFDownloader
@@ -46,6 +49,8 @@ def run_deep_analysis(
     *,
     download_dir: str | Path | None = None,
     max_papers: int = 5,
+    llm_model: Any = None,
+    stats: RadarRunStats | None = None,
 ) -> list[ProjectImpactSuggestion]:
     """Run evidence-backed deep analysis on top-N papers.
 
@@ -57,6 +62,10 @@ def run_deep_analysis(
     intents: Search intents for the run.
     download_dir: Optional PDF cache directory.
     max_papers: Maximum papers to deep-analyze (config.deep_read_limit).
+    llm_model: Optional chat model for semantic deep analysis.  When None,
+        the deterministic keyword-based analysis is used (legacy behavior).
+    stats: Optional RadarRunStats to record LLM telemetry (calls, tokens,
+        elapsed ms, fallback count).
 
     Returns a list of ProjectImpactSuggestion objects, each with evidence_refs.
     """
@@ -74,6 +83,8 @@ def run_deep_analysis(
             context=context,
             intents=intents,
             downloader=downloader,
+            llm_model=llm_model,
+            stats=stats,
         )
         suggestions.extend(paper_suggestions)
 
@@ -99,8 +110,16 @@ def _analyze_one_paper(
     context: ProjectResearchContext,
     intents: list[SearchIntent],
     downloader: PDFDownloader | None,
+    llm_model: Any = None,
+    stats: RadarRunStats | None = None,
 ) -> list[ProjectImpactSuggestion]:
-    """Deep-analyze one paper: download → extract → chunk → suggest."""
+    """Deep-analyze one paper: download → extract → chunk → suggest.
+
+    When ``llm_model`` is provided, a semantic LLM analysis is attempted first
+    (abstract-first, full-text chunks when available).  Any failure — network,
+    invalid JSON, or empty output — falls back to the deterministic keyword
+    analysis so the radar never loses a paper to an LLM outage.
+    """
     suggestions: list[ProjectImpactSuggestion] = []
     paper_id = paper_dict.get("id", link.paper_identity.canonical_id)
     run_id = hashlib.sha256(f"{paper_id}-{context.project_revision}".encode()).hexdigest()[:8]
@@ -127,7 +146,26 @@ def _analyze_one_paper(
     if not chunks:
         evidence_scope = "metadata_only"
 
-    # Step 3: Score sections against research questions
+    # Step 3: Semantic LLM analysis (abstract-first; full-text chunks when
+    # available).  Deterministic analysis remains the safety net.
+    if llm_model is not None:
+        llm_suggestions, telemetry = _llm_analyze_paper(
+            link=link,
+            paper_dict=paper_dict,
+            context=context,
+            chunks=chunks,
+            run_id=run_id,
+            llm_model=llm_model,
+        )
+        if stats is not None:
+            stats.llm_calls += telemetry["calls"]
+            stats.llm_total_tokens += telemetry["total_tokens"]
+            stats.llm_elapsed_ms += telemetry["elapsed_ms"]
+            stats.llm_fallback_count += 1 if telemetry["fell_back"] else 0
+        if llm_suggestions:
+            return llm_suggestions
+
+    # Step 4: Deterministic keyword analysis (legacy fallback)
     scored_chunks = _score_chunks(chunks, context)
 
     # Step 4: Generate suggestions based on evidence
@@ -173,6 +211,183 @@ def _analyze_one_paper(
             confidence=0.5,
         ))
 
+    return suggestions
+
+
+# ── LLM deep analysis ──────────────────────────────────────────────
+
+LLM_ANALYSIS_SYSTEM = (
+    "你是一名研究雷达分析员。给定一篇论文和项目研究上下文，"
+    "判断该论文对项目的价值并给出可执行的建议。"
+    "只输出有效 JSON，不要输出其他文字。"
+)
+
+LLM_ANALYSIS_PROMPT = """分析以下论文对项目研究的影响，输出结构化建议。
+
+## 项目研究上下文
+- 总体目标：{overall_goal}
+- 研究问题：{research_questions}
+- 活跃里程碑：{milestones}
+- 已知证据缺口：{gaps}
+
+## 论文
+- 标题：{title}
+- 作者：{authors}
+- 年份：{year}
+- 摘要：{abstract}
+
+## 论文全文节选（按相关性排序，可能截断）
+{chunks_text}
+
+## 要求
+1. 判断论文与项目研究的相关性 relevance（0.0-1.0）。
+2. 给出 1-4 条建议，每条建议必须：
+   - type 取值之一：link_evidence / propose_experiment / create_risk / update_search_intent
+   - summary：一句话说明论文如何影响项目
+   - rationale：具体依据，引用论文内容（1-2 句）
+   - evidence_refs：引用上述全文节选中的证据（如 p1:c0），仅摘要可用时填 ["abstract"]
+   - confidence：0.0-1.0
+   - target_id：命中的缺口 id（如有）或空字符串
+3. 仅当论文确实与项目相关时才建议 link_evidence；相关性低于 0.3 时建议数组可为空。
+
+仅输出 JSON：
+{{"relevance": 0.0, "suggestions": [{{"type": "link_evidence", "summary": "", "rationale": "", "evidence_refs": [], "confidence": 0.0, "target_id": ""}}]}}"""
+
+
+def _llm_analyze_paper(
+    link: ProjectPaperLink,
+    paper_dict: dict[str, Any],
+    context: ProjectResearchContext,
+    chunks: list[dict[str, Any]],
+    run_id: str,
+    llm_model: Any,
+) -> tuple[list[ProjectImpactSuggestion], dict[str, Any]]:
+    """Semantic LLM analysis with deterministic fallback.
+
+    Returns (suggestions, telemetry) where telemetry contains calls,
+    total_tokens, elapsed_ms and fell_back.  An empty suggestion list signals
+    the caller to fall back to the deterministic analysis.
+    """
+    telemetry = {"calls": 1, "total_tokens": 0, "elapsed_ms": 0, "fell_back": False}
+    started = time.monotonic()
+
+    # Build the prompt — abstract-first, top full-text chunks when available.
+    chunks_text = _llm_chunk_preview(chunks)
+    abstract = str(paper_dict.get("abstract") or "").strip()
+    prompt = LLM_ANALYSIS_PROMPT.format(
+        overall_goal=str(context.overall_goal or ""),
+        research_questions="\n".join(f"- {rq}" for rq in context.research_questions) or "-",
+        milestones="\n".join(f"- {ms}" for ms in context.active_milestones) or "-",
+        gaps="\n".join(f"- {g.description}" for g in context.evidence_gaps) or "无",
+        title=str(paper_dict.get("title") or ""),
+        authors=", ".join(str(a) for a in (paper_dict.get("authors") or [])[:5]) or "未知",
+        year=str(paper_dict.get("year") or paper_dict.get("published_at") or "未知"),
+        abstract=abstract or "（无摘要）",
+        chunks_text=chunks_text,
+    )
+
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        response = llm_model.invoke([
+            SystemMessage(content=LLM_ANALYSIS_SYSTEM),
+            HumanMessage(content=prompt),
+        ])
+        content = str(response.content) if hasattr(response, "content") else str(response)
+        # Token telemetry from usage metadata (best-effort).
+        usage = getattr(response, "usage_metadata", None) or {}
+        telemetry["total_tokens"] = int(usage.get("total_tokens") or 0)
+    except Exception:
+        telemetry["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        telemetry["fell_back"] = True
+        return [], telemetry
+
+    payload = _parse_llm_json(content)
+    telemetry["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+    if payload is None:
+        telemetry["fell_back"] = True
+        return [], telemetry
+
+    suggestions = _llm_payload_to_suggestions(
+        payload=payload,
+        link=link,
+        run_id=run_id,
+    )
+    if not suggestions:
+        telemetry["fell_back"] = True
+    return suggestions, telemetry
+
+
+def _llm_chunk_preview(chunks: list[dict[str, Any]], limit: int = 4000) -> str:
+    """Build a bounded text preview from the top chunks (abstract-first)."""
+    if not chunks:
+        return "（无全文）"
+    parts = []
+    budget = limit
+    for chunk in chunks:
+        text = str(chunk.get("text") or "").strip()
+        if not text:
+            continue
+        if budget <= 0:
+            break
+        piece = text[:budget]
+        parts.append(f"[p{chunk.get('page', 0)}:c{chunk.get('chunk_idx', 0)}] {piece}")
+        budget -= len(piece)
+    return "\n".join(parts) or "（无全文）"
+
+
+def _parse_llm_json(content: str) -> dict[str, Any] | None:
+    """Extract the JSON object from a model response, tolerating fences."""
+    text = str(content or "").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        return json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def _llm_payload_to_suggestions(
+    payload: dict[str, Any],
+    link: ProjectPaperLink,
+    run_id: str,
+) -> list[ProjectImpactSuggestion]:
+    """Map the LLM JSON payload onto the ProjectImpactSuggestion protocol."""
+    suggestions: list[ProjectImpactSuggestion] = []
+    raw_items = payload.get("suggestions") or []
+    if not isinstance(raw_items, list):
+        return suggestions
+
+    valid_types = {t.value for t in ImpactSuggestionType}
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        type_name = str(item.get("type") or "").strip()
+        if type_name not in valid_types:
+            continue
+        summary = str(item.get("summary") or "").strip()
+        if not summary:
+            continue
+        raw = f"{link.project_id}-{link.paper_identity.canonical_id}-{type_name}-{summary[:40]}"
+        sid = hashlib.sha256(raw.encode()).hexdigest()[:12]
+        try:
+            confidence = max(0.0, min(1.0, float(item.get("confidence") or 0.0)))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        suggestions.append(ProjectImpactSuggestion(
+            id=sid,
+            project_id=link.project_id,
+            paper_identity=link.paper_identity,
+            type=ImpactSuggestionType(type_name),
+            target_id=str(item.get("target_id") or ""),
+            summary=summary,
+            rationale=str(item.get("rationale") or ""),
+            evidence_refs=[str(r) for r in (item.get("evidence_refs") or []) if str(r).strip()],
+            confidence=round(confidence, 2),
+            status="proposed",
+            created_by_run=run_id,
+        ))
     return suggestions
 
 

@@ -107,6 +107,12 @@ def run_paper_radar(
     # Step 7: Run deep analysis on top-N papers (D: full-text evidence)
     suggestions: list[ProjectImpactSuggestion] = []
     deep_read = 0
+    # Stats are created up-front so deep analysis can record LLM telemetry.
+    stats = RadarRunStats(
+        project_id=project.id,
+        run_id=run_id,
+        started_at=__import__("datetime").datetime.utcnow(),
+    )
     if config.deep_read_limit > 0 and filtered_papers:
         deep_pairs = [
             (link, paper_map.get(link.paper_identity.canonical_id, {}).to_dict()
@@ -114,12 +120,18 @@ def run_paper_radar(
              else {"id": link.paper_identity.canonical_id})
             for link in links
         ]
+        # Semantic LLM deep analysis (Phase P2): review_model is a chat model
+        # created by the caller; llm_review gates the LLM path.  Without it,
+        # deterministic keyword analysis is used as the safety net.
+        llm_model = review_model if (llm_review and review_model is not None) else None
         suggestions = run_deep_analysis(
             deep_pairs,
             context,
             intents,
             download_dir=(Path(out_dir) / "pdf_cache") if out_dir else None,
             max_papers=config.deep_read_limit,
+            llm_model=llm_model,
+            stats=stats,
         )
         deep_read = config.deep_read_limit
 
@@ -128,28 +140,21 @@ def run_paper_radar(
         _write_radar_output(out_dir, project.id, run_id, context, intents, queries, links)
 
     elapsed = time.time() - started_at
-    started_dt = __import__("datetime").datetime.utcnow()
-
-    stats = RadarRunStats(
-        project_id=project.id,
-        run_id=run_id,
-        total_candidates=len(all_papers),
-        after_dedup=len(unique_papers),
-        after_negative_filter=len(filtered_papers),
-        after_coarse_rank=len(filtered_papers),
-        shortlisted=sum(1 for l in links if l.status == PaperLinkStatus.SHORTLISTED),
-        deep_read=deep_read,
-        saved=sum(1 for l in links if l.status == PaperLinkStatus.SAVED),
-        rejected=sum(1 for l in links if l.status == PaperLinkStatus.REJECTED),
-        suggestions_proposed=len(suggestions),
-        sources_used=[s.value for s in config.sources],
-        failed_sources=failed_sources,
-        intent_count=len(intents),
-        query_count=len(queries),
-        started_at=started_dt,
-        finished_at=__import__("datetime").datetime.utcnow(),
-        elapsed_seconds=elapsed,
-    )
+    stats.total_candidates = len(all_papers)
+    stats.after_dedup = len(unique_papers)
+    stats.after_negative_filter = len(filtered_papers)
+    stats.after_coarse_rank = len(filtered_papers)
+    stats.shortlisted = sum(1 for l in links if l.status == PaperLinkStatus.SHORTLISTED)
+    stats.deep_read = deep_read
+    stats.saved = sum(1 for l in links if l.status == PaperLinkStatus.SAVED)
+    stats.rejected = sum(1 for l in links if l.status == PaperLinkStatus.REJECTED)
+    stats.suggestions_proposed = len(suggestions)
+    stats.sources_used = [s.value for s in config.sources]
+    stats.failed_sources = failed_sources
+    stats.intent_count = len(intents)
+    stats.query_count = len(queries)
+    stats.finished_at = __import__("datetime").datetime.utcnow()
+    stats.elapsed_seconds = elapsed
 
     return RadarRunResult(
         project_id=project.id,

@@ -279,6 +279,11 @@ class RadarRunStats(BaseModel):
     failed_sources: list[str] = Field(default_factory=list)
     intent_count: int = 0
     query_count: int = 0
+    # LLM deep-analysis telemetry (Phase P2 real-API integration)
+    llm_calls: int = 0
+    llm_total_tokens: int = 0
+    llm_elapsed_ms: int = 0
+    llm_fallback_count: int = 0
     started_at: datetime = Field(default_factory=datetime.utcnow)
     finished_at: datetime | None = None
     elapsed_seconds: float = 0.0
