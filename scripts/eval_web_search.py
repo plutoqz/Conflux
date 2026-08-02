@@ -78,8 +78,10 @@ def _parse_web_result(raw: str) -> dict[str, Any]:
     Conflux web search returns formatted text with sections:
     - 检索统计: hit count, fetch count
     - 有效证据: evidence items
-    - Each evidence item starts with [N]
+    - Each evidence item starts with [Fetched N] or [RunScoped N]
     """
+    import re
+
     lines = raw.split("\n")
 
     hit_count = 0
@@ -88,6 +90,9 @@ def _parse_web_result(raw: str) -> dict[str, Any]:
     evidence_items = 0
     total_result_chars = len(raw)
 
+    fetched_prefix = re.compile(r"^\[(?:Fetched|RunScoped) (\d+)\]")
+    legacy_prefix = re.compile(r"^\[\d+\]")
+
     for line in lines:
         line_s = line.strip()
         if not line_s:
@@ -95,7 +100,6 @@ def _parse_web_result(raw: str) -> dict[str, Any]:
 
         # Count hits: "共 N 条结果" or "返回 N 条"
         if "条结果" in line_s or "条命中" in line_s:
-            import re
             nums = re.findall(r"(\d+)\s*条", line_s)
             if nums:
                 hit_count = max(hit_count, int(nums[0]))
@@ -106,16 +110,23 @@ def _parse_web_result(raw: str) -> dict[str, Any]:
         elif "抓取失败" in line_s or "fetch_failed" in line_s.lower():
             fetch_failed += 1
 
-        # Count evidence items: each line starting with [N]
-        import re
-        if re.match(r"^\[\d+\]", line_s) and len(line_s) > 8:
+        # Count evidence items: lines starting with [Fetched N] / [RunScoped N]
+        # (current format) or legacy [N] (kept for backward compatibility).
+        m = fetched_prefix.match(line_s)
+        if m:
+            evidence_items += 1
+            fetch_success += 1
+            hit_count = max(hit_count, int(m.group(1)))
+        elif legacy_prefix.match(line_s) and len(line_s) > 8:
             evidence_items += 1
 
     # Estimate from raw text if explicit counts not found
     if hit_count == 0:
-        # Fallback: count lines starting with [N]
-        import re
-        hit_count = len([l for l in lines if re.match(r"^\[\d+\]", l.strip())])
+        # Fallback: count lines starting with [Fetched N] / [RunScoped N]
+        hit_count = len([l for l in lines if fetched_prefix.match(l.strip())])
+        # Or legacy [N] lines
+        if hit_count == 0:
+            hit_count = len([l for l in lines if legacy_prefix.match(l.strip())])
         # Or count "来源:" markers
         if hit_count == 0:
             hit_count = sum(1 for l in lines if "来源:" in l or "source:" in l.lower())
