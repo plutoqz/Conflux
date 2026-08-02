@@ -719,6 +719,13 @@ def create_embedding_model() -> Embeddings:
         key = _resolve(cfg, "api_key", "OPENAI_API_KEY")
         if key:
             kwargs["api_key"] = key
+        # dmxapi / openai_compatible adapters reject tiktoken token-id input;
+        # disable tiktoken so the wrapper sends plain text lists instead.
+        # dmxapi also enforces a ≤20 batch-size limit on embeddings.
+        if provider == "openai_compatible":
+            kwargs["tiktoken_enabled"] = False
+            kwargs["check_embedding_ctx_length"] = False
+            kwargs["chunk_size"] = 10
         return OpenAIEmbeddings(**kwargs)
     elif provider == "ollama":
         from langchain_ollama import OllamaEmbeddings
