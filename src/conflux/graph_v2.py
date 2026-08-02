@@ -367,14 +367,107 @@ def _deadline_remaining(state: dict[str, Any]) -> float:
     return 9999.0
 
 
+# ============================================================
+# Agent status bar (Phase C)
+# ============================================================
+# 裁剪版状态栏：两句（stage + budget），注入系统提示尾部，对 KV Cache
+# 前缀影响最小。仅当剩余预算 <30% 时追加告警行。不注入完整运行状态。
+
+BUDGET_WARNING_LINE = "⚠️ Keep answers concise, you are near the budget limit."
+
+_STAGE_LABELS = {
+    "decompose": "decompose query",
+    "retrieve": "retrieve evidence",
+    "generate": "generate section",
+    "synthesize": "synthesize report",
+    "audit": "audit & factcheck",
+    "factcheck": "factcheck verification",
+    "finalize": "finalize report",
+}
+
+
+def _token_budget_remaining(model: Any) -> tuple[int, int] | None:
+    """Best-effort read of the run token budget (used, limit)."""
+    try:
+        budget = getattr(model, "_budget", None)
+        if budget is None:
+            return None
+        telemetry = budget.telemetry or {}
+        limit = int(telemetry.get("limit_tokens") or 0)
+        used = int(telemetry.get("charged_tokens") or 0)
+        if limit <= 0:
+            return None
+        return used, limit
+    except Exception:
+        return None
+
+
+def status_bar(state: dict[str, Any], model: Any = None, *, section_index: int | None = None, section_total: int | None = None) -> str:
+    """Build the two-line status bar appended to system prompts.
+
+    stage: "generate section 2/3"
+    budget: "remaining ~50s / ~35k tokens"
+
+    Returns an empty string when no deadline and no token budget are known
+    (keeps legacy callers unchanged).
+    """
+    stage = str(state.get("_pipeline_stage") or "init")
+    label = _STAGE_LABELS.get(stage, stage)
+    if stage == "generate" and section_index is not None and section_total:
+        label = f"{label} {section_index}/{section_total}"
+
+    remaining_s = _deadline_remaining(state)
+    deadline_known = bool(state.get("_deadline_at"))
+
+    token = _token_budget_remaining(model) if model is not None else None
+    token_known = token is not None
+
+    if not deadline_known and not token_known:
+        return ""
+
+    budget_parts: list[str] = []
+    if deadline_known:
+        budget_parts.append(f"remaining ~{int(remaining_s)}s")
+    if token_known:
+        used, limit = token
+        budget_parts.append(f"{limit - used} tokens left")
+    budget = " / ".join(budget_parts)
+
+    lines = [
+        f"stage: \"{label}\"",
+        f"budget: \"{budget}\"",
+    ]
+
+    # Budget warning: <30% of either deadline or token budget.
+    warning = False
+    if deadline_known and remaining_s >= 0:
+        total_window = _total_window_seconds(state)
+        if total_window > 0 and remaining_s / total_window < 0.3:
+            warning = True
+    if token_known and limit > 0 and (limit - used) / limit < 0.3:
+        warning = True
+    if warning:
+        lines.append(BUDGET_WARNING_LINE)
+
+    return "\n" + "\n".join(lines)
+
+
+def _total_window_seconds(state: dict[str, Any]) -> float:
+    started = state.get("_started_at")
+    deadline = state.get("_deadline_at")
+    if started and deadline:
+        return max(0.0, float(deadline) - float(started))
+    return 0.0
+
+
 def _model_available(state: dict[str, Any], minimum: float = 20.0) -> bool:
     return _deadline_remaining(state) >= minimum
 
 
-def _invoke_json(model: Any, system: str, prompt: str) -> tuple[str, dict[str, Any]]:
+def _invoke_json(model: Any, system: str, prompt: str, *, status: str = "") -> tuple[str, dict[str, Any]]:
     try:
         response = model.invoke([
-            SystemMessage(content=system),
+            SystemMessage(content=system + status),
             HumanMessage(content=prompt),
         ])
         content = str(response.content) if hasattr(response, "content") else str(response)
@@ -390,10 +483,10 @@ def _invoke_json(model: Any, system: str, prompt: str) -> tuple[str, dict[str, A
         return "", {}
 
 
-def _invoke_text(model: Any, system: str, prompt: str) -> str:
+def _invoke_text(model: Any, system: str, prompt: str, *, status: str = "") -> str:
     try:
         response = model.invoke([
-            SystemMessage(content=system),
+            SystemMessage(content=system + status),
             HumanMessage(content=prompt),
         ])
         return str(response.content) if hasattr(response, "content") else str(response)
@@ -502,7 +595,8 @@ def decompose_node(state: dict[str, Any], model: Any, profile: ResearchModeProfi
     max_subquestions = str(profile.max_subquestions) if profile else "3-5"
     query = state["query"]
     prompt = DECOMPOSE_PROMPT.format(today=date.today().isoformat(), query=query, max_subquestions=max_subquestions)
-    _, payload = _invoke_json(model, DECOMPOSE_SYSTEM, prompt)
+    status = status_bar(state, model)
+    _, payload = _invoke_json(model, DECOMPOSE_SYSTEM, prompt, status=status)
 
     core_question = str(payload.get("core_question") or "").strip() or query
     sub_questions_raw = list(payload.get("sub_questions") or [])
@@ -622,6 +716,7 @@ def _generate_section(
     citation_map: dict[str, str],
     model: Any,
     target_length: int = 3000,
+    status: str = "",
 ) -> SectionResult:
     sq_id = str(sub_question.get("id") or "")
     title = str(sub_question.get("question") or "")
@@ -649,7 +744,7 @@ def _generate_section(
 
     try:
         response = model.invoke([
-            SystemMessage(content=SECTION_SYSTEM),
+            SystemMessage(content=SECTION_SYSTEM + status),
             HumanMessage(content=prompt),
         ])
         content = _strip_think(str(response.content))
@@ -705,10 +800,18 @@ def generate_node(state: dict[str, Any], model: Any, profile: ResearchModeProfil
         batch = sub_questions[batch_start:batch_start + max_concurrency]
         futures: list[Future[SectionResult]] = []
         with ThreadPoolExecutor(max_workers=len(batch)) as executor:
-            for sq in batch:
+            for offset, sq in enumerate(batch):
+                section_index = batch_start + offset + 1
+                status = status_bar(
+                    state,
+                    model,
+                    section_index=section_index,
+                    section_total=len(sub_questions),
+                )
                 futures.append(executor.submit(
                     _generate_section,
                     sq, core_question, rag_results, web_results, citation_map, model,
+                    status=status,
                 ))
         for future in futures:
             try:
@@ -773,6 +876,7 @@ def synthesize_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
                     model,
                     "你是一名研究分析师。检索失败时，基于背景知识给出诚实的分析判断。",
                     fallback_prompt,
+                    status=status_bar(state, model),
                 )
             except Exception:
                 pass
@@ -809,7 +913,7 @@ def synthesize_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
     cross_synthesis = ""
     if _model_available(state, minimum=15.0):
         try:
-            _, payload = _invoke_json(model, GLOBAL_SYSTEM, prompt)
+            _, payload = _invoke_json(model, GLOBAL_SYSTEM, prompt, status=status_bar(state, model))
             direct_answer = str(payload.get("direct_answer") or "").strip()
             cross_synthesis = str(payload.get("cross_synthesis") or "").strip()
         except Exception:
@@ -918,7 +1022,12 @@ def audit_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
 
     credibility_text = ""
     if _model_available(state, minimum=10.0):
-        credibility_text = _invoke_text(model, CREDIBILITY_SYSTEM, prompt)
+        credibility_text = _invoke_text(
+            model,
+            CREDIBILITY_SYSTEM,
+            prompt,
+            status=status_bar(state, model),
+        )
 
     if not credibility_text:
         credibility_text = (
