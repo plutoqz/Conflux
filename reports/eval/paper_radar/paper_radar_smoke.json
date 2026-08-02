@@ -1,0 +1,249 @@
+{
+  "profile": "profiles/example_gis_agent.yaml",
+  "deep_read_limit": 3,
+  "with_pdf": false,
+  "stats": {
+    "project_id": "radar-smoke",
+    "run_id": "78d3116abd91",
+    "total_candidates": 29,
+    "after_dedup": 17,
+    "after_negative_filter": 17,
+    "after_coarse_rank": 17,
+    "shortlisted": 0,
+    "deep_read": 3,
+    "saved": 0,
+    "rejected": 0,
+    "suggestions_proposed": 6,
+    "sources_used": [
+      "arxiv"
+    ],
+    "failed_sources": [],
+    "intent_count": 5,
+    "query_count": 5,
+    "llm_calls": 3,
+    "llm_total_tokens": 4889,
+    "llm_elapsed_ms": 36702,
+    "llm_fallback_count": 1,
+    "started_at": "2026-08-02T15:32:28.339615",
+    "finished_at": "2026-08-02T15:33:05.055258",
+    "elapsed_seconds": 47.82742238044739
+  },
+  "suggestions": [
+    {
+      "id": "564a2afdaa03",
+      "project_id": "radar-smoke",
+      "paper_identity": {
+        "source": "arxiv",
+        "canonical_id": "2607.28625v1",
+        "version": "",
+        "doi": "",
+        "title_hash": ""
+      },
+      "type": "link_evidence",
+      "target_id": "0d829d9b22b0",
+      "summary": "Found evidence in 'ACE-Data-0: Human-Centric Ambient Capture as Embodied Data Engine' relevant to project context.",
+      "rationale": "Based on analysis of full text analysis. Evidence refs: p0:c0.",
+      "evidence_refs": [
+        "p0:c0"
+      ],
+      "confidence": 0.74,
+      "status": "proposed",
+      "created_by_run": "e8defa28",
+      "created_at": "2026-08-02T15:32:33.726618"
+    },
+    {
+      "id": "bd6c37994adc",
+      "project_id": "radar-smoke",
+      "paper_identity": {
+        "source": "arxiv",
+        "canonical_id": "2607.28625v1",
+        "version": "",
+        "doi": "",
+        "title_hash": ""
+      },
+      "type": "propose_experiment",
+      "target_id": "",
+      "summary": "Method from 'ACE-Data-0: Human-Centric Ambient Capture as Embodied Data Engine' may be adaptable to experimental design.",
+      "rationale": "Based on analysis of full text analysis. Evidence refs: p0:c0.",
+      "evidence_refs": [
+        "p0:c0"
+      ],
+      "confidence": 0.7,
+      "status": "proposed",
+      "created_by_run": "e8defa28",
+      "created_at": "2026-08-02T15:32:33.726618"
+    },
+    {
+      "id": "a1e5ebbf4c81",
+      "project_id": "radar-smoke",
+      "paper_identity": {
+        "source": "arxiv",
+        "canonical_id": "2607.28618v1",
+        "version": "",
+        "doi": "",
+        "title_hash": ""
+      },
+      "type": "propose_experiment",
+      "target_id": "",
+      "summary": "Replicate AskChem's claim extraction and evidence graph construction on a geospatial literature corpus to evaluate whether provenance-carrying atomic claims improve the auditability of GIS agent outputs.",
+      "rationale": "AskChem converts full papers into typed, grounded claims with verifiable DOIs and verbatim quotes, which directly addresses the research question 'How should agent systems verify, repair and audit geospatial processing steps?'. Applying the same pipeline to geospatial methods papers could produce a knowledge base where GIS agent reasoning steps link to citable evidence.",
+      "evidence_refs": [
+        "p0:c0"
+      ],
+      "confidence": 0.85,
+      "status": "proposed",
+      "created_by_run": "2c383a48",
+      "created_at": "2026-08-02T15:32:48.488368"
+    },
+    {
+      "id": "58cb07dec166",
+      "project_id": "radar-smoke",
+      "paper_identity": {
+        "source": "arxiv",
+        "canonical_id": "2607.28618v1",
+        "version": "",
+        "doi": "",
+        "title_hash": ""
+      },
+      "type": "update_search_intent",
+      "target_id": "",
+      "summary": "Incorporate 'claim-centered retrieval' and 'evidence graph' as candidate architectural patterns when designing knowledge-grounded GIS agents.",
+      "rationale": "The paper demonstrates that changing the retrieval unit from documents to provenance-carrying claims leads to higher citation accuracy (100% resolvable DOIs) and citation density, which suggests a reusable pattern for verifying geospatial data fusion steps.",
+      "evidence_refs": [
+        "p0:c0"
+      ],
+      "confidence": 0.8,
+      "status": "proposed",
+      "created_by_run": "2c383a48",
+      "created_at": "2026-08-02T15:32:48.488368"
+    },
+    {
+      "id": "266444a273d6",
+      "project_id": "radar-smoke",
+      "paper_identity": {
+        "source": "arxiv",
+        "canonical_id": "2607.28609v1",
+        "version": "",
+        "doi": "",
+        "title_hash": ""
+      },
+      "type": "propose_experiment",
+      "target_id": "",
+      "summary": "将OSReward的跨平台代理轨迹评估框架迁移到GIS Agent实验，验证其能否可靠判断空间数据处理步骤",
+      "rationale": "论文发现当前VLM评审普遍存在宽容偏差，无法可靠区分代理任务成败，且开源模型OS-Shepherd可低成本提供稳定奖励信号。这为GIS Agent的验证与审计提供了可复用的评估方法，但需检验其对地理空间工作流的适用性。",
+      "evidence_refs": [
+        "abstract"
+      ],
+      "confidence": 0.6,
+      "status": "proposed",
+      "created_by_run": "212310d0",
+      "created_at": "2026-08-02T15:33:05.050714"
+    },
+    {
+      "id": "b73d3c269b78",
+      "project_id": "radar-smoke",
+      "paper_identity": {
+        "source": "arxiv",
+        "canonical_id": "2607.28609v1",
+        "version": "",
+        "doi": "",
+        "title_hash": ""
+      },
+      "type": "create_risk",
+      "target_id": "",
+      "summary": "若直接采用通用VLM评审而不做领域适配，可能导致GIS Agent审计结果失准",
+      "rationale": "论文指出最先进模型仍系统性地将失败误判为成功（宽容偏差），且昂贵商业模型与低质开源模型之间存在巨大性能鸿沟。若忽略该问题，GIS Agent实验的可信度与可复现性将受到严重威胁。",
+      "evidence_refs": [
+        "abstract"
+      ],
+      "confidence": 0.65,
+      "status": "proposed",
+      "created_by_run": "212310d0",
+      "created_at": "2026-08-02T15:33:05.050714"
+    }
+  ],
+  "queries": [
+    {
+      "id": "537106a01c60",
+      "track_id": "geo_agents",
+      "source": "arxiv",
+      "query": "(GIS agent OR geospatial LLM OR spatial reasoning agent) AND (workflow OR data fusion OR knowledge graph)",
+      "categories": [
+        "cs.AI",
+        "cs.CL",
+        "cs.CV"
+      ],
+      "date_window_days": 365,
+      "max_results": 6,
+      "priority": 90,
+      "provenance": "track_manual",
+      "profile_version": "2b77816d6f722923",
+      "context_version": "b4b3e2f87bf539f5"
+    },
+    {
+      "id": "9bb81c3a1984",
+      "track_id": "geo_agents",
+      "source": "arxiv",
+      "query": "(knowledge graph geospatial OR GeoKG) AND (agent OR LLM OR retrieval augmented)",
+      "categories": [
+        "cs.AI",
+        "cs.IR"
+      ],
+      "date_window_days": 365,
+      "max_results": 6,
+      "priority": 85,
+      "provenance": "track_manual",
+      "profile_version": "2b77816d6f722923",
+      "context_version": "b4b3e2f87bf539f5"
+    },
+    {
+      "id": "39ef2fad864d",
+      "track_id": "agent_verification",
+      "source": "arxiv",
+      "query": "(agent verification OR audit trail OR provenance) AND (workflow OR execution OR geospatial)",
+      "categories": [
+        "cs.AI",
+        "cs.SE"
+      ],
+      "date_window_days": 365,
+      "max_results": 5,
+      "priority": 85,
+      "provenance": "track_manual",
+      "profile_version": "2b77816d6f722923",
+      "context_version": "b4b3e2f87bf539f5"
+    },
+    {
+      "id": "9dc612f52283",
+      "track_id": "agent_verification",
+      "source": "arxiv",
+      "query": "(agent planning OR task decomposition) AND (geospatial OR GIS OR spatial)",
+      "categories": [
+        "cs.AI",
+        "cs.RO"
+      ],
+      "date_window_days": 365,
+      "max_results": 5,
+      "priority": 80,
+      "provenance": "track_manual",
+      "profile_version": "2b77816d6f722923",
+      "context_version": "b4b3e2f87bf539f5"
+    },
+    {
+      "id": "78c69b92c756",
+      "track_id": "reproducibility",
+      "source": "arxiv",
+      "query": "(reproducible research OR benchmark OR evaluation) AND (geospatial OR GIS OR spatial data)",
+      "categories": [
+        "cs.AI",
+        "cs.DB",
+        "cs.DL"
+      ],
+      "date_window_days": 730,
+      "max_results": 7,
+      "priority": 75,
+      "provenance": "track_manual",
+      "profile_version": "2b77816d6f722923",
+      "context_version": "b4b3e2f87bf539f5"
+    }
+  ]
+}
