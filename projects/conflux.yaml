@@ -56,22 +56,30 @@ plan:
     - 项目级论文状态和报告目录（reports/workbench/projects/{id}/papers/）
     - Workbench 项目 Research 视图（标签页 + 端点 + JS）
     - P2 人工标注集和验收报告（tests/test_p2_paper_radar.py，25 tests）
+  - id: phase2-usability
+    title: 阶段 2 真实使用与阻断修复
+    status: in_progress
+    description: 修复知识库模型切换、研究查询交付状态和项目监控数据口径，并由用户进行真实使用复核。
+    deliverables:
+    - 可保留旧向量的知识库完整重建流程
+    - 研究查询完整性与引用核验分离
+    - 基于当前计划和实际成果的项目监控
   - id: m3-persistent-runs
     title: M3 持久运行与初始化迁移
     status: planned
     description: 在 P2 文件模式闭环验证后，引入 SQLite Run Store，并迁移论文身份、项目关联、搜索意图、事件和审批状态。
     deliverables: []
   next_actions:
-  - 定义 ProjectResearchConfig、ProjectResearchContext、SearchIntent、ProjectPaperLink 和 ProjectImpactSuggestion 契约。
-  - 让论文 inbox 接受 project_id，并按项目隔离画像、输出、缓存和已见状态。
-  - 为研究画像增加兼容的 Track/QuerySpec，优先扩大 arXiv 与 Semantic Scholar 搜索面。
-  - 在项目页增加 Research 视图，并以审批方式处理项目行动和知识入库建议。
+  - 完成阶段 2 真实使用复核，关闭研究查询和项目监控的剩余阻断。
+  - 建立 P2 人工标注集、跨项目隔离验证和退出标准。
+  - 收集完整研究样例、各阶段耗时、实际 token usage、成本和评分数据。
+  - P2 退出后启动 M3 持久运行与初始化迁移。
   source_documents:
-  - docs/plans/execution_plan_v1.md
-  - docs/architecture.md
-  - docs/reports/m0_baseline_report.md
+  - docs/plans/执行计划v1.md
+  - docs/架构设计.md
+  - docs/plans/done/项目总体进展报告.md
   - PRODUCT.md
-  updated_at: '2026-07-20'
+  updated_at: '2026-08-04'
 refresh:
   mode: manual
   schedule_enabled: false

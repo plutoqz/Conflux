@@ -82,6 +82,10 @@ def slugify(value: str, max_length: int = 48) -> str:
 
 
 def build_markdown_report(query: str, state: dict[str, Any]) -> str:
+    if _is_v2_state(state):
+        return _strip_code_fence(
+            str(state.get("_report_markdown") or state.get("final_answer") or "")
+        ).rstrip() + "\n"
     if _is_p1_state(state):
         return _build_p1_main_report(query, state)
 
@@ -144,6 +148,11 @@ def build_markdown_report(query: str, state: dict[str, Any]) -> str:
 def _is_p1_state(state: dict[str, Any]) -> bool:
     summary = state.get("_run_summary") or {}
     return bool(state.get("_research_profile")) or str(summary.get("mode") or "").casefold() == "p1"
+
+
+def _is_v2_state(state: dict[str, Any]) -> bool:
+    summary = state.get("_run_summary") or {}
+    return bool(state.get("_report_markdown")) or str(summary.get("mode") or "").casefold() == "answer_first"
 
 
 def _build_p1_main_report(query: str, state: dict[str, Any]) -> str:
@@ -415,6 +424,106 @@ def write_report_artifacts(
         deep_evidence_json_path=deep_evidence_json_path,
         audit_markdown_path=audit_markdown_path,
     )
+
+
+def write_v2_report_artifacts(
+    query: str,
+    state: dict[str, Any],
+    output_dir: str | Path = "reports",
+) -> ReportArtifacts:
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stem = f"{stamp}-{slugify(query)}"
+    markdown_path = out_dir / f"{stem}.md"
+    html_path = out_dir / f"{stem}.html"
+    evidence_json_path = out_dir / f"{stem}.evidence.json"
+    raw_sources_path = out_dir / f"{stem}.sources.md"
+    audit_markdown_path = out_dir / f"{stem}.audit.md"
+
+    markdown = _strip_code_fence(str(state.get("_report_markdown") or state.get("final_answer") or ""))
+    evidence = build_v2_evidence_payload(state)
+    raw_sources = (
+        "# V2 原始来源输出\n\n"
+        "## RAG\n\n" + str(state.get("_rag_results") or "无") + "\n\n"
+        "## Web\n\n" + str(state.get("_web_results") or "无") + "\n"
+    )
+    audit = (
+        "# V2 运行审计\n\n"
+        "## 确定性指标\n\n" + _json_block(state.get("_audit_metrics") or {}) + "\n\n"
+        "## FactCheck\n\n" + _json_block({
+            "status": state.get("_factcheck_status") or "",
+            "findings": state.get("_factcheck_findings") or {},
+        }) + "\n"
+    )
+
+    _atomic_write_text(markdown_path, markdown.rstrip() + "\n")
+    _atomic_write_text(html_path, markdown_to_html(markdown, title=query))
+    _atomic_write_text(evidence_json_path, json.dumps(evidence, ensure_ascii=False, indent=2) + "\n")
+    _atomic_write_text(raw_sources_path, raw_sources)
+    _atomic_write_text(audit_markdown_path, audit)
+    return ReportArtifacts(
+        markdown_path=markdown_path,
+        html_path=html_path,
+        evidence_json_path=evidence_json_path,
+        raw_sources_path=raw_sources_path,
+        audit_markdown_path=audit_markdown_path,
+    )
+
+
+def build_v2_evidence_payload(state: dict[str, Any]) -> dict[str, Any]:
+    citation_map = state.get("_citation_map") or {}
+    nodes = []
+    for index, (ref, description) in enumerate(citation_map.items(), start=1):
+        source = "RAG" if "来源：RAG" in str(description) else "Web"
+        claim = str(description).split("（来源：", 1)[0].strip()
+        nodes.append({
+            "id": f"evidence-{index}",
+            "source": source,
+            "claim": claim,
+            "evidence_refs": [str(ref)],
+        })
+
+    for section in state.get("_section_results") or []:
+        if section.get("citation_refs"):
+            continue
+        for claim in section.get("key_claims") or []:
+            nodes.append({
+                "id": f"model-{len(nodes) + 1}",
+                "source": "Model",
+                "claim": str(claim),
+                "evidence_refs": [],
+            })
+
+    if not nodes and str(state.get("_direct_answer") or "").strip():
+        nodes.append({
+            "id": "model-1",
+            "source": "Model",
+            "claim": str(state["_direct_answer"])[:500],
+            "evidence_refs": [],
+        })
+
+    source_counts: dict[str, int] = {}
+    for node in nodes:
+        source = str(node["source"])
+        source_counts[source] = source_counts.get(source, 0) + 1
+
+    return {
+        "schema_version": "v2",
+        "summary": {
+            "total_nodes": len(nodes),
+            "source_counts": source_counts,
+        },
+        "source_statuses": state.get("_source_statuses") or {},
+        "nodes": nodes,
+        "citation_map": citation_map,
+        "audit_metrics": state.get("_audit_metrics") or {},
+        "factcheck": {
+            "status": state.get("_factcheck_status") or "",
+            "findings": state.get("_factcheck_findings") or {},
+        },
+        "run_summary": state.get("_run_summary") or {},
+    }
 
 
 def _strip_code_fence(text: str) -> str:

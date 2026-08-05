@@ -1,0 +1,38 @@
+# Conflux Research Profile: 智能体发展
+id: profile_85825845
+name: 智能体发展
+fields:
+- cs.AI
+- cs.MA
+- cs.CL
+research_questions:
+- 本研究关注基于大语言模型的智能体（LLM-based Agent）的框架设计与实现，重点探讨其上下文管理、多智能体协作以及自主任务执行机制。通过分析现有框架的设计哲学和发展脉络，归纳关键模块与编排模式，并在复杂任务自动化与人机协同等场景中考察其有效性与局限。研究边界聚焦于LLM驱动的智能体，不涵盖传统非学习型agent或特定领域强化学习方法。
+keywords:
+- LLM-based agents
+- agent framework design
+- multi-agent collaboration
+- context management
+- autonomous agents
+- agent orchestration
+- tool use and planning
+- agent memory
+- agent evaluation
+- prompting strategies
+- ReAct pattern
+- conversational agents
+- harness
+negative_keywords:
+- chemical agent
+- real estate agent
+- infection agent
+- biological agent
+- surfactant
+- wire harness
+- safety harness
+target_venues: []
+tracked_scholars: []
+project_paths: []
+document_paths: []
+paper_sources:
+- arxiv
+report_cadence: weekly

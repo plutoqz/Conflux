@@ -95,6 +95,7 @@ class ResearchJob:
     factcheck_status: str = ""
     pipeline: str = ""
     delivery_status: str = ""
+    quality: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, str] = field(default_factory=dict)
     error: str = ""
     current_stage: str = ""
@@ -232,6 +233,11 @@ def _state_warnings(state: dict[str, Any]) -> list[str]:
     factcheck_status = str(state.get("_factcheck_status") or "")
     if factcheck_status and factcheck_status != "passed":
         warnings.append(f"FactCheck status: {factcheck_status}")
+    quality = state.get("_audit_metrics") or {}
+    failed_sections = int(quality.get("sections_failed") or 0) if isinstance(quality, dict) else 0
+    total_sections = int(quality.get("total_sections") or 0) if isinstance(quality, dict) else 0
+    if failed_sections:
+        warnings.append(f"{failed_sections}/{total_sections} 个扩展问题未完成")
     return list(dict.fromkeys(warnings))
 
 
@@ -319,6 +325,7 @@ class JobManager:
             "factcheck_status": job.factcheck_status,
             "pipeline": job.pipeline,
             "delivery_status": job.delivery_status,
+            "quality": dict(job.quality),
             "artifacts": dict(job.artifacts),
             "report_md_path": str(job.artifacts.get("markdown_path") or ""),
             "error": job.error,
@@ -559,25 +566,13 @@ class JobManager:
             job.factcheck_status = str(state.get("_factcheck_status") or "")
             job.pipeline = str((state.get("_run_summary") or {}).get("mode") or "")
             job.delivery_status = str(state.get("_delivery_status") or "")
+            job.quality = dict(state.get("_audit_metrics") or {})
             job.artifacts.update({
                 str(key): str(value)
                 for key, value in (state.get("_report_artifacts") or {}).items()
                 if value
             })
 
-            final_markdown = job.artifacts.get("markdown_path")
-            staged_markdown = (
-                job.artifacts.get("verified_markdown_path")
-                or job.artifacts.get("draft_markdown_path")
-            )
-            if final_markdown and staged_markdown:
-                from conflux.report import promote_staged_markdown_report
-
-                promote_staged_markdown_report(staged_markdown, final_markdown)
-                if job.artifacts.get("verified_markdown_path") == staged_markdown:
-                    job.artifacts["verified_markdown_path"] = final_markdown
-                if job.artifacts.get("draft_markdown_path") == staged_markdown:
-                    job.artifacts["draft_markdown_path"] = final_markdown
             emit_stage(live_events, "final_commit", "completed", "最终提交完成")
             _persist_trace_snapshot(job, live_events, output_dir)
             job.warnings.extend(

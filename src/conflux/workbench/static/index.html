@@ -306,6 +306,16 @@
               <label class="check-row"><input id="indexDocs" type="checkbox"><span><strong>写入向量索引</strong><small>需要可用的 Embedding 能力。</small></span></label>
             </div>
             <div class="form-actions"><button id="runPromote" class="button primary" type="button"><i data-lucide="database-zap" aria-hidden="true"></i><span>开始入库</span></button></div>
+            <fieldset class="form-section settings-subsection">
+              <legend>向量索引管理</legend>
+              <div id="vectorIndexSummary" class="field-hint">正在读取 collection 状态...</div>
+              <div class="field-grid two">
+                <label>重建来源目录<input id="rebuildSourceDir" value="data/documents/papers"></label>
+                <label>新 Collection 名称<input id="rebuildCollectionName" placeholder="留空则按模型和时间自动命名"></label>
+              </div>
+              <div class="form-actions"><button id="rebuildVectorIndex" class="button secondary" type="button"><i data-lucide="refresh-cw" aria-hidden="true"></i><span>完整重建索引</span></button></div>
+              <div id="vectorCollections" class="vector-collection-list"></div>
+            </fieldset>
           </section>
           <section class="surface result-surface" id="promotionResultBand" aria-labelledby="promotionResultTitle">
             <div class="section-heading"><div><h2 id="promotionResultTitle">入库记录</h2><p>操作结果和可审计日志会保留在这里。</p></div><span id="promotionStage" class="status-pill neutral">等待开始</span></div>
@@ -332,9 +342,6 @@
               <div class="field-grid two">
                 <label>报告输出目录<input id="queryOut" value="reports/workbench/query"></label>
                 <label>思考深度<select id="queryDepth"><option value="">跟随系统默认</option><option value="quick">快速</option><option value="standard">标准</option><option value="deep">深度</option></select></label>
-                <label>Embedding 模型<input id="embeddingModel" placeholder="例如 text-embedding-3-small"></label>
-                <label>Embedding Base URL<input id="embeddingBaseUrl" placeholder="留空则复用推理模型地址"></label>
-                <label>Embedding API Key<input id="embeddingApiKey" type="password" autocomplete="off" placeholder="留空则使用已保存凭证"></label>
               </div>
             </details>
             <div class="form-actions query-actions">
@@ -443,7 +450,7 @@
               <div class="project-tab-panel" data-project-panel="plan" role="tabpanel" hidden>
                 <section class="project-detail-section project-plan-section" aria-labelledby="projectPlanTitle">
                   <div class="project-section-heading">
-                    <div><h3 id="projectPlanTitle">计划基线</h3><p id="projectOverallGoal">尚未定义总体目标</p></div>
+                    <div><h3 id="projectPlanTitle">人工计划</h3><p id="projectOverallGoal">尚未定义总体目标</p></div>
                     <div class="project-section-actions"><span id="projectMilestoneSummary" class="status-pill neutral">0 个阶段</span><button id="analyzeProjectPlan" class="button secondary compact" type="button"><i data-lucide="scan-search" aria-hidden="true"></i><span>分析项目计划</span></button></div>
                   </div>
                   <div class="charter-status-band">
@@ -455,8 +462,8 @@
                   <div class="plan-status-key"><span><i class="plan-key-dot configured" aria-hidden="true"></i>人工计划</span><span><i class="plan-key-dot verified" aria-hidden="true"></i>证据核验</span></div>
                   <ol id="projectTimeline" class="plan-timeline"></ol>
                   <div id="projectTimelineEmpty" class="inline-empty" hidden>尚未定义阶段目标。</div>
-                  <div class="plan-actual-band"><div><span>计划来源</span><strong id="projectPlanSources">项目配置</strong></div><div><span>证据核验</span><strong id="projectActualEvidence">尚未建立审计基线</strong></div></div>
-                  <div class="project-next-actions"><h3>后续计划</h3><div id="projectNextActions" class="audit-list"></div></div>
+                  <div class="plan-actual-band"><div><span>人工计划来源</span><strong id="projectPlanSources">项目配置</strong></div><div><span>最近审计证据</span><strong id="projectActualEvidence">尚未建立审计基线</strong></div></div>
+                  <div class="project-next-actions"><h3>人工确认的后续行动</h3><div id="projectNextActions" class="audit-list"></div></div>
                 </section>
 
                 <section id="planAnalysisBand" class="project-detail-section plan-analysis" aria-labelledby="planAnalysisTitle" hidden>
@@ -671,7 +678,7 @@
       <section id="model" class="view" aria-labelledby="pageTitle">
         <div class="settings-layout">
           <section class="surface settings-main" aria-labelledby="modelTitle">
-            <div class="section-heading"><div><h2 id="modelTitle">分档推理模型</h2><p>每个研究档位独立使用你配置的 OpenAI 兼容模型。</p></div></div>
+            <div class="section-heading"><div><h2 id="modelTitle">研究查询模型</h2><p>每个研究档位独立使用你配置的 OpenAI 兼容模型。</p></div></div>
             <div class="model-tier-grid">
               <fieldset class="model-tier" data-tier="quick">
                 <legend>快速档</legend>
@@ -695,9 +702,26 @@
                 <label>Temperature<input id="deepTemperature" type="number" min="0" max="2" step="0.1" value="0.2"></label>
               </fieldset>
             </div>
+            <div class="section-heading settings-subsection"><div><h2>功能模型</h2><p>项目管理和研究辅助功能分别使用独立配置。</p></div></div>
+            <div class="model-tier-grid feature-model-grid">
+              <fieldset class="model-tier"><legend>研究画像优化</legend><label>Base URL<input id="profileOptimizationBaseUrl" autocomplete="off"></label><label>模型名称<input id="profileOptimizationModelName" autocomplete="off"></label><label>API Key<input id="profileOptimizationApiKey" type="password" autocomplete="off" placeholder="使用已保存凭证，或输入新值"></label><label>Temperature<input id="profileOptimizationTemperature" type="number" min="0" max="2" step="0.1" value="0.2"></label></fieldset>
+              <fieldset class="model-tier"><legend>论文语义评审</legend><label>Base URL<input id="paperReviewBaseUrl" autocomplete="off"></label><label>模型名称<input id="paperReviewModelName" autocomplete="off"></label><label>API Key<input id="paperReviewApiKey" type="password" autocomplete="off" placeholder="使用已保存凭证，或输入新值"></label><label>Temperature<input id="paperReviewTemperature" type="number" min="0" max="2" step="0.1" value="0.2"></label></fieldset>
+              <fieldset class="model-tier"><legend>项目计划分析</legend><label>Base URL<input id="planAnalysisBaseUrl" autocomplete="off"></label><label>模型名称<input id="planAnalysisModelName" autocomplete="off"></label><label>API Key<input id="planAnalysisApiKey" type="password" autocomplete="off" placeholder="使用已保存凭证，或输入新值"></label><label>Temperature<input id="planAnalysisTemperature" type="number" min="0" max="2" step="0.1" value="0.1"></label></fieldset>
+              <fieldset class="model-tier"><legend>项目纲领生成</legend><label>Base URL<input id="projectCharterBaseUrl" autocomplete="off"></label><label>模型名称<input id="projectCharterModelName" autocomplete="off"></label><label>API Key<input id="projectCharterApiKey" type="password" autocomplete="off" placeholder="使用已保存凭证，或输入新值"></label><label>Temperature<input id="projectCharterTemperature" type="number" min="0" max="2" step="0.1" value="0.2"></label></fieldset>
+              <fieldset class="model-tier"><legend>研究运行雷达</legend><label>Base URL<input id="researchRadarBaseUrl" autocomplete="off"></label><label>模型名称<input id="researchRadarModelName" autocomplete="off"></label><label>API Key<input id="researchRadarApiKey" type="password" autocomplete="off" placeholder="使用已保存凭证，或输入新值"></label><label>Temperature<input id="researchRadarTemperature" type="number" min="0" max="2" step="0.1" value="0.2"></label></fieldset>
+              <fieldset class="model-tier"><legend>计划条目翻译</legend><label>Base URL<input id="planTranslationBaseUrl" autocomplete="off"></label><label>模型名称<input id="planTranslationModelName" autocomplete="off"></label><label>API Key<input id="planTranslationApiKey" type="password" autocomplete="off" placeholder="使用已保存凭证，或输入新值"></label><label>Temperature<input id="planTranslationTemperature" type="number" min="0" max="2" step="0.1" value="0"></label></fieldset>
+            </div>
+            <fieldset class="form-section settings-subsection">
+              <legend>Embedding</legend>
+              <div class="field-grid two">
+                <label>Base URL<input id="embeddingBaseUrl" autocomplete="off" placeholder="https://api.openai.com/v1"></label>
+                <label>模型名称<input id="embeddingModel" autocomplete="off" placeholder="例如 text-embedding-3-small"></label>
+                <label>API Key<input id="embeddingApiKey" type="password" autocomplete="off" placeholder="使用已保存凭证，或输入新值"></label>
+              </div>
+            </fieldset>
             <div class="field-grid two settings-subsection">
               <label>默认思考深度<select id="depthSelect"><option value="quick">快速 · 轻量检索</option><option value="standard" selected>标准 · 平衡质量与速度</option><option value="deep">深度 · 多轮研究</option></select></label>
-              <label>连接测试档位<select id="testTierSelect"><option value="quick">快速档</option><option value="standard" selected>标准档</option><option value="deep">深度档</option></select></label>
+              <label>连接测试模型<select id="testModelSelect"><option value="quick">研究查询 · 快速档</option><option value="standard" selected>研究查询 · 标准档</option><option value="deep">研究查询 · 深度档</option><option value="profile_optimization">研究画像优化</option><option value="paper_review">论文语义评审</option><option value="plan_analysis">项目计划分析</option><option value="project_charter">项目纲领生成</option><option value="research_radar">研究运行雷达</option><option value="plan_translation">计划条目翻译</option></select></label>
             </div>
             <fieldset class="form-section settings-subsection">
               <legend>网络搜索</legend>

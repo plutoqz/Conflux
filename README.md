@@ -91,6 +91,8 @@ python -m conflux.workbench --host 127.0.0.1 --port 8765
 python -m conflux.acceptance reports\your-report.md reports\your-report.html
 ```
 
+`acceptance` 同时支持 Phase 1/2 与 V2 `answer_first` 报告合同。V2 校验会检查三源状态、Evidence sidecar、引用解析、报告可用状态和结构化 FactCheck；历史报告不会自动补齐新增 sidecar。
+
 ## 命令行速查
 
 | 命令 | 作用 |
@@ -108,7 +110,7 @@ python -m conflux.acceptance reports\your-report.md reports\your-report.html
 
 ## 评测结果
 
-Conflux 的每个关键能力都有离线或真实 API 评测支撑，评测数据集与脚本都在仓库中。
+Conflux 已为核心研究管道、RAG、Web、Paper Radar 和安全边界建立离线或真实 API 评测。当前结果用于定位能力边界，不代表所有功能已经达到稳定产品状态。
 
 ### 真实 API 盲评（2026-08，`deepseek-v4-flash-guan`，标准深度）
 
@@ -148,8 +150,16 @@ Conflux 的每个关键能力都有离线或真实 API 评测支撑，评测数�
 
 | 项目 | 状态 |
 |---|---|
-| 单元 / 集成测试 | **287 passed**（`python -m pytest -q`） |
+| 单元 / 集成测试 | **352/352 通过；全量离线测试 68.86s** |
 | R1 三语评测集关键词自检 | 100% 命中 |
+
+### 当前已知限制（2026-08-03）
+
+- 最新三份历史 V2 真实报告的正文盲评分为 3.0–3.3 / 5；新生成 V2 报告已统一产出 Markdown、HTML、Evidence、Sources 和 Audit 并可通过 `conflux.acceptance`，历史报告不会自动补齐这些 sidecar。
+- R2 Web 人工相关性均分为 2.06 / 3，其中 6 / 18 查询不相关；时效查询和特定国家政策查询仍需改进。
+- P2 Paper Radar 已完成真实来源和 LLM 冒烟联调，尚未完成标注集、跨项目状态隔离和退出标准验证。
+- 本轮只用确定性模型和离线夹具验证完整研究产物；真实模型内容质量、分阶段耗时、Token、成本和评分数据待专项评测。
+- 运行、事件和任务尚未持久化到独立运行时；进程重启后的恢复能力属于 M3 范围。
 
 ## 目录结构
 
@@ -168,7 +178,7 @@ Conflux 的每个关键能力都有离线或真实 API 评测支撑，评测数�
 │   └── workbench/       # 本地 Web 工作台
 ├── scripts/             # 评测与工具脚本
 ├── examples/            # 示例报告（含冲突与失败场景）
-└── tests/               # 287 个测试
+└── tests/               # 352 个测试用例（当前收集数）
 ```
 
 ## 文档

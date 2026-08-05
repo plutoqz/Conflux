@@ -121,9 +121,11 @@ def save_workbench_env(
     api_key: str = "",
     model: str = "",
     tier_models: dict[str, dict[str, Any]] | None = None,
+    feature_models: dict[str, dict[str, Any]] | None = None,
     embedding_base_url: str = "",
     embedding_api_key: str = "",
     embedding_model: str = "",
+    vector_collection_name: str = "",
     web_search_provider: str = "",
     serpapi_api_key: str = "",
     bing_api_key: str = "",
@@ -182,12 +184,24 @@ def save_workbench_env(
             existing[
                 f"CONFLUX_RESEARCH__PROFILES__{tier.upper()}__{role.upper()}_MODEL"
             ] = tier
+    for feature, feature_config in (feature_models or {}).items():
+        if not isinstance(feature_config, dict):
+            continue
+        prefix = f"CONFLUX_MODELS__{str(feature).upper()}"
+        existing[f"{prefix}__PROVIDER"] = "openai_compatible"
+        for field in ("base_url", "api_key", "model", "temperature"):
+            value = feature_config.get(field)
+            if value is None or str(value).strip() == "":
+                continue
+            existing[f"{prefix}__{field.upper()}"] = str(value).strip()
     if embedding_base_url:
         existing["CONFLUX_EMBEDDING__BASE_URL"] = embedding_base_url
     if embedding_api_key:
         existing["CONFLUX_EMBEDDING__API_KEY"] = embedding_api_key
     if embedding_model:
         existing["CONFLUX_EMBEDDING__MODEL"] = embedding_model
+    if vector_collection_name:
+        existing["CONFLUX_VECTOR_STORE__COLLECTION_NAME"] = vector_collection_name
     if web_search_provider:
         existing["CONFLUX_WEB_SEARCH__PROVIDER"] = web_search_provider
     if serpapi_api_key:

@@ -205,7 +205,7 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
         "reranker_max_tokens": 1200,
         "synthesizer_max_tokens": 6000,
         "verifier_max_tokens": 3200,
-        "token_budget": 140000,
+        "token_budget": 320000,
         "model_timeout_seconds": 120,
         "max_retries": 0,
         "timeout_seconds": 480,

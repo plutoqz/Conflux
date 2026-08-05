@@ -186,3 +186,75 @@ def test_acceptance_allows_low_relevance_status_and_nodes(tmp_path):
     result = validate_report_pair(md, html)
 
     assert result.passed
+
+
+def test_v2_artifacts_include_evidence_and_pass_v2_acceptance(tmp_path):
+    from conflux.acceptance import validate_report_pair
+    from conflux.graph_v2 import factcheck_v2_node
+    from conflux.report import write_v2_report_artifacts
+
+    state = {
+        "query": "如何构建可审计的研究智能体？",
+        "_run_id": "run-v2-test",
+        "_run_status": "completed",
+        "_report_available": True,
+        "_confidence": "high",
+        "_elapsed_ms": 1200,
+        "_report_markdown": """# 如何构建可审计的研究智能体？
+
+## 直接回答
+
+核心路径是保存来源、引用和验证记录。[1]
+
+## 证据链设计
+
+每个外部声明应关联可解析的来源。[1]
+
+## 参考文献与证据
+
+[1] 可审计系统保存证据来源。
+
+## 可信度说明
+
+该结论有一条外部证据支持。
+""",
+        "_direct_answer": "核心路径是保存来源、引用和验证记录。[1]",
+        "_rag_results": "local evidence",
+        "_web_results": "web evidence",
+        "_citation_map": {"[1]": "可审计系统保存证据来源。（来源：RAG local.md#chunk-001）"},
+        "_section_results": [{
+            "sub_question_id": "sq-1",
+            "title": "证据链设计",
+            "body": "每个外部声明应关联可解析的来源。[1]",
+            "summary": "",
+            "key_claims": ["每个外部声明应关联可解析的来源。[1]"],
+            "citation_refs": ["[1]"],
+            "analysis_judgments": [],
+            "evidence_gaps": [],
+            "finish_reason": "complete",
+        }],
+        "_source_statuses": {
+            "RAG": {"status": "success", "result_count": 1},
+            "Web": {"status": "no_evidence", "result_count": 0},
+            "Model": {"status": "success", "result_count": 1},
+        },
+        "_audit_metrics": {
+            "total_sections": 1,
+            "analysis_only_sections": 0,
+            "invalid_citation_refs": 0,
+        },
+    }
+    state.update(factcheck_v2_node(state, model=None))
+
+    artifacts = write_v2_report_artifacts(state["query"], state, tmp_path)
+    result = validate_report_pair(artifacts.markdown_path, artifacts.html_path)
+
+    assert result.passed
+    assert artifacts.evidence_json_path is not None
+    assert artifacts.raw_sources_path is not None
+    assert artifacts.audit_markdown_path is not None
+    html = artifacts.html_path.read_text(encoding="utf-8")
+    assert "核心路径是保存来源、引用和验证记录" in html
+    assert "<title>如何构建可审计的研究智能体？</title>" in html
+    assert state["_run_summary"]["factcheck_status"] == "passed"
+    assert state["_run_summary"]["external_evidence_count"] == 1

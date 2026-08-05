@@ -17,6 +17,14 @@ let projectCharterDraft = null;
 let planAnalysisTimers = [];
 let projectRegistryDir = 'projects';
 const MODEL_TIERS = ['quick', 'standard', 'deep'];
+const FEATURE_MODELS = [
+  { key: 'profile_optimization', prefix: 'profileOptimization' },
+  { key: 'paper_review', prefix: 'paperReview' },
+  { key: 'plan_analysis', prefix: 'planAnalysis' },
+  { key: 'project_charter', prefix: 'projectCharter' },
+  { key: 'research_radar', prefix: 'researchRadar' },
+  { key: 'plan_translation', prefix: 'planTranslation' }
+];
 
 function normalizeTier(value) {
   return MODEL_TIERS.includes(value) ? value : 'standard';
@@ -40,6 +48,23 @@ function tierModelPayload(tier) {
 function allTierModelsPayload() {
   const payload = {};
   MODEL_TIERS.forEach((tier) => { payload[tier] = tierModelPayload(tier); });
+  return payload;
+}
+
+function featureModelPayload(feature) {
+  const item = FEATURE_MODELS.find((candidate) => candidate.key === feature);
+  if (!item) return {};
+  return {
+    base_url: $(item.prefix + 'BaseUrl').value.trim(),
+    model: $(item.prefix + 'ModelName').value.trim(),
+    api_key: $(item.prefix + 'ApiKey').value,
+    temperature: Number($(item.prefix + 'Temperature').value || 0)
+  };
+}
+
+function allFeatureModelsPayload() {
+  const payload = {};
+  FEATURE_MODELS.forEach((item) => { payload[item.key] = featureModelPayload(item.key); });
   return payload;
 }
 
@@ -296,11 +321,7 @@ async function optimizeProfile() {
   const button = $('optimizeProfile');
   enterBusy(button, '优化画像');
   try {
-    const data = await api('/api/profile/optimize', Object.assign(
-      {},
-      source,
-      tierModelPayload($('depthSelect').value)
-    ));
+    const data = await api('/api/profile/optimize', source);
     if (!data.ok) {
       toast(data.error || '画像优化失败', 'err');
       return;
@@ -484,6 +505,25 @@ function renderPaperIngestionAudit(audit) {
     : '全文策略与本地向量索引已核对，没有发现假全文状态。';
 }
 
+function renderVectorCollections(vectorStore) {
+  const state = vectorStore || {};
+  const collections = state.collections || [];
+  $('vectorIndexSummary').textContent = collections.length
+    ? '当前索引：' + (state.active || '未设置') + '；共保留 ' + collections.length + ' 个 collection。'
+    : '尚未发现本地向量 collection。';
+  $('vectorCollections').innerHTML = collections.map((item) => {
+    const meta = Number(item.count || 0) + ' 条' + (item.dimension ? ' · ' + item.dimension + ' 维' : '') + (item.model ? ' · ' + item.model : '');
+    const action = item.active
+      ? '<span class="status-pill ok">当前</span>'
+      : '<button class="icon-button subtle delete-vector-collection" type="button" data-collection="' + escapeHtml(item.name) + '" aria-label="删除旧索引" title="删除旧索引"><i data-lucide="trash-2" aria-hidden="true"></i></button>';
+    return '<div class="vector-collection-row"><span><strong>' + escapeHtml(item.name) + '</strong><small>' + escapeHtml(meta) + '</small></span>' + action + '</div>';
+  }).join('') || '<div class="inline-empty">没有可管理的 collection</div>';
+  document.querySelectorAll('.delete-vector-collection').forEach((button) => {
+    button.addEventListener('click', () => deleteVectorCollection(button.dataset.collection || ''));
+  });
+  refreshIcons();
+}
+
 async function refreshStatus(options = {}) {
   try {
     const response = await authFetch('/api/status');
@@ -539,6 +579,14 @@ async function refreshStatus(options = {}) {
         $(tierFieldId(tier, 'Temperature')).value = Number(model.temperature == null ? 0.2 : model.temperature);
         $(tierFieldId(tier, 'ApiKey')).value = '';
       });
+      const featureModels = nextStatus.defaults.feature_models || {};
+      FEATURE_MODELS.forEach((item) => {
+        const model = featureModels[item.key] || {};
+        $(item.prefix + 'BaseUrl').value = model.base_url || '';
+        $(item.prefix + 'ModelName').value = model.model || '';
+        $(item.prefix + 'Temperature').value = Number(model.temperature == null ? 0.2 : model.temperature);
+        $(item.prefix + 'ApiKey').value = '';
+      });
       $('embeddingBaseUrl').value = (nextStatus.defaults.embedding || {}).base_url || '';
       $('embeddingModel').value = (nextStatus.defaults.embedding || {}).model || '';
       $('webSearchProvider').value = (nextStatus.defaults.web_search || {}).provider || 'duckduckgo';
@@ -551,6 +599,7 @@ async function refreshStatus(options = {}) {
 
     updateWebSearchFields();
     renderPaperIngestionAudit(nextStatus.paper_ingestion_audit || {});
+    renderVectorCollections((nextStatus.defaults || {}).vector_store || {});
     renderCapabilities(nextStatus.credentials || {});
     syncProgressProjectPath(!initialized || options.resetDefaults);
     renderReports();
@@ -807,19 +856,23 @@ function renderProjectResearch(overview) {
         return;
       }
       const stats = data.stats || {};
-      const candidateCount = stats.total_candidates || data.candidate_count || 0;
+      const candidateCount = stats.after_coarse_rank || (data.links || []).length || data.candidate_count || 0;
       $('researchIntentCount').textContent = String(data.intents ? data.intents.length : 0);
       $('researchQueryCount').textContent = String(data.queries ? data.queries.length : 0);
       $('researchCandidateCount').textContent = String(candidateCount);
-      $('researchSavedCount').textContent = String(data.saved_count || 0);
+      $('researchSavedCount').textContent = String(data.saved_count || stats.saved || 0);
       $('researchLastRun').textContent = stats.finished_at || '-';
       $('researchSources').textContent = (stats.sources_used || []).join(', ') || '-';
       $('researchFailedSources').textContent = (stats.failed_sources || []).join(', ') || '无';
       $('researchElapsed').textContent = stats.elapsed_seconds ? stats.elapsed_seconds + 's' : '-';
 
-      const ok = !(stats.failed_sources && stats.failed_sources.length >= (stats.sources_used || []).length);
-      $('projectResearchStatus').className = 'status-pill ' + (ok ? 'success' : 'warn');
-      $('projectResearchStatus').textContent = ok ? '已运行' : '部分失败';
+      const allSourcesFailed = stats.failed_sources && stats.failed_sources.length >= (stats.sources_used || []).length;
+      const usable = data.usable !== false && Number(stats.shortlisted || 0) > 0;
+      $('projectResearchStatus').className = 'status-pill ' + (allSourcesFailed ? 'error' : (usable ? 'success' : 'warn'));
+      $('projectResearchStatus').textContent = allSourcesFailed
+        ? '数据源失败'
+        : (usable ? '可审查' : (data.status === 'no_candidates' ? '无候选' : '无精读候选'));
+      if (data.reason) $('projectResearchSummary').textContent = data.reason;
 
       // Render intents
       const intents = data.intents || [];
@@ -865,14 +918,10 @@ function runProjectRadar() {
   api('/api/projects/research/run', { project_id: projectId })
     .then((data) => {
       if (data.ok) {
-        $('projectResearchStatus').className = 'status-pill success';
-        $('projectResearchStatus').textContent = '已完成';
-        // Refresh status
-        fetch('/api/projects/research/status?project_id=' + encodeURIComponent(projectId))
-          .then((r) => r.json())
-          .then((fresh) => {
-            if (fresh.ok) renderProjectResearch(fresh);
-          });
+        $('projectResearchStatus').className = 'status-pill ' + (data.usable ? 'success' : 'warn');
+        $('projectResearchStatus').textContent = data.usable ? '可审查' : (data.status === 'no_candidates' ? '无候选' : '无精读候选');
+        const overview = projectsCache.find((item) => item.project.id === projectId);
+        if (overview) renderProjectResearch(overview.project || {});
       } else {
         $('projectResearchStatus').className = 'status-pill error';
         $('projectResearchStatus').textContent = '失败: ' + (data.error || '未知错误');
@@ -1571,7 +1620,10 @@ async function openFile(path) {
 }
 
 function modelPayload(tier) {
-  return Object.assign(tierModelPayload(tier || $('testTierSelect').value), {
+  const selection = tier || $('testModelSelect').value;
+  const model = MODEL_TIERS.includes(selection) ? tierModelPayload(selection) : featureModelPayload(selection);
+  return Object.assign(model, {
+    model_preset: selection,
     prompt: $('probePrompt').value
   });
 }
@@ -1612,6 +1664,7 @@ async function saveModel() {
   try {
     const data = await api('/api/model/save', {
       tier_models: allTierModelsPayload(),
+      feature_models: allFeatureModelsPayload(),
       embedding_base_url: $('embeddingBaseUrl').value,
       embedding_api_key: $('embeddingApiKey').value,
       embedding_model: $('embeddingModel').value,
@@ -1799,7 +1852,7 @@ async function runPromotion() {
     } else {
       $('promotionStage').textContent = '执行失败';
       $('promotionStage').className = 'status-pill error';
-      toast(data.error || '知识入库失败', 'err');
+      toast(data.reason || data.error || '知识入库失败', 'err');
     }
   } catch (error) {
     $('promotionOutput').hidden = false;
@@ -1809,6 +1862,46 @@ async function runPromotion() {
     toast('知识入库失败：' + error.message, 'err');
   } finally {
     leaveBusy(button);
+  }
+}
+
+async function rebuildVectorIndex() {
+  const button = $('rebuildVectorIndex');
+  enterBusy(button, '重建索引');
+  try {
+    const data = await api('/api/knowledge/index/rebuild', {
+      source_dir: $('rebuildSourceDir').value,
+      collection_name: $('rebuildCollectionName').value,
+      embedding_base_url: $('embeddingBaseUrl').value,
+      embedding_api_key: $('embeddingApiKey').value,
+      embedding_model: $('embeddingModel').value
+    });
+    if (!data.ok) {
+      toast(data.error || '索引重建失败', 'err');
+      return;
+    }
+    $('rebuildCollectionName').value = '';
+    await refreshStatus();
+    toast('已重建 ' + Number(data.indexed || 0) + ' 条向量；旧索引仍保留。', 'ok');
+  } catch (error) {
+    toast('索引重建失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+async function deleteVectorCollection(collectionName) {
+  if (!collectionName || !window.confirm('确认删除旧索引 “' + collectionName + '”？此操作不会删除知识文档。')) return;
+  try {
+    const data = await api('/api/knowledge/index/delete', { collection_name: collectionName });
+    if (!data.ok) {
+      toast(data.error || '删除索引失败', 'err');
+      return;
+    }
+    await refreshStatus();
+    toast('旧索引已删除：' + collectionName, 'ok');
+  } catch (error) {
+    toast('删除索引失败：' + error.message, 'err');
   }
 }
 
@@ -2018,7 +2111,9 @@ async function runQuery() {
           const meta = [
             '研究管线：' + (job.pipeline || 'unknown'),
             '来源状态：' + JSON.stringify(job.source_statuses || {}),
-            'FactCheck：' + (job.factcheck_status || '未记录'),
+            '交付完整性：' + ({deliverable:'完整', limited:'部分完成', diagnostic_only:'仅诊断'}[job.delivery_status] || '未记录'),
+            '引用核验：' + (job.factcheck_status || '未记录'),
+            (job.quality || {}).sections_failed ? '未完成扩展问题：' + job.quality.sections_failed + '/' + job.quality.total_sections : '',
             job.warning ? '警告：' + job.warning : '',
             job.error && job.status !== 'completed' ? '终止原因：' + job.error : ''
           ].filter(Boolean);
@@ -2221,6 +2316,7 @@ function bindEvents() {
   $('undoProfileOptimization').addEventListener('click', undoProfileOptimization);
   $('saveProfile').addEventListener('click', saveProfile);
   $('runPromote').addEventListener('click', runPromotion);
+  $('rebuildVectorIndex').addEventListener('click', rebuildVectorIndex);
   $('runQuery').addEventListener('click', runQuery);
   if ($('cancelQuery')) { $('cancelQuery').addEventListener('click', cancelQuery); }
   MODEL_TIERS.forEach((tier) => {

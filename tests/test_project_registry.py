@@ -207,11 +207,14 @@ def test_charter_draft_requires_confirmation_before_write(tmp_path, monkeypatch)
 
 
 def test_llm_plan_analysis_is_preview_only_and_applies_confirmed_selection(tmp_path, monkeypatch):
-    from conflux.project_registry import ProjectDefinition, ProjectRegistry
+    from conflux.project_registry import ProjectDefinition, ProjectPlan, ProjectRegistry
     from conflux.workbench import server
 
     root = tmp_path / "research"
     root.mkdir()
+    docs = root / "docs"
+    docs.mkdir()
+    (docs / "historical.md").write_text("# 历史方案\n\n" + ("旧" * 200_000), encoding="utf-8")
     (root / "PROJECT.md").write_text(
         "# 项目纲领\n\n## 总体目标\n建立可复现的知识图谱增强生成研究流程。\n\n"
         "## 里程碑\n在统一数据集上完成基线比较并保存评估报告。\n",
@@ -222,40 +225,58 @@ def test_llm_plan_analysis_is_preview_only_and_applies_confirmed_selection(tmp_p
         id="kg-llm-plan",
         name="KG LLM Plan",
         path=str(root),
+        document_dirs=["docs"],
         document_files=["PROJECT.md"],
+        plan=ProjectPlan(source_documents=["PROJECT.md"]),
     ))
     monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(server, "_default_model_name", lambda preset: "test-model")
     monkeypatch.setattr(server, "_default_base_url", lambda preset: "https://example.invalid/v1")
     monkeypatch.setattr(server, "_default_api_key", lambda preset: "test-key")
-    monkeypatch.setattr(server, "run_model_probe", lambda payload: {
-        "ok": True,
-        "model": "test-model",
-        "content": json.dumps({
-            "overall_goal": {
-                "summary": "建立可复现的知识图谱增强生成研究流程",
-                "source_refs": [{"path": "PROJECT.md", "line_start": 3, "line_end": 4}],
-            },
-            "items": [{
-                "type": "milestone",
-                "title": "完成统一数据集上的基线比较",
-                "summary": "比较主要基线并保存可复核评估报告。",
-                "acceptance_criteria": ["评估报告包含统一指标和实验配置"],
-                "criteria_origin": "suggested",
-                "declared_status": "planned",
-                "actual_status": "planned",
-                "source_refs": [{"path": "PROJECT.md", "line_start": 6, "line_end": 7}],
-                "evidence_refs": [],
-                "confidence": 0.84,
-                "rationale": "文档明确提出基线比较，但没有完成证据。",
-            }],
-            "warnings": [],
-        }, ensure_ascii=False),
-    })
+    calls = []
+
+    def fake_probe(payload):
+        calls.append(payload)
+        return {
+            "ok": True,
+            "model": "test-model",
+            "elapsed_ms": 1234,
+            "usage": {"total_tokens": 4321},
+            "content": json.dumps({
+                "overall_goal": {
+                    "summary": "建立可复现的知识图谱增强生成研究流程",
+                    "source_refs": [{"path": "PROJECT.md", "line_start": 3, "line_end": 4}],
+                },
+                "items": [{
+                    "type": "milestone",
+                    "title": "完成统一数据集上的基线比较",
+                    "summary": "比较主要基线并保存可复核评估报告。",
+                    "acceptance_criteria": ["评估报告包含统一指标和实验配置"],
+                    "criteria_origin": "suggested",
+                    "declared_status": "planned",
+                    "actual_status": "planned",
+                    "source_refs": [{"path": "PROJECT.md", "line_start": 6, "line_end": 7}],
+                    "evidence_refs": [],
+                    "confidence": 0.84,
+                    "rationale": "文档明确提出基线比较，但没有完成证据。",
+                }],
+                "warnings": [],
+            }, ensure_ascii=False),
+        }
+
+    monkeypatch.setattr(server, "run_model_probe", fake_probe)
 
     preview = server.analyze_project_plan({"project_id": "kg-llm-plan"})
 
     assert preview["ok"] is True
+    assert "PROJECT.md" in calls[0]["prompt"]
+    assert "historical.md" not in calls[0]["prompt"]
+    assert calls[0]["max_tokens"] == 12000
+    assert calls[0]["timeout"] == 240
+    assert preview["plan_context"]["warnings"] == []
+    assert preview["analysis"]["analysis"]["elapsed_ms"] == 1234
+    assert preview["analysis"]["analysis"]["usage"] == {"total_tokens": 4321}
+    assert preview["analysis"]["analysis"]["document_count"] == 1
     unchanged = registry.get("kg-llm-plan")
     assert unchanged is not None
     assert unchanged.plan.overall_goal == ""
@@ -609,8 +630,7 @@ def test_project_monitor_counts_readable_reports_not_runtime_noise(tmp_path):
 
     overview = monitor_project(project, audit_root=tmp_path / "audit")
 
-    assert overview["reports"]["count"] == 2
+    assert overview["reports"]["count"] == 1
     assert {item["path"] for item in overview["reports"]["recent_files"]} == {
         "reports/final.md",
-        "reports/weekly_summary.json",
     }

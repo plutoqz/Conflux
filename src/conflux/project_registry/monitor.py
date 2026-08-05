@@ -50,11 +50,12 @@ def monitor_project(
         root,
         result_dirs=project.result_dirs,
         report_dirs=project.report_dirs,
+        max_files=5000,
     )
     results = _records_summary(result_records)
     reports = _records_summary(record for record in report_records if _is_meaningful_report(record.path))
     latest_audit = _load_latest_audit(Path(audit_root) / project.id / "progress_audit.json")
-    plan_context = public_document_context(discover_plan_documents(project, max_files=1))
+    plan_context = public_document_context(discover_plan_documents(project, max_files=24))
     alerts = _build_alerts(project, git, latest_audit)
     if (plan_context.get("charter") or {}).get("status") == "missing":
         alerts.append({
@@ -144,14 +145,15 @@ def _is_meaningful_report(path: str) -> bool:
     normalized = str(path or "").replace("\\", "/").casefold()
     parts = normalized.split("/")
     name = parts[-1] if parts else normalized
-    if name.endswith((".log", ".pid")) or any(part.startswith("test_") for part in parts):
+    if not name.endswith((".md", ".markdown")):
         return False
-    suffix = Path(name).suffix
-    if suffix in {".md", ".markdown", ".html", ".htm", ".pdf", ".docx"}:
-        return True
-    return suffix == ".json" and any(
-        token in name for token in ("report", "audit", "inbox", "summary")
-    )
+    if name.endswith((".draft.md", ".verified.md", ".audit.md", ".sources.md", ".diagnostic.md")):
+        return False
+    if any(part.startswith(("test", "eval", "live-quality")) for part in parts):
+        return False
+    if "workbench" in parts and "query" not in parts:
+        return False
+    return True
 
 
 def _empty_file_summary() -> dict[str, Any]:

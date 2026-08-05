@@ -2,6 +2,7 @@
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 # 确保项目在 sys.path 中
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -70,6 +71,265 @@ def test_graph_compiles():
     nodes = graph.get_graph().nodes
     assert "decompose" in nodes
     assert "finalize" in nodes
+
+
+def test_v2_section_summary_normalizes_citation_ids():
+    from conflux.graph_v2 import _parse_section_summary
+
+    parsed = _parse_section_summary(
+        "正文引用[1]。\n---summary---\nClaim: 声明。[1]\n[1] 本地规范证据"
+    )
+
+    assert parsed["citation_refs"] == ["[1]"]
+    assert parsed["key_claims"] == ["声明。[1]"]
+
+
+def test_v2_citation_map_filters_noise_and_caps_same_source():
+    from conflux.graph_v2 import _build_citation_map
+    from conflux.source_status import EvidenceItem, SourceResult
+
+    same_source = [
+        EvidenceItem(
+            claim=(f"Evidence statement {index} " * 8).strip(),
+            source="Web",
+            paper_id="arxiv:2405.13966",
+            url="https://arxiv.org/html/2405.13966",
+        )
+        for index in range(4)
+    ]
+    claims = [
+        EvidenceItem(
+            claim="Ingestion action: summary_only - Relevance score: 0.810 - Reading level: deep " * 2,
+            source="Web",
+        ),
+        EvidenceItem(
+            claim="Learn more. Press Enter to search. Advanced search. " * 3,
+            source="Web",
+            url="https://arxiv.org/abs/2511.07127",
+        ),
+        *same_source,
+        EvidenceItem(
+            claim="Independent evidence about agent memory and context management. " * 3,
+            source="Web",
+            paper_id="arxiv:2501.00001",
+            url="https://arxiv.org/pdf/2501.00001v1",
+        ),
+    ]
+    raw = SourceResult(
+        source="Web",
+        status="success",
+        content="usable",
+        claims=claims,
+        evidence_class="preprint",
+    ).to_tool_text()
+
+    citation_map = _build_citation_map("", raw)
+
+    assert len(citation_map) == 2
+    assert sum("2405.13966" in item for item in citation_map.values()) == 1
+    assert "补充证据" in citation_map["[1]"]
+    assert all("Ingestion action" not in item for item in citation_map.values())
+    assert all("Press Enter to search" not in item for item in citation_map.values())
+
+
+def test_v2_section_generation_uses_compact_citation_context():
+    from conflux.graph_v2 import _generate_section
+
+    class CapturingModel:
+        prompt = ""
+
+        def invoke(self, messages):
+            self.prompt = messages[-1].content
+            return SimpleNamespace(
+                content="正文结论。[1]\n---summary---\nclaim: 可验证声明。[1]",
+                usage_metadata={},
+                response_metadata={},
+            )
+
+    model = CapturingModel()
+    citation_map = {
+        f"[{index}]": ("ReAct agent architecture evidence " * 30) + "（来源：Web https://example.test）"
+        for index in range(1, 13)
+    }
+
+    result = _generate_section(
+        {"id": "sq-1", "question": "ReAct agent architecture"},
+        "agent design",
+        "RAW_RAG_PAYLOAD " * 2000,
+        "RAW_WEB_PAYLOAD " * 2000,
+        citation_map,
+        model,
+    )
+
+    assert "RAW_RAG_PAYLOAD" not in model.prompt
+    assert "RAW_WEB_PAYLOAD" not in model.prompt
+    assert '"[10]"' in model.prompt
+    assert '"[11]"' not in model.prompt
+    assert result.key_claims == ["可验证声明。[1]"]
+
+
+def test_v2_factcheck_does_not_inherit_section_citations():
+    from conflux.graph_v2 import factcheck_v2_node
+
+    state = {
+        "query": "研究问题",
+        "_run_id": "claim-citation-run",
+        "_run_status": "completed",
+        "_report_available": True,
+        "_report_markdown": "## 直接回答\n\n回答。\n\n## 可信度说明\n\n待核验。\n",
+        "_citation_map": {"[1]": "外部证据"},
+        "_section_results": [{
+            "sub_question_id": "sq-1",
+            "title": "章节",
+            "body": "章节正文。[1]",
+            "key_claims": ["没有声明级引用的结论。"],
+            "citation_refs": ["[1]"],
+            "finish_reason": "complete",
+        }],
+        "_audit_metrics": {"sections_completed": 1, "sections_failed": 0},
+    }
+
+    result = factcheck_v2_node(state, model=None)
+
+    assert result["_factcheck_status"] == "failed"
+    assert result["_factcheck_findings"]["verified_claims"] == 0
+    assert result["_factcheck_findings"]["citation_refs_used"] == 0
+
+
+def test_v2_finalize_removes_duplicate_credibility_heading():
+    from conflux.graph_v2 import finalize_node
+
+    result = finalize_node({
+        "query": "研究问题",
+        "_core_question": "研究问题",
+        "_direct_answer": "直接回答。",
+        "_credibility_text": "## 可信度说明\n\n## 可信度说明\n\n确定性结果。",
+        "_started_at": 0,
+    })
+
+    assert result["_report_markdown"].count("## 可信度说明") == 1
+
+
+def test_v2_failed_section_marks_run_partial_and_limits_factcheck_scope():
+    import time
+
+    from conflux.graph_v2 import V2State, audit_node, factcheck_v2_node
+
+    now = time.time()
+    state = {
+        "query": "研究问题",
+        "_run_id": "partial-run",
+        "_started_at": now,
+        "_deadline_at": now,
+        "_report_markdown": "# 研究问题\n\n## 直接回答\n\n已有回答。[1]\n\n## 可信度说明\n\n部分证据。\n",
+        "_report_available": True,
+        "_citation_map": {"[1]": "外部证据"},
+        "_rag_status": "success",
+        "_rag_count": 1,
+        "_web_status": "empty",
+        "_web_count": 0,
+        "_section_results": [
+            {
+                "sub_question_id": "ok",
+                "title": "已完成问题",
+                "body": "已有回答。[1]",
+                "key_claims": ["已有回答。[1]"],
+                "citation_refs": ["[1]"],
+                "allowed_refs": ["[1]"],  # 生成时该节被分配了 [1]
+                "finish_reason": "complete",
+                "elapsed_ms": 1200,
+                "usage": {"total_tokens": 80},
+            },
+            {
+                "sub_question_id": "failed",
+                "title": "未完成问题",
+                "body": "本节因生成超时或失败未能完成。",
+                "finish_reason": "failed",
+                "elapsed_ms": 204000,
+                "error": "TimeoutError: deadline",
+            },
+        ],
+    }
+
+    state.update(audit_node(state, model=None))
+    state.update(factcheck_v2_node(state, model=None))
+
+    assert state["_run_status"] == "partial"
+    assert state["_delivery_status"] == "limited"
+    assert state["_audit_metrics"]["sections_failed"] == 1
+    assert state["_audit_metrics"]["section_runs"][1]["error"] == "TimeoutError: deadline"
+    assert state["_factcheck_status"] == "passed"
+    assert "仅核验已生成的声明" in state["_verified_answer"]
+    assert "不代表整份报告完整通过" in state["_verified_answer"]
+    assert state["_run_summary"]["delivery_status"] == "limited"
+    assert "_delivery_status" in V2State.__annotations__
+    assert "_delivery_assessment" in V2State.__annotations__
+
+
+def test_deep_profile_allows_six_large_section_calls():
+    from conflux.research_modes import resolve_research_profile
+
+    profile = resolve_research_profile("deep")
+
+    assert profile.token_budget == 320000
+
+
+def test_query_command_prints_v2_artifact_paths(monkeypatch, tmp_path, capsys):
+    import conflux.__main__ as cli
+    import conflux.report as report
+
+    profile = SimpleNamespace(
+        timeout_seconds=60,
+        commit_reserve_seconds=5,
+        depth="quick",
+        candidate_limit=3,
+    )
+    artifacts = SimpleNamespace(
+        markdown_path=tmp_path / "report.md",
+        html_path=tmp_path / "report.html",
+        evidence_json_path=tmp_path / "report.evidence.json",
+        raw_sources_path=tmp_path / "report.sources.md",
+        deep_evidence_json_path=None,
+        audit_markdown_path=tmp_path / "report.audit.md",
+    )
+    final_state = {
+        "_report_markdown": "# Answer",
+        "_report_available": True,
+        "_run_status": "completed",
+        "_confidence": "high",
+    }
+
+    monkeypatch.setattr(cli, "load_config", lambda: {"research": {}})
+    monkeypatch.setattr(cli, "resolve_research_profile", lambda depth: profile)
+    monkeypatch.setattr(cli, "validate_runtime_credentials", lambda *args, **kwargs: [])
+    monkeypatch.setattr(cli, "create_vector_store", lambda: object())
+    monkeypatch.setattr(cli, "HybridRetriever", lambda store: object())
+    monkeypatch.setattr(
+        cli,
+        "create_research_models",
+        lambda *args, **kwargs: (
+            {name: object() for name in ("analyst", "planner", "synthesizer", "verifier", "reranker")},
+            {},
+        ),
+    )
+    monkeypatch.setattr(cli, "set_model", lambda model: None)
+    monkeypatch.setattr(cli, "QueryRewriteProvider", lambda model: object())
+    monkeypatch.setattr(cli, "SemanticReranker", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "create_rag_tool", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "create_web_tool", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "create_checkpointer", lambda backend: SimpleNamespace(backend=backend))
+    monkeypatch.setattr(cli, "create_sub_agent", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "create_v2_research_graph", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "_new_v2_state", lambda *args, **kwargs: {})
+    monkeypatch.setattr(cli, "_run_phase2_graph", lambda *args, **kwargs: (final_state, []))
+    monkeypatch.setattr(report, "write_v2_report_artifacts", lambda *args, **kwargs: artifacts)
+
+    result = cli.query_command("test query", output_dir=str(tmp_path), run_id="test-run")
+
+    output = capsys.readouterr().out
+    assert f"Report Markdown: {artifacts.markdown_path.resolve()}" in output
+    assert f"Report HTML: {artifacts.html_path.resolve()}" in output
+    assert result["_report_artifacts"]["markdown_path"] == str(artifacts.markdown_path.resolve())
 
 
 def test_system_prompt_has_final_marker():

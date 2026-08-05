@@ -95,6 +95,42 @@ def inspect_git(
     return inspection
 
 
+def inspect_git_status(project_path: str | Path) -> GitInspection:
+    root = Path(project_path).resolve()
+    inspection = GitInspection(checked_at=datetime.now(timezone.utc).isoformat())
+    try:
+        output = _git(root, "status", "--porcelain=v2", "--branch", "--untracked-files=all")
+    except (OSError, subprocess.CalledProcessError) as exc:
+        if isinstance(exc, subprocess.CalledProcessError) and _is_not_repository(exc):
+            return inspection
+        inspection.errors.append(f"无法读取 Git 仓库：{_error_text(exc)}")
+        return inspection
+
+    inspection.is_repository = True
+    inspection.root = str(root)
+    for line in output.splitlines():
+        if line.startswith("# branch.oid "):
+            inspection.head = line.removeprefix("# branch.oid ").strip()
+        elif line.startswith("# branch.head "):
+            inspection.branch = line.removeprefix("# branch.head ").strip()
+        elif line.startswith("# branch.upstream "):
+            inspection.upstream = line.removeprefix("# branch.upstream ").strip()
+            inspection.remote_name = inspection.upstream.split("/", 1)[0]
+        elif line.startswith("# branch.ab "):
+            ahead, behind = line.removeprefix("# branch.ab ").split()
+            inspection.ahead = int(ahead.removeprefix("+"))
+            inspection.behind = int(behind.removeprefix("-"))
+        elif line.startswith("? "):
+            inspection.dirty_files.append(line[2:].strip())
+        elif line.startswith("1 "):
+            inspection.dirty_files.append(line.split(" ", 8)[8].strip())
+        elif line.startswith("2 "):
+            inspection.dirty_files.append(line.split(" ", 9)[9].split("\t", 1)[0].strip())
+        elif line.startswith("u "):
+            inspection.dirty_files.append(line.split(" ", 10)[10].strip())
+    return inspection
+
+
 def _inspect_tracking(root: Path, inspection: GitInspection, *, check_remote: bool) -> None:
     if not inspection.branch:
         inspection.warnings.append("当前处于 detached HEAD，无法比较同名远程分支。")

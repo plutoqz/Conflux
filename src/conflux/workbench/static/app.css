@@ -841,6 +841,11 @@ iframe { width: 100%; height: calc(100vh - 220px); min-height: 520px; margin-top
 .ingestion-audit strong { color: var(--ink); font-size: 20px; line-height: 1; }
 .ingestion-audit span, .ingestion-audit p { color: var(--muted); font-size: 10px; }
 .ingestion-audit p { grid-column: 1 / -1; margin: 2px 0 0; overflow-wrap: anywhere; }
+.vector-collection-list { display: grid; gap: 7px; margin-top: 14px; }
+.vector-collection-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; padding: 10px 11px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-soft); }
+.vector-collection-row > span:first-child { display: grid; min-width: 0; gap: 2px; }
+.vector-collection-row strong { overflow-wrap: anywhere; color: var(--ink); font-size: 11px; }
+.vector-collection-row small { color: var(--muted); font-size: 10px; }
 .settings-result { grid-column: 1 / -1; min-height: 280px; }
 .privacy-note { display: flex; gap: 10px; margin-top: 18px; padding-top: 15px; border-top: 1px solid var(--line); }
 .privacy-note > svg { color: var(--success); }

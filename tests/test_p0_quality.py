@@ -352,6 +352,47 @@ def test_index_documents_upserts_changed_content_by_logical_chunk_id():
     assert store.items["paper#limitations"][1]["full_text_indexed"] is True
 
 
+def test_index_documents_rejects_incompatible_embedding_dimension(monkeypatch):
+    from conflux.rag.indexer import EmbeddingIndexMismatchError, index_documents
+
+    class Collection:
+        name = "conflux_docs"
+        metadata = None
+
+        def peek(self, limit):
+            return {"embeddings": [[0.0] * 1024]}
+
+        def modify(self, metadata):
+            raise AssertionError("incompatible collection metadata must not be modified")
+
+    class Embedding:
+        def embed_query(self, text):
+            return [0.0] * 1536
+
+    class Store:
+        _collection = Collection()
+        _collection_name = "conflux_docs"
+        embeddings = Embedding()
+
+        def get(self, include=None):
+            return {"ids": [], "documents": [], "metadatas": []}
+
+        def add_documents(self, documents, ids):
+            raise AssertionError("documents must not be written to an incompatible collection")
+
+    monkeypatch.setattr("conflux.rag.indexer.get", lambda *args, **kwargs: "text-embedding-v4")
+    document = Document(page_content="new paper", metadata={"chunk_id": "paper#summary"})
+
+    try:
+        index_documents(Store(), [document])
+        raise AssertionError("dimension mismatch should fail before indexing")
+    except EmbeddingIndexMismatchError as exc:
+        assert exc.collection_name == "conflux_docs"
+        assert exc.stored_dimension == 1024
+        assert exc.current_dimension == 1536
+        assert "旧索引未被修改" in str(exc)
+
+
 def test_trace_event_exposes_retrieval_and_provider_diagnostics():
     from conflux.source_status import SourceResult
     from conflux.trace import event_from_state_key

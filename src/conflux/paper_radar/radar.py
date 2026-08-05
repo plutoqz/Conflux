@@ -23,6 +23,7 @@ from conflux.core.p2_contracts import (
     RadarRunStats,
 )
 from conflux.paper_ingestion.models import PaperRecord
+from conflux.paper_ingestion.scorer import score_papers
 from conflux.project_registry.models import ProjectDefinition
 from conflux.research_profile import ResearchProfile, load_profile
 
@@ -94,14 +95,18 @@ def run_paper_radar(
     # Step 5: De-duplicate and filter
     unique_papers = _deduplicate_papers(all_papers)
     filtered_papers = _apply_negative_filters(unique_papers, profile)
-    paper_map: dict[str, PaperRecord] = {p.id: p for p in filtered_papers}
+    ranked = score_papers(filtered_papers, profile)[:config.max_candidates]
+    ranked_papers = [paper for paper, _ in ranked]
+    score_by_id = {paper.id: score.score for paper, score in ranked}
+    paper_map: dict[str, PaperRecord] = {p.id: p for p in ranked_papers}
 
     # Step 6: Create project-paper links
     links = _create_project_links(
-        papers=filtered_papers,
+        papers=ranked_papers,
         project_id=project.id,
         intents=intents,
         context=context,
+        relevance_scores=score_by_id,
     )
 
     # Step 7: Run deep analysis on top-N papers (D: full-text evidence)
@@ -113,12 +118,13 @@ def run_paper_radar(
         run_id=run_id,
         started_at=__import__("datetime").datetime.utcnow(),
     )
-    if config.deep_read_limit > 0 and filtered_papers:
+    shortlisted_links = [link for link in links if link.status == PaperLinkStatus.SHORTLISTED]
+    if config.deep_read_limit > 0 and shortlisted_links:
         deep_pairs = [
             (link, paper_map.get(link.paper_identity.canonical_id, {}).to_dict()
              if paper_map.get(link.paper_identity.canonical_id)
              else {"id": link.paper_identity.canonical_id})
-            for link in links
+            for link in shortlisted_links
         ]
         # Semantic LLM deep analysis (Phase P2): review_model is a chat model
         # created by the caller; llm_review gates the LLM path.  Without it,
@@ -133,7 +139,7 @@ def run_paper_radar(
             llm_model=llm_model,
             stats=stats,
         )
-        deep_read = config.deep_read_limit
+        deep_read = min(len(deep_pairs), config.deep_read_limit)
 
     # Write output if out_dir specified
     if out_dir:
@@ -143,7 +149,7 @@ def run_paper_radar(
     stats.total_candidates = len(all_papers)
     stats.after_dedup = len(unique_papers)
     stats.after_negative_filter = len(filtered_papers)
-    stats.after_coarse_rank = len(filtered_papers)
+    stats.after_coarse_rank = len(ranked_papers)
     stats.shortlisted = sum(1 for l in links if l.status == PaperLinkStatus.SHORTLISTED)
     stats.deep_read = deep_read
     stats.saved = sum(1 for l in links if l.status == PaperLinkStatus.SAVED)
@@ -251,10 +257,13 @@ def _create_project_links(
     project_id: str,
     intents: list,
     context,
+    relevance_scores: dict[str, float] | None = None,
 ) -> list[ProjectPaperLink]:
     """Create ProjectPaperLink entries for filtered papers."""
     links: list[ProjectPaperLink] = []
+    relevance_scores = relevance_scores or {}
     for paper in papers:
+        relevance = float(relevance_scores.get(paper.id, 0.0))
         identity = PaperIdentity(
             source=paper.source or "unknown",
             canonical_id=paper.id,
@@ -263,10 +272,14 @@ def _create_project_links(
         link = ProjectPaperLink(
             project_id=project_id,
             paper_identity=identity,
-            status=PaperLinkStatus.DISCOVERED,
+            status=(
+                PaperLinkStatus.SHORTLISTED
+                if relevance >= 0.62
+                else PaperLinkStatus.DISCOVERED
+            ),
             matched_intent_ids=[i.id for i in intents[:3]],  # simplified
             evidence_utility=EvidenceUtility.NONE,
-            relevance=0.5,
+            relevance=relevance,
             profile_version=context.profile_version,
             context_version=context.project_revision,
         )

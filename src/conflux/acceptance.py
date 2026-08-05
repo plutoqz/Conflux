@@ -66,6 +66,17 @@ def validate_report_pair(markdown_path: str | Path, html_path: str | Path) -> Ac
     if not checks["html_document"]:
         issues.append("HTML 报告不是完整 HTML 文档。")
 
+    evidence_payload = _extract_evidence_payload(markdown, issues, md_path)
+    if evidence_payload.get("schema_version") == "v2":
+        return _validate_v2_report(
+            md_path,
+            html_doc_path,
+            markdown,
+            evidence_payload,
+            checks,
+            issues,
+        )
+
     for section in REQUIRED_SECTIONS:
         key = f"section:{section}"
         checks[key] = section in markdown
@@ -87,7 +98,6 @@ def validate_report_pair(markdown_path: str | Path, html_path: str | Path) -> Ac
     if not checks["source_status_values_valid"]:
         issues.append("来源状态必须是 success / low_relevance / no_evidence / failed / fallback。")
 
-    evidence_payload = _extract_evidence_payload(markdown, issues, md_path)
     nodes = evidence_payload.get("nodes") or []
     graph_statuses = evidence_payload.get("source_statuses") or {}
     graph_summary = evidence_payload.get("summary") or {}
@@ -153,6 +163,92 @@ def validate_report_pair(markdown_path: str | Path, html_path: str | Path) -> Ac
         markdown_path=str(md_path),
         html_path=str(html_doc_path),
         passed=passed,
+        checks=checks,
+        issues=issues,
+        evidence_summary=evidence_summary,
+    )
+
+
+def _validate_v2_report(
+    markdown_path: Path,
+    html_path: Path,
+    markdown: str,
+    evidence_payload: dict[str, Any],
+    checks: dict[str, bool],
+    issues: list[str],
+) -> AcceptanceResult:
+    graph_statuses = evidence_payload.get("source_statuses") or {}
+    nodes = evidence_payload.get("nodes") or []
+    graph_summary = evidence_payload.get("summary") or {}
+    citation_map = evidence_payload.get("citation_map") or {}
+    audit_metrics = evidence_payload.get("audit_metrics") or {}
+    factcheck = evidence_payload.get("factcheck") or {}
+    run_summary = evidence_payload.get("run_summary") or {}
+
+    required_sections = ("## 直接回答", "## 可信度说明", "## FactCheck 验证")
+    checks["v2_required_sections"] = all(section in markdown for section in required_sections)
+    if not checks["v2_required_sections"]:
+        issues.append("V2 报告缺少直接回答、可信度说明或 FactCheck 验证小节。")
+
+    checks["source_statuses_present"] = set(graph_statuses) >= {"RAG", "Web", "Model"}
+    checks["source_status_values_valid"] = all(
+        payload.get("status") in VALID_STATUSES for payload in graph_statuses.values()
+    )
+    if not checks["source_statuses_present"]:
+        issues.append("V2 证据附件没有覆盖 RAG/Web/Model 来源状态。")
+    if not checks["source_status_values_valid"]:
+        issues.append("V2 来源状态值无效。")
+
+    checks["evidence_has_nodes"] = bool(nodes) and all(
+        str(node.get("claim") or "").strip() for node in nodes
+    )
+    if not checks["evidence_has_nodes"]:
+        issues.append("V2 证据附件没有有效声明节点。")
+
+    non_evidence_sources = {
+        source for source, payload in graph_statuses.items()
+        if payload.get("status") in NON_EVIDENCE_STATUSES
+    }
+    invalid_nodes = [node for node in nodes if node.get("source") in non_evidence_sources]
+    checks["non_evidence_sources_excluded_from_nodes"] = not invalid_nodes
+    if invalid_nodes:
+        issues.append("V2 非证据来源出现在证据节点中。")
+
+    external_refs = [
+        str(ref)
+        for node in nodes
+        if node.get("source") in {"RAG", "Web"}
+        for ref in node.get("evidence_refs") or []
+    ]
+    checks["citations_resolve"] = (
+        int(audit_metrics.get("invalid_citation_refs") or 0) == 0
+        and all(ref in citation_map for ref in external_refs)
+    )
+    if not checks["citations_resolve"]:
+        issues.append("V2 报告存在无法解析的引用。")
+
+    checks["report_available"] = bool(run_summary.get("report_available"))
+    if not checks["report_available"]:
+        issues.append("V2 运行摘要未确认正式报告可用。")
+
+    checks["factcheck_structured"] = (
+        factcheck.get("status") in {"passed", "partial", "skipped"}
+        and isinstance(factcheck.get("findings"), dict)
+    )
+    if not checks["factcheck_structured"]:
+        issues.append("V2 FactCheck 未完成结构化记录或验证失败。")
+
+    evidence_summary = {
+        "total_nodes": graph_summary.get("total_nodes", 0),
+        "source_counts": graph_summary.get("source_counts", {}),
+        "source_statuses": {
+            source: payload.get("status") for source, payload in graph_statuses.items()
+        },
+    }
+    return AcceptanceResult(
+        markdown_path=str(markdown_path),
+        html_path=str(html_path),
+        passed=all(checks.values()),
         checks=checks,
         issues=issues,
         evidence_summary=evidence_summary,

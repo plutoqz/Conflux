@@ -11,6 +11,32 @@ from ..config import get
 from ..model_factory import create_embedding_model
 
 
+class EmbeddingIndexMismatchError(ValueError):
+    def __init__(
+        self,
+        *,
+        collection_name: str,
+        stored_model: str,
+        current_model: str,
+        stored_dimension: int | None,
+        current_dimension: int,
+    ) -> None:
+        self.collection_name = collection_name
+        self.stored_model = stored_model
+        self.current_model = current_model
+        self.stored_dimension = stored_dimension
+        self.current_dimension = current_dimension
+        details = []
+        if stored_dimension is not None and stored_dimension != current_dimension:
+            details.append(f"维度 {stored_dimension} -> {current_dimension}")
+        if stored_model and current_model and stored_model != current_model:
+            details.append(f"模型 {stored_model} -> {current_model}")
+        super().__init__(
+            f"向量库 collection '{collection_name}' 与当前 Embedding 配置不兼容"
+            f"（{', '.join(details)}）。请重建该 collection，或在 vector_store.collection_name 中改用新的 collection 名称；旧索引未被修改。"
+        )
+
+
 def create_vector_store() -> Chroma:
     """根据 config 创建 ChromaDB 向量存储"""
     persist_dir = get("vector_store", "persist_dir", default="./data/chroma_db")
@@ -71,6 +97,8 @@ def index_documents(
     if not additions and not updates:
         return 0
 
+    _validate_embedding_compatibility(vector_store, documents[0].page_content)
+
     batch_size = 5000
     for start in range(0, len(additions), batch_size):
         batch = additions[start : start + batch_size]
@@ -106,6 +134,48 @@ def clear_index(vector_store: Chroma) -> None:
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
+
+
+def _validate_embedding_compatibility(vector_store: Chroma, sample_text: str) -> None:
+    collection = getattr(vector_store, "_collection", None)
+    embedding = getattr(vector_store, "embeddings", None)
+    if collection is None or embedding is None:
+        return
+
+    preview = collection.peek(1)
+    existing_embeddings = preview.get("embeddings")
+    stored_dimension = (
+        len(existing_embeddings[0])
+        if existing_embeddings is not None and len(existing_embeddings)
+        else None
+    )
+    current_dimension = len(embedding.embed_query(sample_text))
+    metadata = dict(collection.metadata or {})
+    stored_model = str(metadata.get("conflux_embedding_model") or "")
+    current_model = str(get("embedding", "model", default="") or "")
+    collection_name = str(getattr(vector_store, "_collection_name", "") or collection.name)
+
+    if (
+        stored_dimension is not None
+        and stored_dimension != current_dimension
+    ) or (
+        stored_model
+        and current_model
+        and stored_model != current_model
+    ):
+        raise EmbeddingIndexMismatchError(
+            collection_name=collection_name,
+            stored_model=stored_model,
+            current_model=current_model,
+            stored_dimension=stored_dimension,
+            current_dimension=current_dimension,
+        )
+
+    metadata.update({
+        "conflux_embedding_model": current_model,
+        "conflux_embedding_dimension": current_dimension,
+    })
+    collection.modify(metadata=metadata)
 
 
 def _metadata_requires_update(existing: dict, current: dict) -> bool:

@@ -84,6 +84,112 @@ def test_model_probe_uses_custom_openai_compatible_endpoint(monkeypatch):
     assert "custom-key" not in json.dumps(result)
 
 
+def test_model_probe_supports_json_mode_and_large_output_budget(monkeypatch):
+    from conflux.workbench import server
+
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"choices":[{"message":{"content":"{}"}}]}'
+
+    def fake_urlopen(request, timeout=60):
+        captured.update(json.loads(request.data.decode("utf-8")))
+        return FakeResponse()
+
+    monkeypatch.setattr(server.urllib.request, "urlopen", fake_urlopen)
+
+    result = server.run_model_probe({
+        "base_url": "https://api.example.test/v1",
+        "api_key": "key",
+        "model": "structured-model",
+        "prompt": "return json",
+        "max_tokens": 7200,
+        "json_mode": True,
+    })
+
+    assert result["ok"] is True
+    assert captured["max_tokens"] == 7200
+    assert captured["response_format"] == {"type": "json_object"}
+
+
+def test_model_probe_uses_selected_feature_saved_credentials(monkeypatch):
+    from conflux.workbench import server
+
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"choices":[{"message":{"content":"ready"}}]}'
+
+    def fake_urlopen(request, timeout=60):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["authorization"] = request.get_header("Authorization")
+        return FakeResponse()
+
+    monkeypatch.setattr(server, "_feature_model_settings", lambda feature: {
+        "model": "plan-model",
+        "base_url": "https://plan.example/v1",
+        "api_key": "plan-key",
+        "temperature": 0.1,
+    })
+    monkeypatch.setattr(server.urllib.request, "urlopen", fake_urlopen)
+
+    result = server.run_model_probe({"model_preset": "plan_analysis", "prompt": "ping"})
+
+    assert result["ok"] is True
+    assert captured["body"]["model"] == "plan-model"
+    assert captured["authorization"] == "Bearer plan-key"
+
+
+def test_paper_inbox_uses_independent_review_model(monkeypatch, tmp_path):
+    from conflux.workbench import server
+
+    captured = {}
+
+    class FakeReviewResult:
+        status = type("Status", (), {"value": "success"})()
+        error = ""
+        output = {"reviews": []}
+
+    monkeypatch.setattr(server, "_feature_model_settings", lambda feature: {
+        "model": "review-model",
+        "base_url": "https://review.example/v1",
+        "api_key": "review-key",
+        "temperature": 0.1,
+    })
+
+    from conflux.builtin.paper import plugin as paper_plugin
+    monkeypatch.setattr(
+        paper_plugin,
+        "paper_review",
+        lambda ctx, **kwargs: captured.update(preset=ctx.config["model_preset"]) or FakeReviewResult(),
+    )
+
+    result = server.run_paper_inbox({
+        "profile": "profiles/example_gis_agent.yaml",
+        "source": "fixture",
+        "fixture": "tests/fixtures/papers/arxiv_sample.json",
+        "out_dir": str(tmp_path),
+        "use_llm_scoring": True,
+    })
+
+    assert result["ok"] is True
+    assert captured["preset"] == "paper_review"
+
+
 def test_profile_optimizer_returns_reviewable_structured_suggestion(monkeypatch):
     from conflux.workbench import server
 
@@ -269,6 +375,59 @@ def test_knowledge_stats_reflect_new_papers_even_with_stale_manifest(tmp_path):
     assert stats["totals"]["documents"] >= 2
     assert stats["totals"]["papers"] == 1
     assert stats["corpus"]["_source"] == "filesystem_scan"
+
+
+def test_knowledge_stats_only_counts_primary_reports(tmp_path):
+    from conflux.knowledge.stats import gather_knowledge_stats
+
+    reports = tmp_path / "reports"
+    query = reports / "workbench" / "query"
+    evaluation = reports / "eval"
+    test_runs = reports / "test_eval_reports"
+    query.mkdir(parents=True)
+    evaluation.mkdir()
+    test_runs.mkdir()
+
+    (reports / "20260803-research.md").write_text("# Report\n", encoding="utf-8")
+    (reports / "20260803-research.html").write_text("<h1>Report</h1>\n", encoding="utf-8")
+    (query / "20260803-query.md").write_text("# Query report\n", encoding="utf-8")
+    (query / "20260803-query.diagnostic.md").write_text("# Diagnostic\n", encoding="utf-8")
+    (query / "20260803-query.draft.md").write_text("# Draft\n", encoding="utf-8")
+    (query / "20260803-query.sources.md").write_text("# Sources\n", encoding="utf-8")
+    (query / "20260803-query.verified.md").write_text("# Verified\n", encoding="utf-8")
+    (query / "run.summary.json").write_text("{}\n", encoding="utf-8")
+    (query / "run.trace.jsonl").write_text("{}\n", encoding="utf-8")
+    (evaluation / "evaluation.md").write_text("# Evaluation\n", encoding="utf-8")
+    (test_runs / "test-report.md").write_text("# Test\n", encoding="utf-8")
+
+    stats = gather_knowledge_stats(tmp_path)
+
+    assert stats["reports"]["total"] == 2
+    assert stats["reports"]["by_type"] == {".md": 2}
+    assert {item["name"] for item in stats["reports"]["recent"]} == {
+        "20260803-research.md",
+        "20260803-query.md",
+    }
+
+
+def test_workbench_lists_top_level_and_query_primary_reports(tmp_path, monkeypatch):
+    from conflux.workbench import server
+
+    reports = tmp_path / "reports"
+    query = reports / "workbench" / "query"
+    query.mkdir(parents=True)
+    (reports / "top-level.md").write_text("# Report\n", encoding="utf-8")
+    (query / "query.md").write_text("# Query\n", encoding="utf-8")
+    (query / "query.draft.md").write_text("# Draft\n", encoding="utf-8")
+    (query / "query.sources.md").write_text("# Sources\n", encoding="utf-8")
+    monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
+
+    listed = server._list_report_files(reports)
+
+    assert {item["path"] for item in listed} == {
+        "reports/top-level.md",
+        "reports/workbench/query/query.md",
+    }
 
 
 def test_csp_header_present_in_responses():
@@ -532,6 +691,11 @@ def test_frontend_has_login_and_backend_owned_timeout_flow():
     assert "后端正在保存报告与 trace" in timeout_block
     assert "clearInterval(pollInterval)" not in timeout_block
     assert "300000" not in timeout_block
+    assert "交付完整性：" in app
+    assert "引用核验：" in app
+    assert "未完成扩展问题：" in app
+    assert "人工计划来源" in html
+    assert "最近审计证据" in html
 
 
 def test_timeout_and_user_cancel_have_distinct_terminal_states():
@@ -613,6 +777,24 @@ def test_report_snapshot_survives_later_timeout(tmp_path):
     assert job.final_answer == state["final_answer"]
     assert Path(job.artifacts["markdown_path"]).is_file()
     assert "已生成报告" in Path(job.artifacts["markdown_path"]).read_text(encoding="utf-8")
+
+
+def test_v2_report_snapshot_does_not_append_legacy_quality_score(tmp_path):
+    from conflux.workbench.jobs import ResearchJob, _capture_report_snapshot
+
+    job = ResearchJob(run_id="v2-snapshot", query="q", status="running")
+    state = {
+        "query": "q",
+        "final_answer": "## 回答\n\nV2 报告正文。",
+        "_report_markdown": "## 回答\n\nV2 报告正文。",
+        "_run_summary": {"mode": "answer_first"},
+    }
+
+    _capture_report_snapshot(job, state, str(tmp_path), stage="verified")
+
+    markdown = Path(job.artifacts["markdown_path"]).read_text(encoding="utf-8")
+    assert markdown == "## 回答\n\nV2 报告正文。\n"
+    assert "质量评分" not in markdown
 
 
 def test_frontend_displays_partial_success_and_explicit_report_stages():
@@ -1167,6 +1349,75 @@ def test_project_refresh_contract_is_manual_and_scheduler_is_inactive(tmp_path, 
     assert result["projects"][0]["repository"]["sync_status"] == "not_applicable"
 
 
+def test_project_overview_ignores_stale_cache_for_local_git_state(tmp_path, monkeypatch):
+    import yaml
+    from conflux.workbench import server
+
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True)
+    (project / "README.md").write_text("# Project\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=project, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Conflux Test", "-c", "user.email=test@example.com", "commit", "-m", "initial"],
+        cwd=project,
+        check=True,
+        capture_output=True,
+    )
+    current_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=project,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    (projects_dir / "fresh.yaml").write_text(yaml.safe_dump({
+        "id": "fresh",
+        "name": "Fresh project",
+        "path": str(project),
+    }, sort_keys=False), encoding="utf-8")
+    cache_dir = tmp_path / "reports" / "workbench" / "projects"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "fresh.json").write_text(json.dumps({
+        "project": {"path": str(project)},
+        "repository": {
+            "head": "stale-head",
+            "remote_name": "origin",
+            "remote_head": "remote-head",
+            "remote_checked": True,
+            "sync_status": "in_sync",
+        },
+        "alerts": [{"severity": "warning", "title": "缺少项目纲领", "detail": "stale"}],
+    }), encoding="utf-8")
+    subprocess.run(["git", "mv", "README.md", "RENAMED.md"], cwd=project, check=True, capture_output=True)
+    (project / "PROJECT.md").write_text("# Project charter\n", encoding="utf-8")
+    (project / "untracked.txt").write_text("current change\n", encoding="utf-8")
+    reports = project / "reports"
+    reports.mkdir()
+    (reports / "current.md").write_text("# Current report\n", encoding="utf-8")
+    monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
+
+    result = server.build_projects_overview()
+
+    assert result["projects"][0]["repository"]["head"] == current_head
+    assert set(result["projects"][0]["repository"]["dirty_files"]) == {
+        "PROJECT.md",
+        "RENAMED.md",
+        "reports/current.md",
+        "untracked.txt",
+    }
+    assert result["projects"][0]["repository"]["remote_checked"] is False
+    assert result["projects"][0]["repository"]["remote_head"] == ""
+    assert result["projects"][0]["repository"]["cached_remote_head"] == "remote-head"
+    assert result["projects"][0]["repository"]["sync_status"] == "unknown"
+    assert result["projects"][0]["reports"]["count"] == 1
+    assert result["projects"][0]["reports"]["recent_files"][0]["path"] == "reports/current.md"
+    assert not any(alert["title"] == "缺少项目纲领" for alert in result["projects"][0]["alerts"])
+
+
 def test_workbench_config_saves_three_user_model_tiers_and_role_routes(tmp_path, monkeypatch):
     from dotenv import dotenv_values
     from conflux.workbench import config_store
@@ -1206,6 +1457,128 @@ def test_workbench_config_saves_three_user_model_tiers_and_role_routes(tmp_path,
             assert saved[f"CONFLUX_RESEARCH__PROFILES__{tier}__{role}_MODEL"] == tier.lower()
 
     config_store.save_workbench_env(clear_keys=list(saved.keys()))
+
+
+def test_workbench_config_saves_independent_feature_models_and_vector_collection(tmp_path, monkeypatch):
+    from dotenv import dotenv_values
+    from conflux.workbench import config_store
+
+    env_file = tmp_path / ".env.workbench"
+    monkeypatch.setattr(config_store, "WORKBENCH_ENV", env_file)
+    monkeypatch.setattr(config_store, "_loaded_env_keys", set())
+    monkeypatch.setattr(config_store, "_original_env_values", {})
+
+    config_store.save_workbench_env(
+        feature_models={
+            "plan_analysis": {
+                "base_url": "https://plan.example/v1",
+                "model": "plan-model",
+                "api_key": "plan-key",
+                "temperature": 0.1,
+            },
+            "research_radar": {
+                "base_url": "https://radar.example/v1",
+                "model": "radar-model",
+                "api_key": "radar-key",
+                "temperature": 0.2,
+            },
+            "paper_review": {
+                "base_url": "https://review.example/v1",
+                "model": "review-model",
+                "api_key": "review-key",
+                "temperature": 0.2,
+            },
+        },
+        vector_collection_name="conflux_docs__new",
+    )
+
+    saved = dotenv_values(env_file)
+    assert saved["CONFLUX_MODELS__PLAN_ANALYSIS__MODEL"] == "plan-model"
+    assert saved["CONFLUX_MODELS__RESEARCH_RADAR__MODEL"] == "radar-model"
+    assert saved["CONFLUX_MODELS__PAPER_REVIEW__MODEL"] == "review-model"
+    assert saved["CONFLUX_MODELS__PLAN_ANALYSIS__API_KEY"] == "plan-key"
+    assert saved["CONFLUX_VECTOR_STORE__COLLECTION_NAME"] == "conflux_docs__new"
+
+    config_store.save_workbench_env(clear_keys=list(saved.keys()))
+
+
+def test_vector_index_rebuild_preserves_old_collection_until_user_deletes(tmp_path, monkeypatch):
+    import chromadb
+    from chromadb.config import Settings as ChromaSettings
+    from langchain_core.embeddings import Embeddings
+    from conflux.rag import indexer
+    from conflux.workbench import server
+
+    class FakeEmbeddings(Embeddings):
+        def embed_documents(self, texts):
+            return [[float(index), 0.0, 1.0] for index, _ in enumerate(texts, start=1)]
+
+        def embed_query(self, text):
+            return [1.0, 0.0, 1.0]
+
+    chroma_dir = tmp_path / "chroma"
+    source_dir = tmp_path / "documents"
+    source_dir.mkdir()
+    (source_dir / "paper.md").write_text(
+        "---\nchunk_id: paper:1#summary\npaper_id: '1'\n---\n\n# Paper\n\nEvidence.\n",
+        encoding="utf-8",
+    )
+    (source_dir / "paper-full.md").write_text(
+        "---\nchunk_id: paper:1#fulltext-0\npaper_id: '1'\npaper_section: introduction\n---\n\n# Full text\n\nDetails.\n",
+        encoding="utf-8",
+    )
+    client = chromadb.PersistentClient(path=str(chroma_dir), settings=ChromaSettings(anonymized_telemetry=False))
+    old = client.get_or_create_collection("conflux_docs")
+    old.add(ids=["old"], documents=["old"], embeddings=[[0.0, 1.0, 0.0]])
+
+    active = {"name": "conflux_docs"}
+
+    def fake_get(*path, default=None):
+        if path == ("vector_store", "persist_dir"):
+            return str(chroma_dir)
+        if path == ("vector_store", "collection_name"):
+            return server.os.environ.get("CONFLUX_VECTOR_STORE__COLLECTION_NAME") or active["name"]
+        if path == ("embedding", "model"):
+            return "test-embedding"
+        return default
+
+    def fake_save_workbench_env(**kwargs):
+        active["name"] = kwargs["vector_collection_name"]
+        return 1
+
+    monkeypatch.setattr(server.config, "get", fake_get)
+    monkeypatch.setattr(indexer, "get", fake_get)
+    monkeypatch.setattr(indexer, "create_embedding_model", lambda: FakeEmbeddings())
+    monkeypatch.setattr(server, "save_workbench_env", fake_save_workbench_env)
+
+    rebuilt = server.rebuild_knowledge_index({
+        "source_dir": str(source_dir),
+        "collection_name": "conflux_docs__new",
+        "embedding_api_key": "test-key",
+        "embedding_model": "test-embedding",
+    })
+
+    assert rebuilt["ok"] is True
+    assert rebuilt["active_collection"] == "conflux_docs__new"
+    names = {str(item if isinstance(item, str) else item.name) for item in client.list_collections()}
+    assert names == {"conflux_docs", "conflux_docs__new"}
+    assert client.get_collection("conflux_docs").count() == 1
+    rebuilt_payload = client.get_collection("conflux_docs__new").get(include=["metadatas"])
+    assert client.get_collection("conflux_docs__new").count() == 2
+    metadata_by_id = {
+        item_id: metadata
+        for item_id, metadata in zip(rebuilt_payload["ids"], rebuilt_payload["metadatas"])
+    }
+    assert metadata_by_id["paper:1#summary"]["content_scope"] == "summary"
+    assert metadata_by_id["paper:1#fulltext-0"]["content_scope"] == "full_text"
+    assert metadata_by_id["paper:1#fulltext-0"]["full_text_indexed"] is True
+
+    denied = server.delete_knowledge_index({"collection_name": "conflux_docs__new"})
+    assert denied["ok"] is False
+    deleted = server.delete_knowledge_index({"collection_name": "conflux_docs"})
+    assert deleted["ok"] is True
+    names = {str(item if isinstance(item, str) else item.name) for item in client.list_collections()}
+    assert names == {"conflux_docs__new"}
 
 
 def test_query_model_override_targets_only_selected_user_tier():

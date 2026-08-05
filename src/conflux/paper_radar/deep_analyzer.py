@@ -397,11 +397,6 @@ def _download_pdf(paper_dict: dict[str, Any], downloader: PDFDownloader) -> Path
     paper_id = str(paper_dict.get("id") or "")
     pdf_url = str(paper_dict.get("pdf_url") or "")
 
-    # Try arXiv URL first if source is arxiv
-    if not pdf_url and paper_dict.get("source") == "arxiv":
-        from conflux.paper_ingestion.pdf_downloader import arxiv_pdf_url
-        pdf_url = arxiv_pdf_url(paper_id)
-
     if not pdf_url:
         return None
 

@@ -111,11 +111,11 @@ def discover_plan_documents(
             "message": "已发现项目纲领文档。",
         }
 
+    candidates.extend((path, "configured") for path in configured)
     for name in SUPPLEMENT_NAMES:
         candidate = casefold_paths.get(name.casefold())
         if candidate is not None:
             candidates.append((candidate, "supplement"))
-    candidates.extend((path, "configured") for path in configured)
 
     seen: set[str] = set()
     total_chars = 0

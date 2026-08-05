@@ -258,17 +258,26 @@ def _reports_stats(reports_dir: Path) -> dict[str, Any]:
     if not reports_dir.exists():
         return {"total": 0, "by_type": {}, "recent": []}
 
-    total = 0
+    report_paths = list(reports_dir.glob("*.md"))
+    query_dir = reports_dir / "workbench" / "query"
+    if query_dir.exists():
+        report_paths.extend(query_dir.rglob("*.md"))
+    report_paths = [
+        path for path in report_paths
+        if not path.name.casefold().endswith((
+            ".audit.md",
+            ".diagnostic.md",
+            ".draft.md",
+            ".sources.md",
+            ".verified.md",
+        ))
+    ]
+
     by_type: dict[str, int] = {}
     recent: list[dict] = []
 
-    for path in sorted(reports_dir.rglob("*"), reverse=True):
-        if not path.is_file():
-            continue
+    for path in sorted(report_paths, reverse=True):
         suffix = path.suffix.lower()
-        if suffix not in {".md", ".html", ".json", ".jsonl"}:
-            continue
-        total += 1
         by_type[suffix] = by_type.get(suffix, 0) + 1
         if len(recent) < 10:
             try:
@@ -283,7 +292,7 @@ def _reports_stats(reports_dir: Path) -> dict[str, Any]:
             })
 
     return {
-        "total": total,
+        "total": len(report_paths),
         "by_type": by_type,
         "recent": recent,
     }

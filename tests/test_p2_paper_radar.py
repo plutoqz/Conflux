@@ -295,6 +295,7 @@ class TestRadarPipeline:
         assert len(result.links) >= 1
         assert result.stats.total_candidates == 1
         assert result.stats.after_dedup == 1
+        assert result.links[0].relevance != 0.5
 
     def test_radar_writes_output(self, monkeypatch, tmp_path):
         from conflux.paper_radar.radar import run_paper_radar
@@ -352,11 +353,42 @@ class TestRadarPipeline:
         links = _create_project_links(
             [paper], "test-proj",
             [MockIntent()], MockContext(),
+            relevance_scores={paper.id: 0.8},
         )
         assert len(links) == 1
         assert links[0].project_id == "test-proj"
         assert links[0].paper_identity.doi == "10.1234/test"
-        assert links[0].status.value == "discovered"
+        assert links[0].status.value == "shortlisted"
+        assert links[0].relevance == 0.8
+
+    def test_deep_analysis_only_reads_shortlisted_papers(self, monkeypatch):
+        from conflux.paper_radar.radar import run_paper_radar
+        from conflux.paper_ingestion.models import PaperRecord
+        from conflux.project_registry.models import ProjectDefinition
+        from conflux.research_profile import load_profile
+
+        monkeypatch.setattr(
+            "conflux.paper_radar.radar._execute_queries",
+            lambda queries: ([PaperRecord(
+                id="unrelated",
+                title="Marine biology survey",
+                abstract="Protein folding in marine organisms.",
+                source="arxiv",
+            )], []),
+        )
+        captured = {}
+        monkeypatch.setattr(
+            "conflux.paper_radar.radar.run_deep_analysis",
+            lambda papers, *args, **kwargs: captured.setdefault("papers", papers) or [],
+        )
+        project = ProjectDefinition(id="test", name="Test", path=".")
+        profile = load_profile("profiles/example_gis_agent.yaml", validate=False)
+
+        result = run_paper_radar(project, profile)
+
+        assert result.stats.shortlisted == 0
+        assert result.stats.deep_read == 0
+        assert "papers" not in captured
 
 
 # ── Phase 1/2: Domain model extensions ────────────────────────────
@@ -457,6 +489,22 @@ class TestSemanticScholarSource:
 # ── Phase D: Deep analyzer ─────────────────────────────────────────
 
 class TestDeepAnalyzer:
+    def test_download_pdf_requires_explicit_url(self):
+        from conflux.paper_radar.deep_analyzer import _download_pdf
+
+        class Downloader:
+            calls = 0
+
+            def download(self, paper_id, pdf_url):
+                self.calls += 1
+
+        downloader = Downloader()
+
+        result = _download_pdf({"id": "2401.00001", "source": "arxiv"}, downloader)
+
+        assert result is None
+        assert downloader.calls == 0
+
     def test_chunk_text_with_page_markers(self):
         from conflux.paper_radar.deep_analyzer import _chunk_text
 

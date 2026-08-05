@@ -54,7 +54,9 @@ from conflux.project_registry import (
     public_document_context,
 )
 from conflux.progress_audit import audit_project, write_progress_artifacts
+from conflux.progress_audit.git_inspector import inspect_git_status
 from conflux.progress_audit.progress_report import load_snapshot
+from conflux.rag.indexer import EmbeddingIndexMismatchError
 from conflux.research_profile import ResearchProfile, load_profile
 from conflux.workbench.config_store import (
     WORKBENCH_ENV,
@@ -134,6 +136,15 @@ _TIER_DEFAULT_PRESETS = {
     "deep": "reasoning",
 }
 
+_FEATURE_MODEL_FALLBACKS = {
+    "profile_optimization": "cheap",
+    "paper_review": "cheap",
+    "plan_analysis": "reasoning",
+    "project_charter": "reasoning",
+    "research_radar": "reasoning",
+    "plan_translation": "cheap",
+}
+
 
 def _auth_cookie_value() -> str:
     """Derive a browser session value without exposing the access token."""
@@ -152,6 +163,14 @@ def _resolved_tier_model_config(raw: dict[str, Any], tier: str) -> dict[str, Any
     return dict(models.get(preset) or {})
 
 
+def _resolved_feature_model_config(raw: dict[str, Any], feature: str) -> dict[str, Any]:
+    models = raw.get("models") or {}
+    fallback = _FEATURE_MODEL_FALLBACKS[feature]
+    resolved = dict(models.get(fallback) or {})
+    resolved.update(dict(models.get(feature) or {}))
+    return resolved
+
+
 def build_status() -> dict[str, Any]:
     """Return sanitized local workbench status."""
 
@@ -164,6 +183,13 @@ def build_status() -> dict[str, Any]:
             f"CONFLUX_MODELS__{tier.upper()}__API_KEY",
         )
         for tier in ("quick", "standard", "deep")
+    }
+    feature_models = {
+        feature: _sanitize_model_config(
+            _resolved_feature_model_config(raw, feature),
+            f"CONFLUX_MODELS__{feature.upper()}__API_KEY",
+        )
+        for feature in _FEATURE_MODEL_FALLBACKS
     }
     embedding = dict(raw.get("embedding") or {})
     web_search = dict(raw.get("web_search") or {})
@@ -190,7 +216,9 @@ def build_status() -> dict[str, Any]:
             "reasoning": _sanitize_model_config(reasoning, "OPENAI_API_KEY"),
             "cheap": _sanitize_model_config(cheap, "OPENAI_API_KEY"),
             "tier_models": tier_models,
+            "feature_models": feature_models,
             "embedding": _sanitize_model_config(embedding, "OPENAI_API_KEY"),
+            "vector_store": build_vector_store_status(),
             "web_search": {
                 "provider": web_provider,
                 "max_results": int(web_search.get("max_results") or 5),
@@ -208,6 +236,10 @@ def build_status() -> dict[str, Any]:
             "standard_api_key": tier_models["standard"]["api_key_present"],
             "deep_api_key": tier_models["deep"]["api_key_present"],
             "embedding_api_key": _has_env("CONFLUX_EMBEDDING__API_KEY"),
+            **{
+                f"{feature}_api_key": feature_models[feature]["api_key_present"]
+                for feature in _FEATURE_MODEL_FALLBACKS
+            },
             "serpapi_api_key": _has_env("SERPAPI_API_KEY"),
             "bing_api_key": _has_env("BING_SEARCH_API_KEY"),
             "google_api_key": _has_env("GOOGLE_API_KEY"),
@@ -340,9 +372,10 @@ def optimize_inline_profile(payload: dict[str, Any]) -> dict[str, Any]:
         "negative_keywords": negative_keywords,
     }, ensure_ascii=False)
 
-    model = str(payload.get("model") or _default_model_name("cheap") or _default_model_name("reasoning")).strip()
-    base_url = str(payload.get("base_url") or _default_base_url("cheap") or _default_base_url("reasoning")).strip()
-    api_key = str(payload.get("api_key") or _default_api_key("cheap") or _default_api_key("reasoning")).strip()
+    settings = _feature_model_settings("profile_optimization")
+    model = settings["model"]
+    base_url = settings["base_url"]
+    api_key = settings["api_key"]
     result = run_model_probe({
         "model": model,
         "base_url": base_url,
@@ -351,6 +384,7 @@ def optimize_inline_profile(payload: dict[str, Any]) -> dict[str, Any]:
         "temperature": 0.2,
         "max_tokens": 1600,
         "timeout": 90,
+        "json_mode": True,
     })
     if not result.get("ok"):
         error = str(result.get("error") or "画像优化请求失败。")
@@ -387,6 +421,7 @@ def optimize_inline_profile(payload: dict[str, Any]) -> dict[str, Any]:
             "temperature": 0.35,
             "max_tokens": 1800,
             "timeout": 90,
+            "json_mode": True,
         })
         if not retry.get("ok"):
             return {"ok": False, "error": "模型优化幅度不足，强化重写请求未完成，请稍后重试。"}
@@ -766,6 +801,156 @@ def build_paper_ingestion_audit() -> dict[str, Any]:
     }
 
 
+def build_vector_store_status() -> dict[str, Any]:
+    persist_dir = Path(str(config.get("vector_store", "persist_dir", default="./data/chroma_db")))
+    if not persist_dir.is_absolute():
+        persist_dir = PROJECT_ROOT / persist_dir
+    active = str(config.get("vector_store", "collection_name", default="conflux_docs"))
+    if not persist_dir.exists():
+        return {"active": active, "persist_dir": str(persist_dir), "collections": []}
+
+    try:
+        import chromadb
+        from chromadb.config import Settings as ChromaSettings
+
+        client = chromadb.PersistentClient(
+            path=str(persist_dir),
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
+        collections = []
+        for item in client.list_collections():
+            name = str(item if isinstance(item, str) else item.name)
+            collection = client.get_collection(name)
+            preview = collection.peek(1)
+            embeddings = preview.get("embeddings")
+            dimension = len(embeddings[0]) if embeddings is not None and len(embeddings) else None
+            metadata = dict(collection.metadata or {})
+            collections.append({
+                "name": name,
+                "active": name == active,
+                "count": collection.count(),
+                "dimension": dimension,
+                "model": str(metadata.get("conflux_embedding_model") or ""),
+            })
+    except Exception as exc:
+        return {
+            "active": active,
+            "persist_dir": str(persist_dir),
+            "collections": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    collections.sort(key=lambda item: (not item["active"], item["name"]))
+    return {"active": active, "persist_dir": str(persist_dir), "collections": collections}
+
+
+def rebuild_knowledge_index(payload: dict[str, Any]) -> dict[str, Any]:
+    source_dir = Path(_path_value(payload.get("source_dir"), DEFAULT_PROMOTE_DIR))
+    if not source_dir.exists():
+        return {"ok": False, "error": f"知识文档目录不存在：{source_dir}"}
+
+    documents = _load_knowledge_documents(source_dir)
+    if not documents:
+        return {"ok": False, "error": f"知识文档目录中没有可重建的 Markdown：{source_dir}"}
+
+    current_name = str(config.get("vector_store", "collection_name", default="conflux_docs"))
+    model = str(payload.get("embedding_model") or config.get("embedding", "model", default="embedding"))
+    model_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", model).strip("-._") or "embedding"
+    requested_name = str(payload.get("collection_name") or "").strip()
+    new_name = requested_name or f"{current_name}__{model_slug}__{time.strftime('%Y%m%d_%H%M%S')}"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,510}[A-Za-z0-9]", new_name):
+        return {"ok": False, "error": "Collection 名称只能使用字母、数字、点、下划线和连字符，且长度至少为 3。"}
+    if new_name == current_name:
+        return {"ok": False, "error": "完整重建必须使用新的 collection 名称，以保留当前旧向量。"}
+
+    status = build_vector_store_status()
+    if any(item["name"] == new_name for item in status["collections"]):
+        return {"ok": False, "error": f"Collection 已存在：{new_name}"}
+
+    embedding_updates = _embedding_runtime_updates(payload)
+    if not embedding_updates.get("CONFLUX_EMBEDDING__API_KEY"):
+        return {"ok": False, "error": "完整重建需要 Embedding API Key，请先保存模型配置。"}
+    embedding_updates["CONFLUX_VECTOR_STORE__COLLECTION_NAME"] = new_name
+
+    from conflux.rag.indexer import create_vector_store, index_documents
+
+    try:
+        with _temporary_env(embedding_updates):
+            indexed = index_documents(create_vector_store(), documents)
+    except Exception as exc:
+        _delete_vector_collection(new_name)
+        return {"ok": False, "error": f"完整重建失败：{type(exc).__name__}: {exc}"}
+
+    save_workbench_env(
+        embedding_base_url=str(payload.get("embedding_base_url") or "").strip(),
+        embedding_api_key=str(payload.get("embedding_api_key") or "").strip(),
+        embedding_model=str(payload.get("embedding_model") or "").strip(),
+        vector_collection_name=new_name,
+    )
+    return {
+        "ok": True,
+        "previous_collection": current_name,
+        "active_collection": new_name,
+        "documents": len(documents),
+        "indexed": indexed,
+        "vector_store": build_vector_store_status(),
+    }
+
+
+def delete_knowledge_index(payload: dict[str, Any]) -> dict[str, Any]:
+    collection_name = str(payload.get("collection_name") or "").strip()
+    active = str(config.get("vector_store", "collection_name", default="conflux_docs"))
+    if not collection_name:
+        return {"ok": False, "error": "collection_name required"}
+    if collection_name == active:
+        return {"ok": False, "error": "当前正在使用的 collection 不能删除，请先完成一次重建并切换。"}
+    status = build_vector_store_status()
+    if not any(item["name"] == collection_name for item in status["collections"]):
+        return {"ok": False, "error": f"Collection 不存在：{collection_name}"}
+    _delete_vector_collection(collection_name)
+    return {"ok": True, "deleted": collection_name, "vector_store": build_vector_store_status()}
+
+
+def _load_knowledge_documents(source_dir: Path) -> list[Any]:
+    from langchain_core.documents import Document
+
+    documents = []
+    for path in sorted(source_dir.rglob("*.md")):
+        text = path.read_text(encoding="utf-8")
+        metadata: dict[str, Any] = {"source": path.relative_to(source_dir).as_posix()}
+        content = text
+        if text.startswith("---\n"):
+            parts = text.split("---\n", 2)
+            if len(parts) == 3:
+                parsed = yaml.safe_load(parts[1]) or {}
+                if isinstance(parsed, dict):
+                    metadata.update(parsed)
+                content = parts[2].lstrip()
+        metadata["chunk_id"] = str(metadata.get("chunk_id") or metadata["source"])
+        if metadata.get("paper_id"):
+            section = str(metadata.get("paper_section") or "")
+            scope = "summary" if section == "summary" or metadata["chunk_id"].endswith("#summary") else "full_text"
+            metadata["content_scope"] = scope
+            metadata["full_text_indexed"] = scope == "full_text"
+        documents.append(Document(page_content=content, metadata=metadata))
+    return documents
+
+
+def _delete_vector_collection(collection_name: str) -> None:
+    import chromadb
+    from chromadb.config import Settings as ChromaSettings
+
+    persist_dir = Path(str(config.get("vector_store", "persist_dir", default="./data/chroma_db")))
+    if not persist_dir.is_absolute():
+        persist_dir = PROJECT_ROOT / persist_dir
+    client = chromadb.PersistentClient(
+        path=str(persist_dir),
+        settings=ChromaSettings(anonymized_telemetry=False),
+    )
+    names = {str(item if isinstance(item, str) else item.name) for item in client.list_collections()}
+    if collection_name in names:
+        client.delete_collection(collection_name)
+
+
 def _seen_entry_should_skip(identity: str, entry: dict[str, Any], audit: dict[str, Any]) -> bool:
     retryable_states = {"full_text_missing", "full_text_failed", "full_text_extracted", "not_ingested"}
     audit_item = next(
@@ -949,19 +1134,33 @@ def run_paper_inbox(payload: dict[str, Any]) -> dict[str, Any]:
             from conflux.builtin.paper.plugin import paper_review
             from conflux.sdk.testing import make_plugin_context
 
+            settings = _feature_model_settings("paper_review")
+            if not settings["model"] or not settings["api_key"]:
+                return {
+                    "ok": False,
+                    "error": "尚未配置可用的论文语义评审模型，请先到“模型与环境”完成配置。",
+                }
             profile_version = hashlib.sha256(
                 json.dumps(result.profile.to_dict(), ensure_ascii=False, sort_keys=True).encode("utf-8")
             ).hexdigest()[:16]
-            ctx = make_plugin_context(config={"model_preset": "cheap"})
-            review_result = paper_review(
-                ctx,
-                papers=[paper.to_dict() for paper, _ in result.analyzed],
-                profile_id=result.profile.id,
-                profile_version=profile_version,
-                profile_keywords=result.profile.keywords,
-                profile_questions=result.profile.research_questions,
-                profile_fields=result.profile.fields,
-            )
+            model_updates = {
+                "CONFLUX_MODELS__PAPER_REVIEW__PROVIDER": "openai_compatible",
+                "CONFLUX_MODELS__PAPER_REVIEW__MODEL": settings["model"],
+                "CONFLUX_MODELS__PAPER_REVIEW__BASE_URL": settings["base_url"],
+                "CONFLUX_MODELS__PAPER_REVIEW__API_KEY": settings["api_key"],
+                "CONFLUX_MODELS__PAPER_REVIEW__TEMPERATURE": str(settings["temperature"]),
+            }
+            with _temporary_env(model_updates):
+                ctx = make_plugin_context(config={"model_preset": "paper_review"})
+                review_result = paper_review(
+                    ctx,
+                    papers=[paper.to_dict() for paper, _ in result.analyzed],
+                    profile_id=result.profile.id,
+                    profile_version=profile_version,
+                    profile_keywords=result.profile.keywords,
+                    profile_questions=result.profile.research_questions,
+                    profile_fields=result.profile.fields,
+                )
             review_status = review_result.status.value
             review_error = review_result.error
             review_next_action = str(review_result.output.get("next_action") or "")
@@ -1023,6 +1222,9 @@ def save_model_config(payload: dict[str, Any]) -> dict[str, Any]:
         tier_models = payload.get("tier_models") or {}
         if not isinstance(tier_models, dict):
             return {"ok": False, "error": "tier_models 必须是对象。"}
+        feature_models = payload.get("feature_models") or {}
+        if not isinstance(feature_models, dict):
+            return {"ok": False, "error": "feature_models 必须是对象。"}
         count = save_workbench_env(
             base_url=str(payload.get("base_url") or "").strip(),
             api_key=str(payload.get("api_key") or "").strip(),
@@ -1030,6 +1232,10 @@ def save_model_config(payload: dict[str, Any]) -> dict[str, Any]:
             tier_models={
                 tier: dict(tier_models.get(tier) or {})
                 for tier in ("quick", "standard", "deep")
+            },
+            feature_models={
+                feature: dict(feature_models.get(feature) or {})
+                for feature in _FEATURE_MODEL_FALLBACKS
             },
             embedding_base_url=str(payload.get("embedding_base_url") or "").strip(),
             embedding_api_key=str(payload.get("embedding_api_key") or "").strip(),
@@ -1150,17 +1356,29 @@ def run_paper_promotion(payload: dict[str, Any]) -> dict[str, Any]:
         if emb_model:
             emb_updates["CONFLUX_EMBEDDING__MODEL"] = emb_model
 
-    with _temporary_env(emb_updates):
-        result = promote_inbox(
-            inbox,
-            out_dir=out_dir,
-            policy_name=str(payload.get("policy") or "default"),
-            allow_full_text=bool(payload.get("full_text")),
-            pinned_ids=list(pinned),
-            index=do_index,
-            pdf_dir=_optional_path(payload.get("pdf_dir")),
-            download_pdfs=bool(payload.get("download_pdfs")),
-        )
+    try:
+        with _temporary_env(emb_updates):
+            result = promote_inbox(
+                inbox,
+                out_dir=out_dir,
+                policy_name=str(payload.get("policy") or "default"),
+                allow_full_text=bool(payload.get("full_text")),
+                pinned_ids=list(pinned),
+                index=do_index,
+                pdf_dir=_optional_path(payload.get("pdf_dir")),
+                download_pdfs=bool(payload.get("download_pdfs")),
+            )
+    except EmbeddingIndexMismatchError as exc:
+        return {
+            "ok": False,
+            "error": "embedding_index_mismatch",
+            "reason": str(exc),
+            "collection_name": exc.collection_name,
+            "stored_model": exc.stored_model,
+            "current_model": exc.current_model,
+            "stored_dimension": exc.stored_dimension,
+            "current_dimension": exc.current_dimension,
+        }
     actions: dict[str, int] = {}
     for decision in result.decisions:
         actions[decision.action] = actions.get(decision.action, 0) + 1
@@ -1342,12 +1560,22 @@ def _actual_paper_ingestion_label(summary: dict[str, Any], documents: list[dict[
 def run_model_probe(payload: dict[str, Any]) -> dict[str, Any]:
     """Call an OpenAI-compatible chat completion endpoint."""
 
-    model = str(payload.get("model") or _default_model_name("reasoning")).strip()
-    base_url = str(payload.get("base_url") or _default_base_url("reasoning")).strip()
-    api_key = str(payload.get("api_key") or _default_api_key("reasoning")).strip()
+    preset = str(payload.get("model_preset") or "reasoning").strip()
+    if preset in _FEATURE_MODEL_FALLBACKS:
+        defaults = _feature_model_settings(preset)
+        default_model = defaults["model"]
+        default_base_url = defaults["base_url"]
+        default_api_key = defaults["api_key"]
+    else:
+        default_model = _default_model_name(preset) or _default_model_name("reasoning")
+        default_base_url = _default_base_url(preset) or _default_base_url("reasoning")
+        default_api_key = _default_api_key(preset) or _default_api_key("reasoning")
+    model = str(payload.get("model") or default_model).strip()
+    base_url = str(payload.get("base_url") or default_base_url).strip()
+    api_key = str(payload.get("api_key") or default_api_key).strip()
     prompt = str(payload.get("prompt") or "Reply with a short readiness check.").strip()
     temperature = float(payload.get("temperature") or 0.2)
-    max_tokens = max(1, min(4096, int(payload.get("max_tokens") or 256)))
+    max_tokens = max(1, min(16384, int(payload.get("max_tokens") or 256)))
 
     if not model:
         return {"ok": False, "error": "Model name is required."}
@@ -1363,6 +1591,8 @@ def run_model_probe(payload: dict[str, Any]) -> dict[str, Any]:
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if payload.get("json_mode"):
+        body["response_format"] = {"type": "json_object"}
     request = urllib.request.Request(
         endpoint,
         data=json.dumps(body).encode("utf-8"),
@@ -1511,34 +1741,88 @@ def build_projects_overview() -> dict[str, Any]:
     for project in loaded.projects:
         cached = _load_project_cache(project.id)
         if cached and (cached.get("project") or {}).get("path") == project.path:
-            cached["project"] = project.to_dict()
-            # Repository/audit snapshots may be cached, but document
-            # discovery must be fresh because users edit local Markdown.
-            cached["plan_context"] = public_document_context(discover_plan_documents(project, max_files=24))
-            # Keep the cached alert list consistent with the fresh charter
-            # result; otherwise an old "缺少项目纲领" warning survives after
-            # the user adds or registers a local blueprint.
-            cached["alerts"] = [
-                alert for alert in (cached.get("alerts") or [])
-                if str((alert or {}).get("title") or "") != "缺少项目纲领"
+            overview = monitor_project(
+                project,
+                audit_root=PROJECT_ROOT / DEFAULT_PROGRESS_DIR,
+                check_remote=False,
+            )
+            overview["project"] = project.to_dict()
+            cached_repository = cached.get("repository") or {}
+            local_git = inspect_git_status(project.path)
+            repository = overview.get("repository") or {}
+            cached_remote_head = cached_repository.get("remote_head") or cached_repository.get("cached_remote_head") or ""
+            repository.update({
+                "is_repository": local_git.is_repository,
+                "root": local_git.root,
+                "branch": local_git.branch,
+                "head": local_git.head,
+                "dirty_files": local_git.dirty_files,
+                "checked_at": local_git.checked_at,
+                "errors": local_git.errors,
+                "upstream": local_git.upstream,
+                "ahead": local_git.ahead,
+                "behind": local_git.behind,
+                "remote_checked": False,
+                "remote_head": "",
+                "cached_remote_head": cached_remote_head,
+                "remote_name": repository.get("remote_name") or cached_repository.get("remote_name") or "",
+                "remote_url": repository.get("remote_url") or cached_repository.get("remote_url") or "",
+                "remote_default_branch": repository.get("remote_default_branch") or cached_repository.get("remote_default_branch") or "",
+                "remote_branch": repository.get("remote_branch") or cached_repository.get("remote_branch") or "",
+            })
+            if local_git.errors:
+                repository["sync_status"] = "error"
+            elif not local_git.is_repository:
+                repository["sync_status"] = "not_applicable"
+            elif local_git.ahead is None or local_git.behind is None:
+                repository["sync_status"] = "unknown" if repository.get("remote_name") else "local_only"
+            else:
+                repository["sync_status"] = local_git.sync_status
+            overview["repository"] = repository
+            overview["plan_context"] = public_document_context(
+                discover_plan_documents(project, max_files=24)
+            )
+            overview["alerts"] = [
+                alert for alert in (overview.get("alerts") or [])
+                if str((alert or {}).get("title") or "") not in {
+                    "Git 状态读取失败",
+                    "存在未提交变更",
+                    "缺少项目纲领",
+                }
             ]
-            if (cached["plan_context"].get("charter") or {}).get("status") == "missing":
-                cached["alerts"].append({
+            if local_git.errors:
+                overview["alerts"].append({
+                    "severity": "error",
+                    "title": "Git 状态读取失败",
+                    "detail": local_git.errors[0],
+                })
+            elif local_git.dirty_files:
+                overview["alerts"].append({
+                    "severity": "warning",
+                    "title": "存在未提交变更",
+                    "detail": f"本地工作区有 {len(local_git.dirty_files)} 个未提交文件。",
+                })
+            if (overview["plan_context"].get("charter") or {}).get("status") == "missing":
+                overview["alerts"].append({
                     "severity": "warning",
                     "title": "缺少项目纲领",
                     "detail": "只读监控仍可使用，但智能计划分析的依据不足。可生成 PROJECT.md 草案后人工确认。",
                 })
-            # Inject P2 research config for the frontend research tab
-            cached["research"] = project.research
-            projects.append(cached)
+            severities = {alert.get("severity") for alert in overview["alerts"]}
+            overview["health"] = (
+                "error" if "error" in severities
+                else "warning" if "warning" in severities
+                else "info" if "info" in severities
+                else "ok"
+            )
         else:
             overview = monitor_project(
                 project,
                 audit_root=PROJECT_ROOT / DEFAULT_PROGRESS_DIR,
                 check_remote=False,
             )
-            overview["research"] = project.research
-            projects.append(overview)
+        overview["research"] = project.research
+        projects.append(overview)
     return {
         "ok": True,
         "projects": projects,
@@ -1642,6 +1926,31 @@ def suggest_project_plan(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _plan_analysis_context(project: ProjectDefinition) -> dict[str, Any]:
+    context = discover_plan_documents(project)
+    configured_sources = {
+        str(path).replace("\\", "/").casefold()
+        for path in project.plan.source_documents
+    }
+    if configured_sources:
+        context["documents"] = [
+            item for item in context.get("documents") or []
+            if str(item.get("path") or "").replace("\\", "/").casefold() in configured_sources
+            or item.get("kind") == "charter"
+        ]
+        normalized_warnings = []
+        for warning in context.get("warnings") or []:
+            normalized = str(warning).replace("\\", "/").casefold()
+            if any(path in normalized for path in configured_sources):
+                normalized_warnings.append(warning)
+            elif "文档总上下文达到上限" in str(warning) and any(
+                item.get("truncated") for item in context["documents"]
+            ):
+                normalized_warnings.append(warning)
+        context["warnings"] = normalized_warnings
+    return context
+
+
 def analyze_project_plan(payload: dict[str, Any]) -> dict[str, Any]:
     """Generate a reviewable LLM plan analysis without changing project files."""
 
@@ -1650,7 +1959,7 @@ def analyze_project_plan(payload: dict[str, Any]) -> dict[str, Any]:
     if project is None:
         return {"ok": False, "reason": f"未找到已登记项目：{project_id}", "error": "project_not_found"}
 
-    context = discover_plan_documents(project)
+    context = _plan_analysis_context(project)
     public_context = public_document_context(context)
     if not context.get("documents"):
         return {
@@ -1660,9 +1969,10 @@ def analyze_project_plan(payload: dict[str, Any]) -> dict[str, Any]:
             "plan_context": public_context,
         }
 
-    model = _default_model_name("reasoning") or _default_model_name("cheap")
-    base_url = _default_base_url("reasoning") or _default_base_url("cheap")
-    api_key = _default_api_key("reasoning") or _default_api_key("cheap")
+    settings = _feature_model_settings("plan_analysis")
+    model = settings["model"]
+    base_url = settings["base_url"]
+    api_key = settings["api_key"]
     if not model or not api_key:
         return {
             "ok": False,
@@ -1680,13 +1990,16 @@ def analyze_project_plan(payload: dict[str, Any]) -> dict[str, Any]:
         "api_key": api_key,
         "prompt": prompt,
         "temperature": 0.1,
-        "max_tokens": 7200,
-        "timeout": 150,
+        "max_tokens": 12000,
+        "timeout": 240,
+        "json_mode": True,
     })
     if not result.get("ok"):
         return _plan_model_error(result, public_context)
 
     raw_content = str(result.get("content") or "")
+    analysis_result = result
+    repaired_once = False
     try:
         parsed = _parse_json_object(raw_content)
         analysis = normalize_plan_analysis(
@@ -1706,8 +2019,9 @@ def analyze_project_plan(payload: dict[str, Any]) -> dict[str, Any]:
             "api_key": api_key,
             "prompt": repair_prompt,
             "temperature": 0.0,
-            "max_tokens": 7200,
-            "timeout": 150,
+            "max_tokens": 12000,
+            "timeout": 240,
+            "json_mode": True,
         })
         if not repaired.get("ok"):
             return _plan_model_error(repaired, public_context, prefix="计划结构修复失败")
@@ -1720,6 +2034,8 @@ def analyze_project_plan(payload: dict[str, Any]) -> dict[str, Any]:
                 model=str(repaired.get("model") or model),
                 code_revision=str((overview.get("repository") or {}).get("head") or ""),
             )
+            analysis_result = repaired
+            repaired_once = True
         except ValueError as second_error:
             return {
                 "ok": False,
@@ -1728,6 +2044,12 @@ def analyze_project_plan(payload: dict[str, Any]) -> dict[str, Any]:
                 "plan_context": public_context,
             }
 
+    analysis["analysis"].update({
+        "elapsed_ms": int(analysis_result.get("elapsed_ms") or 0),
+        "usage": dict(analysis_result.get("usage") or {}),
+        "repaired_once": repaired_once,
+        "document_count": len(context.get("documents") or []),
+    })
     analysis["diff"] = analysis_diff(project, analysis)
     path = _write_plan_analysis_cache(project.id, analysis)
     return {
@@ -1757,7 +2079,7 @@ def apply_project_plan_analysis(payload: dict[str, Any]) -> dict[str, Any]:
     if not expected or expected != actual_generated:
         return {"ok": False, "error": "计划分析结果已变化，请重新审查后确认。"}
 
-    current_context = discover_plan_documents(project)
+    current_context = _plan_analysis_context(project)
     current_hashes = {
         str(item.get("path")): str(item.get("sha256"))
         for item in current_context.get("documents") or []
@@ -1852,8 +2174,9 @@ def generate_project_charter(payload: dict[str, Any]) -> dict[str, Any]:
     charter = context.get("charter") or {}
     if str(charter.get("path") or "").casefold() == "project.md":
         return {"ok": False, "reason": "项目中已经存在 PROJECT.md，无需生成新草案。", "error": "project_charter_exists"}
-    model = _default_model_name("reasoning") or _default_model_name("cheap")
-    api_key = _default_api_key("reasoning") or _default_api_key("cheap")
+    settings = _feature_model_settings("project_charter")
+    model = settings["model"]
+    api_key = settings["api_key"]
     if not model or not api_key:
         return {
             "ok": False,
@@ -1862,7 +2185,7 @@ def generate_project_charter(payload: dict[str, Any]) -> dict[str, Any]:
         }
     result = run_model_probe({
         "model": model,
-        "base_url": _default_base_url("reasoning") or _default_base_url("cheap"),
+        "base_url": settings["base_url"],
         "api_key": api_key,
         "prompt": charter_draft_prompt(project, context),
         "temperature": 0.2,
@@ -1962,19 +2285,65 @@ def run_project_research_radar(payload: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": f"研究画像文件不存在：{resolved}"}
 
     try:
+        from conflux.model_factory import create_chat_model
         from conflux.paper_radar.radar import run_paper_radar_from_profile
         from conflux.research_profile import load_profile
 
+        settings = _feature_model_settings("research_radar")
+        if not settings["model"] or not settings["api_key"]:
+            return {"ok": False, "error": "尚未配置可用的研究雷达模型，请先到“模型与环境”完成配置。"}
+        model_updates = {
+            "CONFLUX_MODELS__RESEARCH_RADAR__PROVIDER": "openai_compatible",
+            "CONFLUX_MODELS__RESEARCH_RADAR__MODEL": settings["model"],
+            "CONFLUX_MODELS__RESEARCH_RADAR__BASE_URL": settings["base_url"],
+            "CONFLUX_MODELS__RESEARCH_RADAR__API_KEY": settings["api_key"],
+            "CONFLUX_MODELS__RESEARCH_RADAR__TEMPERATURE": str(settings["temperature"]),
+        }
         profile = load_profile(str(resolved), validate=False)
-        result = run_paper_radar_from_profile(
-            project=project,
-            profile_path=str(resolved),
-            out_dir=str(PROJECT_ROOT / DEFAULT_PROGRESS_DIR / "workbench" / "projects"),
+        with _temporary_env(model_updates):
+            review_model = create_chat_model(
+                "research_radar",
+                max_tokens=4096,
+                timeout=120,
+                max_retries=0,
+            )
+            result = run_paper_radar_from_profile(
+                project=project,
+                profile_path=str(resolved),
+                out_dir=str(PROJECT_ROOT / DEFAULT_PROGRESS_DIR / "workbench" / "projects"),
+                llm_review=True,
+                review_model=review_model,
+            )
+
+        all_sources_failed = bool(result.stats.sources_used) and set(result.stats.failed_sources) >= set(
+            result.stats.sources_used
+        )
+        usable = not all_sources_failed and bool(result.links) and bool(result.stats.shortlisted)
+        radar_status = (
+            "source_failed"
+            if all_sources_failed
+            else "ready"
+            if result.stats.shortlisted
+            else "no_candidates"
+            if not result.links
+            else "no_shortlist"
+        )
+        radar_reason = (
+            "所有已配置论文数据源均执行失败，请检查网络或数据源状态。"
+            if all_sources_failed
+            else ""
+            if result.stats.shortlisted
+            else "本轮没有检索到候选论文。"
+            if not result.links
+            else "本轮候选均未达到精读阈值，已保留供人工审查。"
         )
 
         # Cache result
         cache = {
             "project_id": result.project_id,
+            "usable": usable,
+            "status": radar_status,
+            "reason": radar_reason,
             "context": result.context.model_dump(),
             "intents": [i.model_dump() for i in result.intents],
             "queries": [q.model_dump() for q in result.queries],
@@ -1985,12 +2354,18 @@ def run_project_research_radar(payload: dict[str, Any]) -> dict[str, Any]:
         _write_research_cache(project_id, cache)
 
         return {
-            "ok": True,
+            "ok": not all_sources_failed,
+            "error": radar_reason if all_sources_failed else "",
+            "usable": usable,
+            "status": radar_status,
+            "reason": radar_reason,
             "project_id": result.project_id,
             "intent_count": len(result.intents),
             "query_count": len(result.queries),
             "link_count": len(result.links),
-            "candidate_count": result.stats.total_candidates,
+            "candidate_count": len(result.links),
+            "shortlisted_count": result.stats.shortlisted,
+            "deep_read_count": result.stats.deep_read,
             "saved_count": sum(1 for l in result.links if l.status.value == "saved"),
             "sources": result.stats.sources_used,
             "failed_sources": result.stats.failed_sources,
@@ -2165,14 +2540,16 @@ def _translate_plan_suggestions(suggestions: list[dict[str, Any]]) -> tuple[list
 
 待翻译内容：
 """ + json.dumps(pending, ensure_ascii=False)
+    settings = _feature_model_settings("plan_translation")
     result = run_model_probe({
-        "model": _default_model_name("cheap") or _default_model_name("reasoning"),
-        "base_url": _default_base_url("cheap") or _default_base_url("reasoning"),
-        "api_key": _default_api_key("cheap") or _default_api_key("reasoning"),
+        "model": settings["model"],
+        "base_url": settings["base_url"],
+        "api_key": settings["api_key"],
         "prompt": prompt,
         "temperature": 0.0,
         "max_tokens": 3200,
         "timeout": 90,
+        "json_mode": True,
     })
     if not result.get("ok"):
         error = str(result.get("error") or "翻译模型不可用")
@@ -2579,6 +2956,12 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/papers/promote":
                 self._send_json(run_paper_promotion(payload))
                 return
+            if parsed.path == "/api/knowledge/index/rebuild":
+                self._send_json(rebuild_knowledge_index(payload))
+                return
+            if parsed.path == "/api/knowledge/index/delete":
+                self._send_json(delete_knowledge_index(payload))
+                return
             if parsed.path == "/api/model/test":
                 self._send_json(run_model_probe(payload))
                 return
@@ -2866,14 +3249,16 @@ def _available_port(host: str, preferred: int) -> int:
 
 
 def _list_report_files(root: Path) -> list[dict[str, Any]]:
-    """列出最终报告（仅 workbench/query/ 下 .md，排除中间产物）。"""
+    """列出最终报告，排除中间产物。"""
     query_root = root / "workbench" / "query"
-    if not query_root.exists():
+    if not root.exists():
         return []
-    # 中间产物后缀（小写匹配）
     INTERMEDIATE_SUFFIXES = (".draft.md", ".verified.md", ".audit.md", ".sources.md", ".diagnostic.md")
     files = []
-    for path in sorted(query_root.rglob("*.md")):
+    candidates = list(root.glob("*.md"))
+    if query_root.exists():
+        candidates.extend(query_root.rglob("*.md"))
+    for path in sorted(candidates):
         if not path.is_file():
             continue
         try:
@@ -3037,6 +3422,22 @@ def _default_api_key(preset: str) -> str:
     return os.environ.get(name) or os.environ.get("OPENAI_API_KEY") or ""
 
 
+def _feature_model_settings(feature: str) -> dict[str, Any]:
+    fallback = _FEATURE_MODEL_FALLBACKS[feature]
+    raw = config.load()
+    cfg = _resolved_feature_model_config(raw, feature)
+    return {
+        "model": str(cfg.get("model") or _default_model_name(fallback)).strip(),
+        "base_url": str(cfg.get("base_url") or _default_base_url(fallback)).strip(),
+        "api_key": str(
+            cfg.get("api_key")
+            or os.environ.get(f"CONFLUX_MODELS__{feature.upper()}__API_KEY")
+            or _default_api_key(fallback)
+        ).strip(),
+        "temperature": float(cfg.get("temperature") if cfg.get("temperature") is not None else 0.2),
+    }
+
+
 def _path_value(value: Any, default: str) -> str:
     text = str(value or default).strip()
     path = Path(text).expanduser()
@@ -3048,6 +3449,41 @@ def _path_value(value: Any, default: str) -> str:
 def _optional_path(value: Any) -> str | None:
     text = str(value or "").strip()
     return _path_value(text, text) if text else None
+
+
+def _embedding_runtime_updates(payload: dict[str, Any]) -> dict[str, str]:
+    raw = config.load()
+    embedding = raw.get("embedding") or {}
+    reasoning = (raw.get("models") or {}).get("reasoning") or {}
+    api_key = str(
+        payload.get("embedding_api_key")
+        or os.environ.get("CONFLUX_EMBEDDING__API_KEY")
+        or embedding.get("api_key")
+        or os.environ.get("OPENAI_API_KEY")
+        or reasoning.get("api_key")
+        or ""
+    ).strip()
+    base_url = str(
+        payload.get("embedding_base_url")
+        or os.environ.get("CONFLUX_EMBEDDING__BASE_URL")
+        or embedding.get("base_url")
+        or reasoning.get("base_url")
+        or ""
+    ).strip()
+    model = str(
+        payload.get("embedding_model")
+        or os.environ.get("CONFLUX_EMBEDDING__MODEL")
+        or embedding.get("model")
+        or ""
+    ).strip()
+    updates = {}
+    if api_key:
+        updates["CONFLUX_EMBEDDING__API_KEY"] = api_key
+    if base_url:
+        updates["CONFLUX_EMBEDDING__BASE_URL"] = base_url
+    if model:
+        updates["CONFLUX_EMBEDDING__MODEL"] = model
+    return updates
 
 
 def _rel(path: str | Path) -> str:
