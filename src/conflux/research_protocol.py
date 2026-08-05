@@ -214,6 +214,68 @@ class ActionProposal:
         )
 
 
+@dataclass(slots=True)
+class JudgmentRecord:
+    """Model-produced judgment that cannot mutate evidence records."""
+
+    judgment_id: str
+    mode: str
+    verdict: str
+    rationale: str = ""
+    confidence: float = 0.0
+    subquestion_id: str = ""
+    input_snapshot_id: str = ""
+    evidence_ids: list[str] = field(default_factory=list)
+    payload: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "JudgmentRecord":
+        return cls(
+            judgment_id=str(payload.get("judgment_id") or ""),
+            mode=str(payload.get("mode") or ""),
+            verdict=str(payload.get("verdict") or ""),
+            rationale=str(payload.get("rationale") or ""),
+            confidence=_bounded_float(payload.get("confidence"), default=0.0),
+            subquestion_id=str(payload.get("subquestion_id") or ""),
+            input_snapshot_id=str(payload.get("input_snapshot_id") or ""),
+            evidence_ids=_string_list(payload.get("evidence_ids")),
+            payload=dict(payload.get("payload") or {}),
+        )
+
+
+@dataclass(slots=True)
+class ClaimRecord:
+    """Atomic generated claim and its evidence/verification binding."""
+
+    claim_id: str
+    subquestion_id: str
+    text: str
+    claim_type: str = "analysis"
+    derivation_type: str = "model_analysis"
+    derivation_inputs: list[str] = field(default_factory=list)
+    generation_attribution: dict[str, Any] = field(default_factory=dict)
+    verification_result: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ClaimRecord":
+        return cls(
+            claim_id=str(payload.get("claim_id") or ""),
+            subquestion_id=str(payload.get("subquestion_id") or ""),
+            text=str(payload.get("text") or payload.get("claim") or "").strip(),
+            claim_type=str(payload.get("claim_type") or "analysis"),
+            derivation_type=str(payload.get("derivation_type") or "model_analysis"),
+            derivation_inputs=_string_list(payload.get("derivation_inputs")),
+            generation_attribution=dict(payload.get("generation_attribution") or {}),
+            verification_result=dict(payload.get("verification_result") or {}),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class LedgerSnapshot:
     """Read-only evidence view consumed after a Barrier."""
@@ -223,6 +285,7 @@ class LedgerSnapshot:
     round: str
     records: tuple[EvidenceRecord, ...] = ()
     source_statuses: tuple[tuple[str, dict[str, Any]], ...] = ()
+    judgments: tuple[JudgmentRecord, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -231,6 +294,7 @@ class LedgerSnapshot:
             "round": self.round,
             "records": [record.to_dict() for record in self.records],
             "source_statuses": {key: value for key, value in self.source_statuses},
+            "judgments": [judgment.to_dict() for judgment in self.judgments],
         }
 
     @classmethod
@@ -246,12 +310,18 @@ class LedgerSnapshot:
             for item in payload.get("records") or []
             if isinstance(item, dict)
         )
+        judgments = tuple(
+            JudgmentRecord.from_dict(item)
+            for item in payload.get("judgments") or []
+            if isinstance(item, dict)
+        )
         return cls(
             snapshot_id=str(payload.get("snapshot_id") or ""),
             run_id=str(payload.get("run_id") or ""),
             round=str(payload.get("round") or ""),
             records=records,
             source_statuses=status_items,
+            judgments=judgments,
         )
 
     def primary_records(self) -> tuple[EvidenceRecord, ...]:
@@ -266,6 +336,7 @@ class EvidenceLedger:
     records: dict[str, EvidenceRecord] = field(default_factory=dict)
     source_statuses: dict[str, dict[str, Any]] = field(default_factory=dict)
     action_proposals: list[ActionProposal] = field(default_factory=list)
+    judgments: list[JudgmentRecord] = field(default_factory=list)
     snapshot_count: int = 0
 
     def append_record(self, record: EvidenceRecord) -> str:
@@ -345,6 +416,11 @@ class EvidenceLedger:
         if not any(item.action_id == proposal.action_id for item in self.action_proposals):
             self.action_proposals.append(proposal)
 
+    def append_judgment(self, judgment: JudgmentRecord) -> str:
+        if not any(item.judgment_id == judgment.judgment_id for item in self.judgments):
+            self.judgments.append(judgment)
+        return judgment.judgment_id
+
     def freeze(self, round_name: str) -> LedgerSnapshot:
         self.snapshot_count += 1
         return LedgerSnapshot(
@@ -353,6 +429,7 @@ class EvidenceLedger:
             round=round_name,
             records=tuple(self.records.values()),
             source_statuses=tuple((key, dict(value)) for key, value in self.source_statuses.items()),
+            judgments=tuple(self.judgments),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -361,6 +438,7 @@ class EvidenceLedger:
             "records": [record.to_dict() for record in self.records.values()],
             "source_statuses": self.source_statuses,
             "action_proposals": [item.to_dict() for item in self.action_proposals],
+            "judgments": [item.to_dict() for item in self.judgments],
             "snapshot_count": self.snapshot_count,
         }
 
@@ -375,6 +453,11 @@ class EvidenceLedger:
             action_proposals=[
                 ActionProposal.from_dict(item)
                 for item in payload.get("action_proposals") or []
+                if isinstance(item, dict)
+            ],
+            judgments=[
+                JudgmentRecord.from_dict(item)
+                for item in payload.get("judgments") or []
                 if isinstance(item, dict)
             ],
             snapshot_count=max(0, _int_value(payload.get("snapshot_count"))),

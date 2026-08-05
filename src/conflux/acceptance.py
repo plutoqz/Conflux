@@ -184,6 +184,9 @@ def _validate_v2_report(
     audit_metrics = evidence_payload.get("audit_metrics") or {}
     factcheck = evidence_payload.get("factcheck") or {}
     run_summary = evidence_payload.get("run_summary") or {}
+    ledger_snapshot = evidence_payload.get("ledger_snapshot") or run_summary.get("ledger_snapshot") or {}
+    claim_records = evidence_payload.get("claim_records") or run_summary.get("claim_records") or []
+    attribution_audit = evidence_payload.get("attribution_audit") or run_summary.get("attribution_audit") or {}
 
     required_sections = ("## 直接回答", "## 可信度说明", "## FactCheck 验证")
     checks["v2_required_sections"] = all(section in markdown for section in required_sections)
@@ -237,6 +240,45 @@ def _validate_v2_report(
     )
     if not checks["factcheck_structured"]:
         issues.append("V2 FactCheck 未完成结构化记录或验证失败。")
+
+    protocol_present = bool(ledger_snapshot.get("snapshot_id") or claim_records)
+    checks["ledger_snapshot_present"] = (
+        not protocol_present
+        or bool(ledger_snapshot.get("snapshot_id"))
+    )
+    checks["claim_records_structured"] = (
+        not protocol_present
+        or all(
+            isinstance(item, dict)
+            and str(item.get("claim_id") or "").strip()
+            and str(item.get("text") or "").strip()
+            and isinstance(item.get("derivation_inputs") or [], list)
+            and isinstance(item.get("verification_result") or {}, dict)
+            for item in claim_records
+        )
+    )
+    delivery_status = str(run_summary.get("delivery_status") or "")
+    checks["delivery_decision_present"] = (
+        not protocol_present
+        or delivery_status in {"deliverable", "limited", "diagnostic_only"}
+    )
+    generation_trace_invalid = bool(
+        audit_metrics.get("generation_trace_invalid")
+        or attribution_audit.get("generation_trace_invalid")
+    )
+    checks["attribution_audit_consistent"] = (
+        not protocol_present
+        or not generation_trace_invalid
+        or delivery_status == "diagnostic_only"
+    )
+    if not checks["ledger_snapshot_present"]:
+        issues.append("V2 EvidenceLedger 快照缺少不可变 snapshot_id。")
+    if not checks["claim_records_structured"]:
+        issues.append("V2 ClaimRecord 缺少声明文本或验证结构。")
+    if not checks["delivery_decision_present"]:
+        issues.append("V2 运行摘要缺少最终交付决策。")
+    if not checks["attribution_audit_consistent"]:
+        issues.append("V2 归因审计失败但最终交付决策未降级为 diagnostic_only。")
 
     evidence_summary = {
         "total_nodes": graph_summary.get("total_nodes", 0),

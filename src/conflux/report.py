@@ -518,6 +518,9 @@ def build_v2_evidence_payload(state: dict[str, Any]) -> dict[str, Any]:
         "nodes": nodes,
         "citation_map": citation_map,
         "audit_metrics": state.get("_audit_metrics") or {},
+        "claim_records": state.get("_claim_records") or [],
+        "attribution_audit": state.get("_attribution_audit") or {},
+        "ledger_snapshot": state.get("_ledger_snapshot") or {},
         "factcheck": {
             "status": state.get("_factcheck_status") or "",
             "findings": state.get("_factcheck_findings") or {},

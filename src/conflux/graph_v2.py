@@ -58,6 +58,12 @@ class V2State(TypedDict, total=False):
     _correction_actions: list
     _correction_round: int
     _retrieval_round: int
+    _independent_analysis: dict
+    _model_arbitration: dict
+    _model_verification: dict
+    _claim_records: list
+    _attribution_audit: dict
+    _generation_trace_invalid: bool
     _run_summary: dict
     _verified_answer: str
     final_answer: str
@@ -80,7 +86,15 @@ from ._graph_utils import (
 )
 from .rag.reranker import SemanticReranker
 from .research_modes import ResearchModeProfile
-from .research_protocol import ActionProposal, EvidenceLedger, LedgerSnapshot
+from .research_protocol import ClaimRecord, ActionProposal, EvidenceLedger, JudgmentRecord, LedgerSnapshot
+from .research_prompts import (
+    ARBITRATION_PROMPT,
+    ARBITRATION_SYSTEM,
+    INDEPENDENT_ANALYSIS_PROMPT,
+    INDEPENDENT_ANALYSIS_SYSTEM,
+    VERIFICATION_PROMPT,
+    VERIFICATION_SYSTEM,
+)
 from .source_status import EvidenceItem, SourceResult, parse_source_results
 from .tools.rag import create_rag_tool
 from .tools.web import create_web_tool
@@ -399,6 +413,12 @@ def _new_state(
         "_correction_actions": [],
         "_correction_round": 0,
         "_retrieval_round": 0,
+        "_independent_analysis": {},
+        "_model_arbitration": {},
+        "_model_verification": {},
+        "_claim_records": [],
+        "_attribution_audit": {},
+        "_generation_trace_invalid": False,
     }
 
 
@@ -424,9 +444,12 @@ BUDGET_WARNING_LINE = "⚠️ Keep answers concise, you are near the budget limi
 _STAGE_LABELS = {
     "decompose": "decompose query",
     "retrieve": "retrieve evidence",
+    "arbitration": "arbitrate evidence",
     "generate": "generate section",
     "synthesize": "synthesize report",
     "audit": "audit & factcheck",
+    "verification": "verify claims",
+    "attribution_audit": "audit generation attribution",
     "factcheck": "factcheck verification",
     "finalize": "finalize report",
 }
@@ -538,6 +561,306 @@ def _invoke_text(model: Any, system: str, prompt: str, *, status: str = "") -> s
         return str(response.content) if hasattr(response, "content") else str(response)
     except Exception:
         return ""
+
+
+def _run_independent_analysis(state: dict[str, Any], model: Any) -> dict[str, Any]:
+    if model is None or not _model_available(state, minimum=15.0):
+        return {}
+    prompt = INDEPENDENT_ANALYSIS_PROMPT.format(query=str(state.get("query") or ""))
+    _, payload = _invoke_json(
+        model,
+        INDEPENDENT_ANALYSIS_SYSTEM,
+        prompt,
+        status=status_bar(state, model),
+    )
+    return payload if isinstance(payload, dict) else {}
+
+
+def independent_analysis_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
+    payload = _run_independent_analysis(state, model)
+    ledger = EvidenceLedger.from_dict(state.get("_evidence_ledger") or {})
+    if payload:
+        ledger.append_judgment(JudgmentRecord(
+            judgment_id=f"{state.get('_run_id', '')}:judgment:independent-analysis",
+            mode="independent_analysis",
+            verdict="analysis",
+            rationale=str(payload.get("summary") or ""),
+            confidence=0.0,
+            payload=payload,
+        ))
+    return {
+        "_pipeline_stage": "independent_analysis",
+        "_independent_analysis": payload,
+        "_evidence_ledger": ledger.to_dict(),
+    }
+
+
+def _arbitration_payload(state: dict[str, Any], model: Any) -> dict[str, Any]:
+    if model is None or not _model_available(state, minimum=15.0):
+        return {}
+    subquestions = [
+        {
+            "id": str(item.get("id") or ""),
+            "question": str(item.get("question") or ""),
+            "importance": str(item.get("importance") or "medium"),
+        }
+        for item in state.get("_sub_questions") or []
+    ]
+    prompt = ARBITRATION_PROMPT.format(
+        subquestions_json=json.dumps(subquestions, ensure_ascii=False),
+        snapshot_json=json.dumps(state.get("_ledger_snapshot") or {}, ensure_ascii=False),
+    )
+    _, payload = _invoke_json(
+        model,
+        ARBITRATION_SYSTEM,
+        prompt,
+        status=status_bar(state, model),
+    )
+    return payload if isinstance(payload, dict) else {}
+
+
+def arbitration_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
+    payload = _arbitration_payload(state, model)
+    ledger = EvidenceLedger.from_dict(state.get("_evidence_ledger") or {})
+    snapshot_id = str((state.get("_ledger_snapshot") or {}).get("snapshot_id") or "")
+    subquestion_ids = {
+        str(item.get("id") or "")
+        for item in state.get("_sub_questions") or []
+    }
+    allowed_judgment_verdicts = {"covered", "gap", "conflict", "uncertain"}
+    judgments = list(payload.get("judgments") or []) if isinstance(payload, dict) else []
+    for index, item in enumerate(judgments):
+        if not isinstance(item, dict):
+            continue
+        subquestion_id = str(item.get("subquestion_id") or "")
+        if subquestion_id and subquestion_id not in subquestion_ids:
+            continue
+        verdict = str(item.get("verdict") or "uncertain")
+        if verdict not in allowed_judgment_verdicts:
+            verdict = "uncertain"
+        ledger.append_judgment(JudgmentRecord(
+            judgment_id=f"{state.get('_run_id', '')}:judgment:arbitration-{index + 1}",
+            mode="arbitration",
+            verdict=verdict,
+            rationale=str(item.get("reason") or ""),
+            confidence=float(item.get("confidence") or 0.0),
+            subquestion_id=subquestion_id,
+            input_snapshot_id=snapshot_id,
+            payload=item,
+        ))
+
+    actions = [
+        ActionProposal.from_dict(item)
+        for item in state.get("_correction_actions") or []
+        if isinstance(item, dict)
+    ]
+    existing_action_keys = {(item.subquestion_id, item.source) for item in actions}
+    allowed_triggers = {
+        "no_evidence",
+        "low_relevance",
+        "conflict",
+        "critical_claim_uncovered",
+    }
+    for item in payload.get("action_proposals") or []:
+        if not isinstance(item, dict):
+            continue
+        subquestion_id = str(item.get("subquestion_id") or "")
+        source = str(item.get("source") or "")
+        trigger = str(item.get("trigger") or "")
+        query = str(item.get("query") or "").strip()
+        if (
+            not subquestion_id
+            or subquestion_id not in subquestion_ids
+            or source not in {"RAG", "Web"}
+            or trigger not in allowed_triggers
+            or not query
+            or (subquestion_id, source) in existing_action_keys
+        ):
+            continue
+        proposal = ActionProposal(
+            action_id=f"{state.get('_run_id', '')}:model-action-{len(actions) + 1:02d}",
+            subquestion_id=subquestion_id,
+            source=source,
+            query=query,
+            trigger=trigger,
+        )
+        actions.append(proposal)
+        existing_action_keys.add((subquestion_id, source))
+        ledger.add_action_proposal(proposal)
+
+    payload = {
+        **payload,
+        "mode": "arbitration",
+        "status": "completed" if payload else "unavailable",
+        "input_snapshot_id": snapshot_id,
+    }
+    snapshot = ledger.freeze("arbitration")
+    return {
+        "_pipeline_stage": "arbitration",
+        "_model_arbitration": payload,
+        "_correction_actions": [item.to_dict() for item in actions],
+        "_evidence_ledger": ledger.to_dict(),
+        "_ledger_snapshot": snapshot.to_dict(),
+        "_ledger_snapshots": [*(state.get("_ledger_snapshots") or []), snapshot.to_dict()],
+    }
+
+
+def _verification_payload(state: dict[str, Any], model: Any) -> dict[str, Any]:
+    if model is None or not _model_available(state, minimum=15.0):
+        return {}
+    claims = [
+        {
+            "claim_id": str(item.get("claim_id") or ""),
+            "subquestion_id": str(item.get("subquestion_id") or ""),
+            "claim": str(item.get("text") or ""),
+            "derivation_inputs": [str(value) for value in item.get("derivation_inputs") or []],
+        }
+        for item in state.get("_claim_records") or []
+        if isinstance(item, dict)
+    ]
+    prompt = VERIFICATION_PROMPT.format(
+        claims_json=json.dumps(claims, ensure_ascii=False),
+        snapshot_json=json.dumps(state.get("_ledger_snapshot") or {}, ensure_ascii=False),
+    )
+    _, payload = _invoke_json(
+        model,
+        VERIFICATION_SYSTEM,
+        prompt,
+        status=status_bar(state, model),
+    )
+    return payload if isinstance(payload, dict) else {}
+
+
+def verification_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
+    payload = _verification_payload(state, model)
+    ledger = EvidenceLedger.from_dict(state.get("_evidence_ledger") or {})
+    snapshot_id = str((state.get("_ledger_snapshot") or {}).get("snapshot_id") or "")
+    checks = list(payload.get("checks") or []) if isinstance(payload, dict) else []
+    allowed_verdicts = {"supports", "contradicts", "insufficient", "uncertain"}
+    valid_evidence_ids = {
+        str(item.get("evidence_id") or "")
+        for item in (state.get("_ledger_snapshot") or {}).get("records") or []
+        if isinstance(item, dict) and str(item.get("evidence_id") or "")
+    }
+    claim_records = [
+        ClaimRecord.from_dict(item)
+        for item in state.get("_claim_records") or []
+        if isinstance(item, dict)
+    ]
+    for index, item in enumerate(checks):
+        if not isinstance(item, dict):
+            continue
+        verdict = str(item.get("verdict") or "uncertain")
+        if verdict not in allowed_verdicts:
+            verdict = "uncertain"
+        check = {
+            **item,
+            "verdict": verdict,
+            "evidence_ids": [
+                str(value)
+                for value in item.get("evidence_ids") or []
+                if str(value) in valid_evidence_ids
+            ],
+        }
+        claim_id = str(item.get("claim_id") or "")
+        claim_text = str(item.get("claim") or "").strip()
+        for record in claim_records:
+            if (claim_id and record.claim_id == claim_id) or (
+                not claim_id and claim_text and record.text == claim_text
+            ):
+                record.verification_result = check
+                break
+        ledger.append_judgment(JudgmentRecord(
+            judgment_id=f"{state.get('_run_id', '')}:judgment:verification-{index + 1}",
+            mode="verification",
+            verdict=verdict,
+            rationale=str(item.get("reason") or ""),
+            confidence=float(item.get("confidence") or 0.0),
+            input_snapshot_id=snapshot_id,
+            evidence_ids=list(check["evidence_ids"]),
+            payload=check,
+        ))
+    payload = {
+        **payload,
+        "mode": "verification",
+        "status": "completed" if payload else "unavailable",
+        "input_snapshot_id": snapshot_id,
+    }
+    if payload:
+        snapshot = ledger.freeze("verification")
+        return {
+            "_pipeline_stage": "verification",
+            "_model_verification": payload,
+            "_claim_records": [record.to_dict() for record in claim_records],
+            "_evidence_ledger": ledger.to_dict(),
+            "_ledger_snapshot": snapshot.to_dict(),
+            "_ledger_snapshots": [*(state.get("_ledger_snapshots") or []), snapshot.to_dict()],
+        }
+    return {
+        "_pipeline_stage": "verification",
+        "_model_verification": payload,
+        "_claim_records": [record.to_dict() for record in claim_records],
+        "_evidence_ledger": ledger.to_dict(),
+    }
+
+
+def attribution_audit_node(state: dict[str, Any]) -> dict[str, Any]:
+    citation_map = state.get("_citation_map") or {}
+    claim_records = [
+        ClaimRecord.from_dict(item)
+        for item in state.get("_claim_records") or []
+        if isinstance(item, dict)
+    ]
+    records_by_subquestion: dict[str, list[ClaimRecord]] = {}
+    for record in claim_records:
+        records_by_subquestion.setdefault(record.subquestion_id, []).append(record)
+
+    invalid_refs: list[dict[str, str]] = []
+    unattributed_refs: list[dict[str, str]] = []
+    invalid_bindings: list[dict[str, str]] = []
+    for section_raw in state.get("_section_results") or []:
+        section = SectionResult.from_dict(section_raw)
+        body_refs = set(_extract_citation_refs(section.body))
+        allowed_refs = set(section.allowed_refs)
+        for ref in sorted(body_refs, key=_citation_sort_key):
+            if ref not in citation_map or ref not in allowed_refs:
+                invalid_refs.append({
+                    "subquestion_id": section.sub_question_id,
+                    "ref": ref,
+                })
+        declared_refs = {
+            ref
+            for record in records_by_subquestion.get(section.sub_question_id, [])
+            for ref in record.generation_attribution.get("citation_refs") or []
+        }
+        for ref in sorted(body_refs - declared_refs, key=_citation_sort_key):
+            unattributed_refs.append({
+                "subquestion_id": section.sub_question_id,
+                "ref": ref,
+            })
+
+    for record in claim_records:
+        refs = [str(value) for value in record.generation_attribution.get("citation_refs") or []]
+        allowed_refs = set(record.generation_attribution.get("allowed_refs") or [])
+        for ref in refs:
+            if ref not in citation_map or ref not in allowed_refs:
+                invalid_bindings.append({
+                    "claim_id": record.claim_id,
+                    "ref": ref,
+                })
+
+    audit = {
+        "generation_trace_invalid": bool(invalid_refs or unattributed_refs or invalid_bindings),
+        "invalid_refs": invalid_refs,
+        "unattributed_refs": unattributed_refs,
+        "invalid_bindings": invalid_bindings,
+        "claim_count": len(claim_records),
+    }
+    return {
+        "_pipeline_stage": "attribution_audit",
+        "_attribution_audit": audit,
+        "_generation_trace_invalid": audit["generation_trace_invalid"],
+    }
 
 
 _LOW_QUALITY_EVIDENCE_MARKERS = (
@@ -969,6 +1292,7 @@ def _retrieve_round0_node(
     web_tool: Any,
     rag_available: bool,
     web_available: bool,
+    independent_model: Any = None,
 ) -> dict[str, Any]:
     sub_questions = state.get("_sub_questions") or []
     run_id = str(state.get("_run_id") or "")
@@ -1000,8 +1324,13 @@ def _retrieve_round0_node(
             jobs.append((sub_question, "RAG", rag_tool))
         if web_available:
             jobs.append((sub_question, "Web", web_tool))
-    with ThreadPoolExecutor(max_workers=max(1, len(jobs))) as executor:
+    with ThreadPoolExecutor(max_workers=max(1, len(jobs) + bool(independent_model))) as executor:
         futures = [executor.submit(retrieve_one, *job) for job in jobs]
+        independent_future = (
+            executor.submit(_run_independent_analysis, state, independent_model)
+            if independent_model is not None
+            else None
+        )
         for future in futures:
             subquestion_id, source, result = future.result()
             ledger.append_source_result(
@@ -1011,6 +1340,17 @@ def _retrieve_round0_node(
                 visibility="primary",
             )
             round_results.setdefault(subquestion_id, {})[source] = result
+        independent_analysis = independent_future.result() if independent_future is not None else {}
+
+    if independent_analysis:
+        ledger.append_judgment(JudgmentRecord(
+            judgment_id=f"{run_id}:judgment:independent-analysis",
+            mode="independent_analysis",
+            verdict="analysis",
+            rationale=str(independent_analysis.get("summary") or ""),
+            confidence=0.0,
+            payload=independent_analysis,
+        ))
 
     rag_raw = _aggregate_source_results(round_results, "RAG") or "\\uff08\\u672c\\u5730\\u77e5\\u8bc6\\u5e93\\u4e2d\\u6682\\u672a\\u68c0\\u7d22\\u5230\\u76f8\\u5173\\u5185\\u5bb9\\uff09"
     web_raw = _aggregate_source_results(round_results, "Web") or "\\uff08\\u7f51\\u7edc\\u641c\\u7d22\\u6682\\u672a\\u68c0\\u7d22\\u5230\\u76f8\\u5173\\u5185\\u5bb9\\uff09"
@@ -1026,6 +1366,7 @@ def _retrieve_round0_node(
         "_citation_map": {},
         "_source_statuses": statuses,
         "_evidence_ledger": ledger.to_dict(),
+        "_independent_analysis": independent_analysis,
         "_round0_results": {
             subquestion_id: {
                 source: result.to_dict()
@@ -1046,8 +1387,16 @@ def retrieve_node(
     web_tool: Any,
     rag_available: bool = True,
     web_available: bool = True,
+    independent_model: Any = None,
 ) -> dict[str, Any]:
-    return _retrieve_round0_node(state, rag_tool, web_tool, rag_available, web_available)
+    return _retrieve_round0_node(
+        state,
+        rag_tool,
+        web_tool,
+        rag_available,
+        web_available,
+        independent_model,
+    )
 
 # ============================================================
 # Stage 3: Barrier and One Correction Round
@@ -1217,6 +1566,78 @@ def _generate_section(
     )
 
 
+def _claim_citation_refs(text: str, citation_map: dict[str, str]) -> list[str]:
+    refs = {
+        f"[{number}]"
+        for group in re.findall(r"\[((?:\d+\s*,\s*)*\d+)\]", text)
+        for number in re.findall(r"\d+", group)
+        if f"[{number}]" in citation_map
+    }
+    return sorted(refs, key=_citation_sort_key)
+
+
+def _extract_citation_refs(text: str) -> list[str]:
+    refs = {
+        f"[{number}]"
+        for group in re.findall(r"\[((?:\d+\s*,\s*)*\d+)\]", text)
+        for number in re.findall(r"\d+", group)
+    }
+    return sorted(refs, key=_citation_sort_key)
+
+
+def _citation_evidence_ids(state: dict[str, Any], refs: list[str]) -> list[str]:
+    snapshot = LedgerSnapshot.from_dict(state.get("_ledger_snapshot") or {})
+    citation_map = state.get("_citation_map") or {}
+    evidence_ids: list[str] = []
+    for ref in refs:
+        description = str(citation_map.get(ref) or "")
+        for record in snapshot.primary_records():
+            evidence_text = _usable_evidence_text(
+                EvidenceItem(
+                    claim=record.claim,
+                    source=record.source_type,
+                    verbatim_quote=record.verbatim_quote,
+                )
+            )
+            if (
+                evidence_text
+                and evidence_text[:80] in description
+                and record.evidence_id not in evidence_ids
+            ):
+                evidence_ids.append(record.evidence_id)
+                break
+    return evidence_ids
+
+
+def _build_claim_records(
+    state: dict[str, Any],
+    sections: list[SectionResult],
+) -> list[ClaimRecord]:
+    citation_map = state.get("_citation_map") or {}
+    run_id = str(state.get("_run_id") or "")
+    records: list[ClaimRecord] = []
+    for section in sections:
+        for index, claim_text in enumerate(section.key_claims, start=1):
+            text = re.sub(r"\[(?:\d+)(?:\s*,\s*\d+)*\]", "", str(claim_text)).strip()
+            citation_refs = _claim_citation_refs(str(claim_text), citation_map)
+            evidence_ids = _citation_evidence_ids(state, citation_refs)
+            records.append(ClaimRecord(
+                claim_id=f"{run_id}:claim:{section.sub_question_id}:{index:02d}",
+                subquestion_id=section.sub_question_id,
+                text=text or str(claim_text),
+                claim_type="external_fact" if citation_refs else "analysis",
+                derivation_type="evidence" if citation_refs else "model_analysis",
+                derivation_inputs=evidence_ids or citation_refs,
+                generation_attribution={
+                    "section_title": section.title,
+                    "citation_refs": citation_refs,
+                    "evidence_ids": evidence_ids,
+                    "allowed_refs": list(section.allowed_refs),
+                },
+            ))
+    return records
+
+
 def generate_node(state: dict[str, Any], model: Any, profile: ResearchModeProfile | None = None) -> dict[str, Any]:
     if not _model_available(state, minimum=15.0):
         return {"_pipeline_stage": "generate_skipped", "_section_results": []}
@@ -1284,9 +1705,11 @@ def generate_node(state: dict[str, Any], model: Any, profile: ResearchModeProfil
                 usage=dict(attempt.usage) if attempt else {},
             ))
 
+    claim_records = _build_claim_records(state, results)
     return {
         "_pipeline_stage": "generate",
         "_section_results": [sr.to_dict() for sr in results],
+        "_claim_records": [record.to_dict() for record in claim_records],
         "_run_status": "completed" if not errors else "partial",
     }
 
@@ -1460,6 +1883,8 @@ def _compute_deterministic_metrics(state: dict[str, Any]) -> dict[str, Any]:
         "invalid_citation_list": invalid_refs,
         "off_domain_evidence_in_report": len(off_domain_refs),
         "off_domain_citation_list": off_domain_refs,
+        "generation_trace_invalid": bool(state.get("_generation_trace_invalid")),
+        "attribution_audit": state.get("_attribution_audit") or {},
         "rag_status": state.get("_rag_status", "empty"),
         "rag_count": state.get("_rag_count", 0),
         "web_status": state.get("_web_status", "empty"),
@@ -1529,6 +1954,8 @@ def audit_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
     # 无关引用（引用错配）直接触发交付失败（§8.6）：正文仍可用，但不通过交付门禁。
     if metrics["off_domain_evidence_in_report"] > 0:
         delivery_status = "diagnostic_only"
+    if metrics["generation_trace_invalid"]:
+        delivery_status = "diagnostic_only"
 
     source_statuses = {
         "RAG": {
@@ -1593,23 +2020,48 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
 
     sections = [SectionResult.from_dict(item) for item in section_results_raw]
 
-    # ── Build evidence index from claim-local citation refs ──
+    claim_records = [
+        ClaimRecord.from_dict(item)
+        for item in state.get("_claim_records") or []
+        if isinstance(item, dict)
+    ]
+
+    # Build the final claim index from ClaimRecord when available. Older
+    # states keep the citation-only path for replay compatibility.
     all_claims: list[dict[str, Any]] = []
-    for sr in sections:
-        for claim_text in sr.key_claims:
-            claim_refs = sorted({
-                f"[{number}]"
-                for group in re.findall(r"\[((?:\d+\s*,\s*)*\d+)\]", claim_text)
-                for number in re.findall(r"\d+", group)
-                if f"[{number}]" in citation_map
-            }, key=_citation_sort_key)
-            wording = re.sub(r"\[(?:\d+)(?:\s*,\s*\d+)*\]", "", claim_text).strip()
+    if claim_records:
+        for record in claim_records:
+            claim_refs = [
+                str(value)
+                for value in record.generation_attribution.get("citation_refs") or []
+                if str(value) in citation_map
+            ]
+            verdict = str(record.verification_result.get("verdict") or "")
+            has_evidence = verdict == "supports" if verdict else bool(claim_refs)
             all_claims.append({
-                "section": sr.title,
-                "claim": wording or claim_text,
+                "claim_id": record.claim_id,
+                "section": record.generation_attribution.get("section_title") or record.subquestion_id,
+                "claim": record.text,
                 "citations": claim_refs,
-                "has_evidence": bool(claim_refs),
+                "has_evidence": has_evidence,
+                "verification_verdict": verdict,
             })
+    else:
+        for sr in sections:
+            for claim_text in sr.key_claims:
+                claim_refs = sorted({
+                    f"[{number}]"
+                    for group in re.findall(r"\[((?:\d+\s*,\s*)*\d+)\]", claim_text)
+                    for number in re.findall(r"\d+", group)
+                    if f"[{number}]" in citation_map
+                }, key=_citation_sort_key)
+                wording = re.sub(r"\[(?:\d+)(?:\s*,\s*\d+)*\]", "", claim_text).strip()
+                all_claims.append({
+                    "section": sr.title,
+                    "claim": wording or claim_text,
+                    "citations": claim_refs,
+                    "has_evidence": bool(claim_refs),
+                })
 
     total_claims = len(all_claims)
     verified_claims = sum(1 for c in all_claims if c["has_evidence"])
@@ -1630,6 +2082,13 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
         "citation_refs_used": cit_refs_used,
         "citation_refs_available": cit_refs_available,
         "unverified_claim_list": [c["claim"][:100] for c in unverified[:5]],
+        "claim_records": [record.to_dict() for record in claim_records],
+        "verification_verdicts": {
+            verdict: sum(1 for claim in all_claims if claim.get("verification_verdict") == verdict)
+            for verdict in ("supports", "contradicts", "insufficient", "uncertain")
+        },
+        "generation_trace_invalid": bool(state.get("_generation_trace_invalid")),
+        "attribution_audit": state.get("_attribution_audit") or {},
     }
 
     # ── Determine factcheck status ──
@@ -1686,6 +2145,9 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
         "ledger_snapshot_id": str((state.get("_ledger_snapshot") or {}).get("snapshot_id") or ""),
         "ledger_record_count": len((state.get("_ledger_snapshot") or {}).get("records") or []),
         "ledger_snapshot": state.get("_ledger_snapshot") or {},
+        "claim_records": [record.to_dict() for record in claim_records],
+        "attribution_audit": state.get("_attribution_audit") or {},
+        "model_verification": state.get("_model_verification") or {},
         "retrieval_round": int(state.get("_retrieval_round") or 0),
         "correction_round": int(state.get("_correction_round") or 0),
         "analysis_only_count": int(audit_metrics.get("analysis_only_sections") or 0),
@@ -1793,6 +2255,9 @@ def create_v2_research_graph(
     query_rewriter = kwargs.get("query_rewriter")
     semantic_reranker = kwargs.get("semantic_reranker")
     reranker_model = kwargs.get("reranker_model")
+    independent_model = kwargs.get("independent_model")
+    arbitration_model = kwargs.get("arbitration_model")
+    verifier_model = kwargs.get("verifier_model")
     run_id = kwargs.get("run_id")
 
     deadline_at = kwargs.get("deadline_at")
@@ -1826,10 +2291,23 @@ def create_v2_research_graph(
     )
 
     graph.add_node("decompose", lambda s: decompose_node(s, planner_model, profile))
-    graph.add_node("retrieve", lambda s: retrieve_node(s, rag_tool, web_tool, rag_available, web_available))
+    graph.add_node(
+        "retrieve",
+        lambda s: retrieve_node(
+            s,
+            rag_tool,
+            web_tool,
+            rag_available,
+            web_available,
+            independent_model,
+        ),
+    )
     graph.add_node("barrier", barrier_node)
+    graph.add_node("arbitration", lambda s: arbitration_node(s, arbitration_model))
     graph.add_node("correction", lambda s: correction_node(s, rag_tool, web_tool))
     graph.add_node("generate", lambda s: generate_node(s, synthesizer_model, profile))
+    graph.add_node("verification", lambda s: verification_node(s, verifier_model))
+    graph.add_node("attribution_audit", attribution_audit_node)
     graph.add_node("synthesize", lambda s: synthesize_node(s, synthesizer_model))
     graph.add_node("audit", lambda s: audit_node(s, synthesizer_model))
     graph.add_node("finalize", finalize_node)
@@ -1838,9 +2316,12 @@ def create_v2_research_graph(
     graph.set_entry_point("decompose")
     graph.add_edge("decompose", "retrieve")
     graph.add_edge("retrieve", "barrier")
-    graph.add_edge("barrier", "correction")
+    graph.add_edge("barrier", "arbitration")
+    graph.add_edge("arbitration", "correction")
     graph.add_edge("correction", "generate")
-    graph.add_edge("generate", "synthesize")
+    graph.add_edge("generate", "verification")
+    graph.add_edge("verification", "attribution_audit")
+    graph.add_edge("attribution_audit", "synthesize")
     graph.add_edge("synthesize", "audit")
     graph.add_edge("audit", "finalize")
     graph.add_edge("finalize", "factcheck")

@@ -492,6 +492,9 @@ def _p1_quality_notes(scores: dict[str, int], available_sources: list[str], find
 def evaluate_run_quality(state: dict[str, Any]) -> dict[str, Any]:
     """Score a run on the Phase 1 + Phase 2 acceptance dimensions."""
 
+    if state.get("_ledger_snapshot"):
+        return evaluate_v2_quality(state)
+
     final_answer = str(state.get("final_answer") or "")
     source_statuses = state.get("_source_statuses") or {}
     run_summary = state.get("_run_summary") or {}
@@ -556,6 +559,49 @@ def evaluate_run_quality(state: dict[str, Any]) -> dict[str, Any]:
         "external_fact_sources": external_fact_sources,
         "claim_citation_coverage": claim_coverage,
         "notes": _quality_notes(scores, external_fact_sources, low_relevance_sources, non_evidence_sources),
+    }
+
+
+def evaluate_v2_quality(state: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate V2 from the frozen Ledger and the final delivery decision."""
+
+    snapshot = state.get("_ledger_snapshot") or {}
+    records = [item for item in snapshot.get("records") or [] if isinstance(item, dict)]
+    judgments = [item for item in snapshot.get("judgments") or [] if isinstance(item, dict)]
+    run_summary = state.get("_run_summary") or {}
+    delivery_status = str(
+        state.get("_delivery_status")
+        or run_summary.get("delivery_status")
+        or "diagnostic_only"
+    )
+    audit = state.get("_attribution_audit") or {}
+    generation_trace_invalid = bool(
+        state.get("_generation_trace_invalid")
+        or audit.get("generation_trace_invalid")
+    )
+    supported = sum(1 for item in judgments if item.get("mode") == "verification" and item.get("verdict") == "supports")
+    contradictory = sum(1 for item in judgments if item.get("mode") == "verification" and item.get("verdict") == "contradicts")
+
+    scores = {
+        "EvidenceLedger": 5 if snapshot.get("snapshot_id") and records else 3 if snapshot.get("snapshot_id") else 1,
+        "声明验证": 5 if supported and not contradictory else 3 if judgments else 1,
+        "归因审计": 1 if generation_trace_invalid else 5,
+        "最终交付": 5 if delivery_status == "deliverable" else 3 if delivery_status == "limited" else 1,
+    }
+    overall = round(sum(scores.values()) / len(scores), 2)
+    passed = delivery_status == "deliverable" and not generation_trace_invalid and not contradictory
+    return {
+        "scores": scores,
+        "overall": overall,
+        "passed": passed,
+        "delivery_status": delivery_status,
+        "ledger_snapshot_id": snapshot.get("snapshot_id") or "",
+        "ledger_record_count": len(records),
+        "verification_judgment_count": sum(1 for item in judgments if item.get("mode") == "verification"),
+        "supported_claim_count": supported,
+        "contradictory_claim_count": contradictory,
+        "generation_trace_invalid": generation_trace_invalid,
+        "notes": [],
     }
 
 
