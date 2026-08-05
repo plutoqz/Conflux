@@ -118,11 +118,12 @@ def _new_v2_state(
     query: str,
     *,
     deadline_at: float | None = None,
+    run_id: str | None = None,
 ) -> dict:
     """Create initial state for the V2 answer_first pipeline."""
     from .graph_v2 import _new_state
 
-    return _new_state(query, deadline_at=deadline_at)
+    return _new_state(query, deadline_at=deadline_at, run_id=run_id)
 
 
 def query_command(
@@ -180,10 +181,11 @@ def query_command(
     )
     set_model(role_models["analyst"])
     v2_rewriter = QueryRewriteProvider(role_models["verifier"])
+    v2_semantic_reranker = SemanticReranker(role_models["reranker"], batch_size=research_profile.candidate_limit)
     rag_tool = create_rag_tool(
         retriever,
         v2_rewriter,
-        SemanticReranker(role_models["reranker"], batch_size=research_profile.candidate_limit),
+        v2_semantic_reranker,
         research_profile,
     )
     web_tool = create_web_tool(
@@ -217,13 +219,16 @@ def query_command(
         synthesizer_model=role_models["synthesizer"],
         profile=research_profile,
         retriever=retriever,
-        reranker_model=role_models.get("reranker"),
+        query_rewriter=v2_rewriter,
+        semantic_reranker=v2_semantic_reranker,
+        run_id=run_id,
         deadline_at=deadline_at,
         commit_reserve_seconds=commit_reserve_seconds,
     )
     initial_state = _new_v2_state(
         query,
         deadline_at=deadline_at,
+        run_id=run_id,
     )
     final_state, trace_events = _run_phase2_graph(
         graph,
@@ -238,43 +243,12 @@ def query_command(
     artifacts = None
     if answer:
         print(f"\n{answer[:3000]}\n")
-        # V2: write report directly, bypass old delivery-gate write path
-        from .report import (
-            _atomic_write_text,
-            _strip_code_fence,
-            markdown_to_html,
-            slugify,
-        )
-        from datetime import datetime
-        out_dir = Path(output_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        answer_clean = _strip_code_fence(answer)
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        stem = f"{stamp}-{slugify(query)}"
-        md_path = out_dir / f"{stem}.md"
-        html_path = out_dir / f"{stem}.html"
-        _atomic_write_text(md_path, answer_clean)
-        _atomic_write_text(html_path, markdown_to_html(query, answer_clean))
-        # Also stage in workbench query dir for results visibility
-        wb_dir = Path("reports/workbench/query")
-        wb_dir.mkdir(parents=True, exist_ok=True)
-        wb_draft = wb_dir / f"{stem}.draft.md"
-        try:
-            _atomic_write_text(wb_draft, answer_clean)
-        except Exception:
-            pass
-        artifacts = type("Artifacts", (), {
-            "markdown_path": md_path,
-            "html_path": html_path,
-            "evidence_json_path": None,
-            "raw_sources_path": None,
-            "deep_evidence_json_path": None,
-            "audit_markdown_path": None,
-        })()
+        from .report import write_v2_report_artifacts
+        artifacts = write_v2_report_artifacts(query, final_state, output_dir)
         confidence = final_state.get("_confidence", "unverified")
         confidence_label = {"high": "高可信", "medium": "中可信", "low": "低可信", "unverified": "未核验"}.get(confidence, confidence)
-        print(f"Report Markdown: {md_path.resolve()}")
-        print(f"Report HTML: {html_path.resolve()}")
+        print(f"Report Markdown: {artifacts.markdown_path.resolve()}")
+        print(f"Report HTML: {artifacts.html_path.resolve()}")
         print(f"可信度：{confidence_label}")
     else:
         print("\nWarning: no final answer was generated. Check API, embedding, and tool configuration.\n")
@@ -286,14 +260,14 @@ def query_command(
     summary = dict(final_state.get("_run_summary") or {})
     # V2 summary
     summary.update({
-            "delivery_status": final_state.get("_confidence", "unverified"),
-            "delivery_assessment": {},
+            "delivery_status": final_state.get("_delivery_status", "diagnostic_only"),
+            "delivery_assessment": final_state.get("_delivery_assessment") or {},
             "report_md_path": str(artifacts.markdown_path.resolve()) if artifacts and artifacts.markdown_path else "",
             "report_html_path": str(artifacts.html_path.resolve()) if artifacts and artifacts.html_path else "",
-            "report_evidence_path": "",
-            "report_sources_path": "",
+            "report_evidence_path": str(artifacts.evidence_json_path.resolve()) if artifacts and artifacts.evidence_json_path else "",
+            "report_sources_path": str(artifacts.raw_sources_path.resolve()) if artifacts and artifacts.raw_sources_path else "",
             "report_deep_evidence_path": "",
-            "report_audit_path": "",
+            "report_audit_path": str(artifacts.audit_markdown_path.resolve()) if artifacts and artifacts.audit_markdown_path else "",
             "diagnostic_markdown_path": "",
             "diagnostic_html_path": "",
             "diagnostic_evidence_path": "",
@@ -310,9 +284,9 @@ def query_command(
             "run_status": final_state.get("_run_status"),
             "report_available": bool(final_state.get("_report_available")),
             "confidence": final_state.get("_confidence"),
-            "source_statuses": {},
-            "factcheck_status": "",
-            "quality": {},
+            "source_statuses": final_state.get("_source_statuses") or {},
+            "factcheck_status": final_state.get("_factcheck_status") or "",
+            "quality": final_state.get("_audit_metrics") or {},
         })
     write_run_summary(summary, summary_path)
     final_state["_report_artifacts"] = {

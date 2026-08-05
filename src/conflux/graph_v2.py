@@ -1,6 +1,6 @@
-"""V2 answer_first research pipeline — 7-step flow with factcheck.
+"""V2 answer_first research pipeline — round-based retrieval with factcheck.
 
-Pipeline: decompose -> retrieve -> generate -> synthesize -> audit -> finalize -> factcheck
+Pipeline: decompose -> Round 0 -> Barrier -> correction -> generate -> synthesize -> audit -> finalize -> factcheck
 
 All Chinese prompt templates are module-level constants to avoid
 cross-platform encoding issues inside f-strings.
@@ -27,6 +27,8 @@ class V2State(TypedDict, total=False):
     _deadline_at: float
     _pipeline_stage: str
     _run_status: str
+    _delivery_status: str
+    _delivery_assessment: dict
     _report_available: bool
     _confidence: str
     _core_question: str
@@ -47,6 +49,16 @@ class V2State(TypedDict, total=False):
     _elapsed_ms: float
     _factcheck_status: str
     _factcheck_findings: dict
+    _source_statuses: dict
+    _evidence_ledger: dict
+    _ledger_snapshot: dict
+    _ledger_snapshots: list
+    _round0_results: dict
+    _correction_results: dict
+    _correction_actions: list
+    _correction_round: int
+    _retrieval_round: int
+    _run_summary: dict
     _verified_answer: str
     final_answer: str
 
@@ -66,9 +78,10 @@ from ._graph_utils import (
     factcheck_node,  # noqa: F401 — re-export
     model_agent_node,  # noqa: F401 — re-export
 )
-from .citation_compiler import compile_report
+from .rag.reranker import SemanticReranker
 from .research_modes import ResearchModeProfile
-from .source_status import parse_source_results
+from .research_protocol import ActionProposal, EvidenceLedger, LedgerSnapshot
+from .source_status import EvidenceItem, SourceResult, parse_source_results
 from .tools.rag import create_rag_tool
 from .tools.web import create_web_tool
 from .trace import new_run_id
@@ -86,9 +99,16 @@ class SectionResult:
     summary: str = ""
     key_claims: list[str] = field(default_factory=list)
     citation_refs: list[str] = field(default_factory=list)
+    # 生成该节时被允许引用的全局引用标号（由 _section_citation_map 按主题重叠选出）。
+    # 后置审计用它判定"无关引用"（off-domain）：正文引用了不在 allowed_refs 中、
+    # 且与该节子问题无主题重叠的合法标号 → 交付失败。
+    allowed_refs: list[str] = field(default_factory=list)
     analysis_judgments: list[str] = field(default_factory=list)
     evidence_gaps: list[str] = field(default_factory=list)
     finish_reason: str = "failed"
+    elapsed_ms: float = 0.0
+    error: str = ""
+    usage: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -98,9 +118,13 @@ class SectionResult:
             "summary": self.summary,
             "key_claims": self.key_claims,
             "citation_refs": self.citation_refs,
+            "allowed_refs": self.allowed_refs,
             "analysis_judgments": self.analysis_judgments,
             "evidence_gaps": self.evidence_gaps,
             "finish_reason": self.finish_reason,
+            "elapsed_ms": self.elapsed_ms,
+            "error": self.error,
+            "usage": self.usage,
         }
 
     @classmethod
@@ -112,9 +136,17 @@ class SectionResult:
             summary=str(payload.get("summary") or ""),
             key_claims=[str(item) for item in payload.get("key_claims") or []],
             citation_refs=[str(item) for item in payload.get("citation_refs") or []],
+            allowed_refs=[str(item) for item in payload.get("allowed_refs") or []],
             analysis_judgments=[str(item) for item in payload.get("analysis_judgments") or []],
             evidence_gaps=[str(item) for item in payload.get("evidence_gaps") or []],
             finish_reason=str(payload.get("finish_reason") or "failed"),
+            elapsed_ms=float(payload.get("elapsed_ms") or 0.0),
+            error=str(payload.get("error") or ""),
+            usage={
+                str(key): int(value)
+                for key, value in (payload.get("usage") or {}).items()
+                if isinstance(value, (int, float))
+            },
         )
 
 
@@ -209,6 +241,7 @@ SECTION_PROMPT = """\u8bf7\u6839\u636e\u4ee5\u4e0b\u68c0\u7d22\u6750\u6599\uff0c
 - \u672c\u8282\u7684\u6838\u5fc3\u7ed3\u8bba\uff081 \u53e5\uff09
 - \u57fa\u4e8e\u8bc1\u636e\u7684\u5173\u952e\u4e8b\u5b9e\u58f0\u660e\uff08\u6bcf\u6761\u4ee5 \"claim: \" \u5f00\u5934\uff0c\u53ea\u5217\u51fa\u6709\u5916\u90e8\u5f15\u7528\u652f\u6301\u7684\u58f0\u660e\uff0c\u6bcf\u6761\u53ef\u72ec\u7acb\u9a8c\u8bc1\uff09
 - \u5b9e\u9645\u4f7f\u7528\u4e86\u54ea\u4e9b\u5f15\u7528\u6807\u53f7\uff08\u5982 [1][3]\uff09
+- \u6bcf\u6761 "claim: " \u58f0\u660e\u672b\u5c3e\u5fc5\u987b\u4fdd\u7559\u76f4\u63a5\u652f\u6301\u8be5\u58f0\u660e\u7684\u5f15\u7528\u7f16\u53f7\uff0c\u5982 "claim: ...[1][3]"\u3002
 - \u54ea\u4e9b\u7ed3\u8bba\u6765\u81ea\u5206\u6790\u5224\u65ad\uff08\u7b80\u8ff0\uff09
 - \u672c\u8282\u4ecd\u672a\u89e3\u51b3\u7684\u95ee\u9898\uff08\u5982\u6709\uff09
 
@@ -328,8 +361,13 @@ CREDIBILITY_PROMPT = """\u8bf7\u6839\u636e\u4ee5\u4e0b\u4e8b\u5b9e\u6570\u636e\u
 # State
 # ============================================================
 
-def _new_state(query: str, deadline_at: float | None = None) -> dict[str, Any]:
-    run_id = new_run_id()
+def _new_state(
+    query: str,
+    deadline_at: float | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    run_id = run_id or new_run_id()
+    ledger = EvidenceLedger(run_id=run_id)
     return {
         "query": query,
         "_run_id": run_id,
@@ -353,6 +391,14 @@ def _new_state(query: str, deadline_at: float | None = None) -> dict[str, Any]:
         "_cross_synthesis": "",
         "_report_markdown": "",
         "_credibility_text": "",
+        "_evidence_ledger": ledger.to_dict(),
+        "_ledger_snapshot": {},
+        "_ledger_snapshots": [],
+        "_round0_results": {},
+        "_correction_results": {},
+        "_correction_actions": [],
+        "_correction_round": 0,
+        "_retrieval_round": 0,
     }
 
 
@@ -494,25 +540,121 @@ def _invoke_text(model: Any, system: str, prompt: str, *, status: str = "") -> s
         return ""
 
 
+_LOW_QUALITY_EVIDENCE_MARKERS = (
+    "ingestion action:",
+    "relevance score:",
+    "press enter to search",
+    "advanced search",
+)
+
+
+def _normalized_source_key(claim: EvidenceItem) -> str:
+    identity = " ".join((claim.paper_id, claim.url))
+    arxiv_id = re.search(r"(?<!\d)(\d{4}\.\d{4,5})(?:v\d+)?", identity, re.IGNORECASE)
+    if arxiv_id:
+        return "arxiv:" + arxiv_id.group(1)
+    if claim.source_identity:
+        return "identity:" + claim.source_identity.strip().casefold()
+    if claim.content_hash:
+        return "hash:" + claim.content_hash.strip().casefold()
+    if claim.paper_id:
+        return "paper:" + re.sub(r"v\d+$", "", claim.paper_id.strip().casefold())
+    if claim.url:
+        return "url:" + claim.url.split("#", 1)[0].split("?", 1)[0].rstrip("/").casefold()
+    if claim.document_title:
+        return "title:" + re.sub(r"\s+", " ", claim.document_title).strip().casefold()
+    return "claim:" + re.sub(r"\W+", "", claim.claim).casefold()[:160]
+
+
+def _usable_evidence_text(claim: EvidenceItem) -> str:
+    text = re.sub(r"\s+", " ", claim.verbatim_quote or claim.claim).strip()
+    lowered = text.casefold()
+    if len(text) < 80 or any(marker in lowered for marker in _LOW_QUALITY_EVIDENCE_MARKERS):
+        return ""
+    return text
+
+
 def _build_citation_map(rag_raw: str, web_raw: str) -> dict[str, str]:
     cmap: dict[str, str] = {}
+    source_counts: dict[str, int] = {}
+    ref_by_source: dict[str, str] = {}
+    seen_claims: set[str] = set()
     index = 1
     for source_label, raw in [("RAG", rag_raw), ("Web", web_raw)]:
         if not raw or raw.startswith("\uff08"):  # starts with "（"
             continue
         for result in parse_source_results(raw):
-            if not result.is_valid_evidence:
+            if not result.is_valid_evidence or not result.can_support_external_fact:
                 continue
-            for claim in result.claims[:8]:
+            for claim in result.claims:
+                evidence_text = _usable_evidence_text(claim)
+                normalized_claim = re.sub(r"\W+", "", evidence_text).casefold()
+                if not evidence_text or normalized_claim in seen_claims:
+                    continue
+                source_key = _normalized_source_key(claim)
+                if source_counts.get(source_key, 0) >= 2:
+                    continue
+                if source_key in ref_by_source:
+                    ref = ref_by_source[source_key]
+                    source_note = cmap[ref].rsplit("\uff08\u6765\u6e90\uff1a", 1)[-1]
+                    cmap[ref] = (
+                        cmap[ref].rsplit("\uff08\u6765\u6e90\uff1a", 1)[0]
+                        + " \u8865\u5145\u8bc1\u636e\uff1a" + evidence_text[:600]
+                        + "\uff08\u6765\u6e90\uff1a" + source_note
+                    )
+                    seen_claims.add(normalized_claim)
+                    source_counts[source_key] += 1
+                    continue
                 ref = "[" + str(index) + "]"
-                snippet = claim.claim[:120].replace("\n", " ")
-                url = getattr(claim, "url", "")
-                cmap[ref] = snippet + "\uff08\u6765\u6e90\uff1a" + source_label
-                if url:
-                    cmap[ref] += " " + url
+                source_identity = claim.document_title or claim.paper_id or claim.url
+                cmap[ref] = evidence_text[:600] + "\uff08\u6765\u6e90\uff1a" + source_label
+                if source_identity:
+                    cmap[ref] += " " + source_identity
+                if claim.url and claim.url != source_identity:
+                    cmap[ref] += " " + claim.url
                 cmap[ref] += "\uff09"
+                ref_by_source[source_key] = ref
+                seen_claims.add(normalized_claim)
+                source_counts[source_key] = source_counts.get(source_key, 0) + 1
                 index += 1
     return cmap
+
+
+def _section_citation_map(sub_question: str, citation_map: dict[str, str], limit: int = 10) -> dict[str, str]:
+    """Select citations that overlap in topic with the sub-question.
+
+    回归约束（§8.11.1）：无主题重叠不得分配全局引用。只返回与子问题至少
+    存在一个 term/bigram 重叠的引用；全部无重叠时返回空 dict——宁可让该节
+    走（分析判断），也不把无关证据错配给本节。
+    """
+    terms = {
+        term.casefold()
+        for term in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,}", sub_question)
+    }
+    for sequence in re.findall(r"[\u4e00-\u9fff]{2,}", sub_question):
+        terms.update(sequence[index:index + 2] for index in range(len(sequence) - 1))
+    scored = []
+    for position, (ref, description) in enumerate(citation_map.items()):
+        lowered = description.casefold()
+        score = sum(1 for term in terms if term in lowered)
+        if score == 0:
+            # 无主题重叠：不分配该全局引用
+            continue
+        scored.append((-score, position, ref, description))
+    return {
+        ref: description
+        for _, _, ref, description in sorted(scored)[:limit]
+    }
+
+
+def _refs_with_topic_overlap(sub_question: str, refs: list[str], citation_map: dict[str, str]) -> list[str]:
+    """Return the refs that still have any topic overlap with the sub-question.
+
+    供后置审计做双保险判定：仅当某引用既不在该节 allowed_refs 中、又与
+    子问题无任何主题重叠时，才判定为 off-domain（无关引用）。
+    """
+    allowed = _section_citation_map(sub_question, {ref: citation_map[ref] for ref in refs if ref in citation_map})
+    return list(allowed.keys())
 
 
 def _citation_sort_key(ref: str) -> int:
@@ -552,7 +694,7 @@ def _parse_section_summary(body: str) -> dict[str, Any]:
         if not line:
             continue
         if re.match(r"^\[\d+\]", line):
-            citation_refs.append(line)
+            citation_refs.extend(f"[{number}]" for number in re.findall(r"\[(\d+)\]", line))
         elif line_lower.startswith("claim:") or line_lower.startswith("claim\uff1a"):
             # Pick up text after first colon (ASCII or full-width)
             for sep in (":", "\uff1a"):
@@ -560,6 +702,8 @@ def _parse_section_summary(body: str) -> dict[str, Any]:
                     claim_text = line.split(sep, 1)[1].strip()
                     if claim_text:
                         key_claims.append(claim_text)
+                        for group in re.findall(r"\[((?:\d+\s*,\s*)*\d+)\]", claim_text):
+                            citation_refs.extend(f"[{number}]" for number in re.findall(r"\d+", group))
                     break
         elif "\u5206\u6790\u5224\u65ad" in line:  # "分析判断"
             analysis.append(line)
@@ -576,6 +720,7 @@ def _parse_section_summary(body: str) -> dict[str, Any]:
     new_inline_refs = inline_refs - summary_ref_numbers
     for num in sorted(new_inline_refs, key=int):
         citation_refs.append(f"[{num}]")
+    citation_refs = list(dict.fromkeys(citation_refs))
 
     return {
         "summary": summary_text[:200] if summary_text else body_text[:200],
@@ -631,8 +776,269 @@ def decompose_node(state: dict[str, Any], model: Any, profile: ResearchModeProfi
 
 
 # ============================================================
-# Stage 2: Parallel Retrieval
+# Stage 2: Round 0 Retrieval, Barrier, and One Correction Round
 # ============================================================
+
+def _subquestion_query(sub_question: dict[str, Any], source: str) -> str:
+    candidates = (
+        list(sub_question.get("search_queries_en") or [])
+        + list(sub_question.get("search_queries") or [])
+        if source == "Web"
+        else list(sub_question.get("search_queries") or [])
+        + list(sub_question.get("search_queries_en") or [])
+    )
+    candidates.append(str(sub_question.get("question") or ""))
+    return next((str(item).strip() for item in candidates if str(item).strip()), "")
+
+
+def _invoke_retrieval_tool(tool: Any, query: str, source: str) -> SourceResult:
+    raw = tool.invoke({"query": query}) if hasattr(tool, "invoke") else tool(query)
+    if isinstance(raw, SourceResult):
+        return raw
+    parsed = parse_source_results(str(raw))
+    if parsed:
+        return parsed[-1]
+    return SourceResult(
+        source=source,
+        status="fallback",
+        detail="unstructured retrieval result",
+        content=str(raw or ""),
+    )
+
+
+def _bind_result(result: SourceResult, subquestion_id: str, query_id: str) -> SourceResult:
+    claims = []
+    for claim in result.claims:
+        payload = claim.to_dict()
+        payload["subquestion_id"] = subquestion_id
+        claims.append(EvidenceItem.from_dict(payload))
+    metadata = dict(result.metadata or {})
+    metadata.update({"subquestion_id": subquestion_id, "query_id": query_id})
+    return SourceResult(
+        source=result.source,
+        status=result.status,
+        content=result.content,
+        detail=result.detail,
+        error=result.error,
+        claims=claims,
+        metadata=metadata,
+        evidence_class=result.evidence_class,
+    )
+
+
+def _status_for_results(results: list[SourceResult]) -> str:
+    statuses = {result.status for result in results}
+    for status in ("success", "low_relevance", "no_evidence", "failed", "fallback"):
+        if status in statuses:
+            return status
+    return "no_evidence"
+
+
+def _aggregate_source_results(results: dict[str, dict[str, SourceResult]], source: str) -> str:
+    return "\n\n".join(
+        result.to_tool_text()
+        for sub_question in results.values()
+        if (result := sub_question.get(source)) is not None
+    )
+
+
+def _source_status_payloads(results: dict[str, dict[str, SourceResult]]) -> dict[str, dict[str, Any]]:
+    payloads: dict[str, dict[str, Any]] = {}
+    for source in ("RAG", "Web"):
+        source_results = [
+            result
+            for sub_question in results.values()
+            if (result := sub_question.get(source)) is not None
+        ]
+        payloads[source] = {
+            "status": _status_for_results(source_results),
+            "result_count": sum(len(result.claims) for result in source_results),
+            "subquestions": {
+                str(subquestion_id): result.to_dict()
+                for subquestion_id, subquestion in results.items()
+                if (result := subquestion.get(source)) is not None
+            },
+        }
+    return payloads
+
+
+def _build_citation_map_from_snapshot(snapshot: LedgerSnapshot) -> dict[str, str]:
+    citation_map: dict[str, str] = {}
+    source_counts: dict[str, int] = {}
+    ref_by_source: dict[str, str] = {}
+    seen_claims: set[str] = set()
+    index = 1
+    for record in snapshot.primary_records():
+        if record.evidence_class not in {"peer_reviewed", "preprint", "authoritative_document"}:
+            continue
+        evidence_text = _usable_evidence_text(
+            EvidenceItem(
+                claim=record.claim,
+                source=record.source_type,
+                verbatim_quote=record.verbatim_quote,
+            )
+        )
+        normalized_claim = re.sub(r"\W+", "", evidence_text).casefold()
+        if not evidence_text or normalized_claim in seen_claims:
+            continue
+        source_key = record.source_identity or record.url or record.document_title or record.source_type
+        if source_counts.get(source_key, 0) >= 2:
+            continue
+        if source_key in ref_by_source:
+            ref = ref_by_source[source_key]
+            source_note = citation_map[ref].rsplit("（来源：", 1)[-1]
+            citation_map[ref] = (
+                citation_map[ref].rsplit("（来源：", 1)[0]
+                + " 补充证据：" + evidence_text[:600]
+                + "（来源：" + source_note
+            )
+            seen_claims.add(normalized_claim)
+            source_counts[source_key] += 1
+            continue
+        ref = "[" + str(index) + "]"
+        citation_map[ref] = evidence_text[:600] + "（来源：" + record.source_type
+        if record.document_title:
+            citation_map[ref] += " " + record.document_title
+        elif record.source_identity:
+            citation_map[ref] += " " + record.source_identity
+        if record.url and record.url not in citation_map[ref]:
+            citation_map[ref] += " " + record.url
+        citation_map[ref] += "）"
+        ref_by_source[source_key] = ref
+        seen_claims.add(normalized_claim)
+        source_counts[source_key] = source_counts.get(source_key, 0) + 1
+        index += 1
+    return citation_map
+
+
+def _correction_proposals(state: dict[str, Any], snapshot: LedgerSnapshot) -> list[ActionProposal]:
+    if int(state.get("_correction_round") or 0) > 0:
+        return []
+    results = state.get("_round0_results") or {}
+    primary_by_subquestion: dict[str, list[Any]] = {}
+    for record in snapshot.primary_records():
+        primary_by_subquestion.setdefault(record.subquestion_id, []).append(record)
+
+    proposals: list[ActionProposal] = []
+    for sub_question in state.get("_sub_questions") or []:
+        subquestion_id = str(sub_question.get("id") or "")
+        source_results = results.get(subquestion_id) or {}
+        records = primary_by_subquestion.get(subquestion_id, [])
+        trigger = ""
+        if any(record.relationship == "contradicts" for record in records):
+            trigger = "conflict"
+        else:
+            statuses = {result.get("status") for result in source_results.values()}
+            if not records and "low_relevance" in statuses:
+                trigger = "low_relevance"
+            elif not records:
+                trigger = "critical_claim_uncovered" if str(sub_question.get("importance")) == "high" else "no_evidence"
+        if not trigger:
+            continue
+
+        if trigger == "low_relevance":
+            source = next(
+                (
+                    name
+                    for name in ("RAG", "Web")
+                    if source_results.get(name, {}).get("status") == "low_relevance"
+                ),
+                "Web",
+            )
+        else:
+            source = "Web" if state.get("_web_available", True) else "RAG"
+        suffix = {
+            "conflict": " official primary source conflict verification",
+            "low_relevance": " focused evidence verification",
+            "critical_claim_uncovered": " critical claim evidence verification",
+            "no_evidence": " narrow evidence verification",
+        }[trigger]
+        proposals.append(ActionProposal(
+            action_id=f"{snapshot.run_id}:action-{len(proposals) + 1:02d}",
+            subquestion_id=subquestion_id,
+            source=source,
+            query=str(sub_question.get("question") or "").strip() + suffix,
+            trigger=trigger,
+        ))
+    return proposals
+
+
+def _retrieve_round0_node(
+    state: dict[str, Any],
+    rag_tool: Any,
+    web_tool: Any,
+    rag_available: bool,
+    web_available: bool,
+) -> dict[str, Any]:
+    sub_questions = state.get("_sub_questions") or []
+    run_id = str(state.get("_run_id") or "")
+    ledger = EvidenceLedger.from_dict(state.get("_evidence_ledger") or {"run_id": run_id})
+    round_results: dict[str, dict[str, SourceResult]] = {}
+
+    def retrieve_one(sub_question: dict[str, Any], source: str, tool: Any) -> tuple[str, str, SourceResult]:
+        subquestion_id = str(sub_question.get("id") or "")
+        query = _subquestion_query(sub_question, source)
+        query_id = f"{run_id}:round-0:{subquestion_id}:{source}"
+        if not tool:
+            return subquestion_id, source, SourceResult(source=source, status="no_evidence", content="")
+        try:
+            result = _invoke_retrieval_tool(tool, query, source)
+        except Exception as exc:
+            result = SourceResult(
+                source=source,
+                status="failed",
+                detail="round 0 retrieval",
+                error=f"{type(exc).__name__}: {exc}",
+                content="",
+            )
+        result = _bind_result(result, subquestion_id, query_id)
+        return subquestion_id, source, result
+
+    jobs = []
+    for sub_question in sub_questions:
+        if rag_available:
+            jobs.append((sub_question, "RAG", rag_tool))
+        if web_available:
+            jobs.append((sub_question, "Web", web_tool))
+    with ThreadPoolExecutor(max_workers=max(1, len(jobs))) as executor:
+        futures = [executor.submit(retrieve_one, *job) for job in jobs]
+        for future in futures:
+            subquestion_id, source, result = future.result()
+            ledger.append_source_result(
+                result,
+                subquestion_id=subquestion_id,
+                query_id=str(result.metadata.get("query_id") or ""),
+                visibility="primary",
+            )
+            round_results.setdefault(subquestion_id, {})[source] = result
+
+    rag_raw = _aggregate_source_results(round_results, "RAG") or "\\uff08\\u672c\\u5730\\u77e5\\u8bc6\\u5e93\\u4e2d\\u6682\\u672a\\u68c0\\u7d22\\u5230\\u76f8\\u5173\\u5185\\u5bb9\\uff09"
+    web_raw = _aggregate_source_results(round_results, "Web") or "\\uff08\\u7f51\\u7edc\\u641c\\u7d22\\u6682\\u672a\\u68c0\\u7d22\\u5230\\u76f8\\u5173\\u5185\\u5bb9\\uff09"
+    statuses = _source_status_payloads(round_results)
+    return {
+        "_pipeline_stage": "retrieve",
+        "_rag_results": rag_raw,
+        "_web_results": web_raw,
+        "_rag_status": statuses["RAG"]["status"],
+        "_web_status": statuses["Web"]["status"],
+        "_rag_count": statuses["RAG"]["result_count"],
+        "_web_count": statuses["Web"]["result_count"],
+        "_citation_map": {},
+        "_source_statuses": statuses,
+        "_evidence_ledger": ledger.to_dict(),
+        "_round0_results": {
+            subquestion_id: {
+                source: result.to_dict()
+                for source, result in source_results.items()
+            }
+            for subquestion_id, source_results in round_results.items()
+        },
+        "_round": "round_0",
+        "_retrieval_round": 0,
+        "_rag_available": rag_available,
+        "_web_available": web_available,
+        "_run_status": "partial",
+    }
 
 def retrieve_node(
     state: dict[str, Any],
@@ -641,71 +1047,89 @@ def retrieve_node(
     rag_available: bool = True,
     web_available: bool = True,
 ) -> dict[str, Any]:
-    query = state["query"]
-    sub_questions = state.get("_sub_questions") or []
+    return _retrieve_round0_node(state, rag_tool, web_tool, rag_available, web_available)
 
-    all_queries = [query]
-    all_queries_en: list[str] = []
-    for sq in sub_questions:
-        all_queries.extend(sq.get("search_queries") or [])
-        all_queries_en.extend(sq.get("search_queries_en") or [])
+# ============================================================
+# Stage 3: Barrier and One Correction Round
+# ============================================================
 
-    combined_query = " ".join(all_queries[:6])
-    combined_query_en = " ".join(all_queries_en[:4])
-
-    rag_raw = ""
-    rag_status = "empty"
-    rag_count = 0
-    if rag_available:
-        try:
-            rag_raw = str(rag_tool.invoke({"query": combined_query}))
-            parsed = [r for r in parse_source_results(rag_raw)]
-            if parsed:
-                last = parsed[-1]
-                rag_status = last.status if last.status in {"success", "empty", "failed"} else "empty"
-                rag_count = len(last.claims) if last.claims else 0
-        except Exception:
-            rag_raw = "\uff08\u672c\u5730\u77e5\u8bc6\u5e93\u68c0\u7d22\u6267\u884c\u5931\u8d25\uff09"  # （本地知识库检索执行失败）
-            rag_status = "failed"
-
-    web_raw = ""
-    web_status = "empty"
-    web_count = 0
-    if web_available:
-        try:
-            search_query = combined_query_en or combined_query
-            web_raw = str(web_tool.invoke({"query": search_query}))
-            parsed = [r for r in parse_source_results(web_raw)]
-            if parsed:
-                last = parsed[-1]
-                web_status = last.status if last.status in {"success", "empty", "failed"} else "empty"
-                web_count = len(last.claims) if last.claims else 0
-        except Exception:
-            web_raw = "\uff08\u7f51\u7edc\u641c\u7d22\u6267\u884c\u5931\u8d25\uff09"  # （网络搜索执行失败）
-            web_status = "failed"
-
-    if not rag_raw:
-        rag_raw = "\uff08\u672c\u5730\u77e5\u8bc6\u5e93\u4e2d\u6682\u672a\u68c0\u7d22\u5230\u76f8\u5173\u5185\u5bb9\uff09"  # （本地知识库中暂未检索到相关内容）
-    if not web_raw:
-        web_raw = "\uff08\u7f51\u7edc\u641c\u7d22\u6682\u672a\u68c0\u7d22\u5230\u76f8\u5173\u5185\u5bb9\uff09"  # （网络搜索暂未检索到相关内容）
-
-    citation_map = _build_citation_map(rag_raw, web_raw)
-
+def barrier_node(state: dict[str, Any]) -> dict[str, Any]:
+    ledger = EvidenceLedger.from_dict(state.get("_evidence_ledger") or {})
+    snapshot = ledger.freeze("round_0")
+    proposals = _correction_proposals(state, snapshot)
+    for proposal in proposals:
+        ledger.add_action_proposal(proposal)
     return {
-        "_pipeline_stage": "retrieve",
-        "_rag_results": rag_raw,
-        "_web_results": web_raw,
-        "_rag_status": rag_status,
-        "_web_status": web_status,
-        "_rag_count": rag_count,
-        "_web_count": web_count,
-        "_citation_map": citation_map,
-        "_run_status": "partial",
+        "_pipeline_stage": "barrier",
+        "_ledger_snapshot": snapshot.to_dict(),
+        "_ledger_snapshots": [snapshot.to_dict()],
+        "_evidence_ledger": ledger.to_dict(),
+        "_correction_actions": [proposal.to_dict() for proposal in proposals],
+        "_citation_map": _build_citation_map_from_snapshot(snapshot),
+        "_round": "barrier",
+    }
+
+
+def correction_node(state: dict[str, Any], rag_tool: Any, web_tool: Any) -> dict[str, Any]:
+    actions = [
+        ActionProposal.from_dict(item)
+        for item in state.get("_correction_actions") or []
+        if isinstance(item, dict)
+    ]
+    if not actions or int(state.get("_correction_round") or 0) > 0:
+        return {
+            "_pipeline_stage": "correction_skipped",
+            "_round": "round_1_skipped",
+            "_retrieval_round": 1,
+        }
+
+    ledger = EvidenceLedger.from_dict(state.get("_evidence_ledger") or {})
+
+    def correct_one(proposal: ActionProposal) -> tuple[str, SourceResult]:
+        tool = rag_tool if proposal.source == "RAG" else web_tool
+        query_id = f"{state.get('_run_id', '')}:round-1:{proposal.subquestion_id}:{proposal.source}"
+        result = _bind_result(
+            _invoke_retrieval_tool(tool, proposal.query, proposal.source),
+            proposal.subquestion_id,
+            query_id,
+        )
+        return proposal.action_id, result
+
+    correction_results: dict[str, SourceResult] = {}
+    with ThreadPoolExecutor(max_workers=max(1, len(actions))) as executor:
+        futures = [executor.submit(correct_one, proposal) for proposal in actions]
+        for future in futures:
+            action_id, result = future.result()
+            ledger.append_source_result(
+                result,
+                subquestion_id=result.metadata.get("subquestion_id", ""),
+                query_id=result.metadata.get("query_id", ""),
+                visibility="verification_only",
+            )
+            correction_results[action_id] = result
+
+    snapshot = ledger.freeze("round_1")
+    return {
+        "_pipeline_stage": "correction",
+        "_round": "round_1",
+        "_retrieval_round": 1,
+        "_correction_round": 1,
+        "_correction_results": {
+            action_id: result.to_dict()
+            for action_id, result in correction_results.items()
+        },
+        "_evidence_ledger": ledger.to_dict(),
+        "_ledger_snapshot": snapshot.to_dict(),
+        "_ledger_snapshots": [
+            *(state.get("_ledger_snapshots") or []),
+            snapshot.to_dict(),
+        ],
+        "_citation_map": _build_citation_map_from_snapshot(snapshot),
     }
 
 
 # ============================================================
-# Stage 3: Concurrent Section Generation
+# Stage 4: Concurrent Section Generation
 # ============================================================
 
 def _generate_section(
@@ -718,14 +1142,18 @@ def _generate_section(
     target_length: int = 3000,
     status: str = "",
 ) -> SectionResult:
+    started = time.perf_counter()
     sq_id = str(sub_question.get("id") or "")
     title = str(sub_question.get("question") or "")
+    error = ""
+    usage: dict[str, int] = {}
 
     # Detect empty evidence: both RAG and web returned nothing usable
     rag_empty = not rag_results or rag_results.strip() in _EMPTY_EVIDENCE_MARKERS
     web_empty = not web_results or web_results.strip() in _EMPTY_EVIDENCE_MARKERS
     no_evidence = rag_empty and web_empty
 
+    allowed_refs: list[str] = []
     if no_evidence:
         prompt = SECTION_NO_EVIDENCE_PROMPT.format(
             core_question=core_question,
@@ -733,12 +1161,16 @@ def _generate_section(
             target_length=target_length,
         )
     else:
+        section_citations = _section_citation_map(title, citation_map)
+        allowed_refs = list(section_citations.keys())
+        rag_count = sum("\u6765\u6e90\uff1aRAG" in value for value in section_citations.values())
+        web_count = sum("\u6765\u6e90\uff1aWeb" in value for value in section_citations.values())
         prompt = SECTION_PROMPT.format(
             core_question=core_question,
             sub_question=title,
-            rag_results=rag_results or _EMPTY_EVIDENCE_MARKERS[0],
-            web_results=web_results or _EMPTY_EVIDENCE_MARKERS[1],
-            citation_map_json=json.dumps(citation_map, ensure_ascii=False),
+            rag_results=f"\u5df2\u7b5b\u9009 {rag_count} \u6761\u672c\u5730\u8bc1\u636e\uff0c\u8be6\u89c1 citation_map\u3002",
+            web_results=f"\u5df2\u7b5b\u9009 {web_count} \u6761\u7f51\u7edc\u8bc1\u636e\uff0c\u8be6\u89c1 citation_map\u3002",
+            citation_map_json=json.dumps(section_citations, ensure_ascii=False),
             target_length=target_length,
         )
 
@@ -749,13 +1181,21 @@ def _generate_section(
         ])
         content = _strip_think(str(response.content))
         finish_reason = "complete"
+        usage_payload = getattr(response, "usage_metadata", None) or {}
+        if isinstance(usage_payload, dict):
+            usage = {
+                str(key): int(value)
+                for key, value in usage_payload.items()
+                if isinstance(value, (int, float))
+            }
         if hasattr(response, "response_metadata"):
             meta = response.response_metadata
             if meta and meta.get("finish_reason") in {"length", "max_tokens"}:
                 finish_reason = "truncated"
-    except Exception:
+    except Exception as exc:
         content = ""
         finish_reason = "failed"
+        error = f"{type(exc).__name__}: {exc}"
 
     parsed = _parse_section_summary(content)
     body_text = parsed.get("body") or content
@@ -767,9 +1207,13 @@ def _generate_section(
         summary=parsed.get("summary", ""),
         key_claims=parsed.get("key_claims", []),
         citation_refs=parsed.get("citation_refs", []),
+        allowed_refs=allowed_refs,
         analysis_judgments=parsed.get("analysis_judgments", []),
         evidence_gaps=parsed.get("evidence_gaps", []),
         finish_reason=finish_reason,
+        elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+        error=error,
+        usage=usage,
     )
 
 
@@ -790,6 +1234,7 @@ def generate_node(state: dict[str, Any], model: Any, profile: ResearchModeProfil
     section_timeout = float(profile.role_timeout_seconds.get("synthesizer", profile.model_timeout_seconds)) if profile else 90.0
     deadline_s = state.get("_deadline_at", 0)
     results: list[SectionResult] = []
+    attempts: dict[str, SectionResult] = {}
     errors: list[str] = []
 
     for batch_start in range(0, len(sub_questions), max_concurrency):
@@ -816,10 +1261,11 @@ def generate_node(state: dict[str, Any], model: Any, profile: ResearchModeProfil
         for future in futures:
             try:
                 sr = future.result(timeout=section_timeout)
+                attempts[sr.sub_question_id] = sr
                 if sr.body.strip():
                     results.append(sr)
                 else:
-                    errors.append("empty body for " + sr.title)
+                    errors.append(sr.error or ("empty body for " + sr.title))
             except Exception as exc:
                 errors.append("section generation failed: " + str(exc))
 
@@ -827,11 +1273,15 @@ def generate_node(state: dict[str, Any], model: Any, profile: ResearchModeProfil
     for sq in sub_questions:
         sid = str(sq.get("id") or "")
         if sid not in generated_ids:
+            attempt = attempts.get(sid)
             results.append(SectionResult(
                 sub_question_id=sid,
                 title=str(sq.get("question") or ""),
                 body="\u672c\u8282\u56e0\u751f\u6210\u8d85\u65f6\u6216\u5931\u8d25\u672a\u80fd\u5b8c\u6210\u3002\u5efa\u8bae\u57fa\u4e8e\u5206\u6790\u5224\u65ad\u8865\u5145\uff1a" + str(sq.get("question", "")),
                 finish_reason="failed",
+                elapsed_ms=attempt.elapsed_ms if attempt else 0.0,
+                error=attempt.error if attempt else "未在当前运行时限内启动章节生成。",
+                usage=dict(attempt.usage) if attempt else {},
             ))
 
     return {
@@ -961,17 +1411,41 @@ def _compute_deterministic_metrics(state: dict[str, Any]) -> dict[str, Any]:
     sections = [SectionResult.from_dict(item) for item in section_results_raw]
 
     total_sections = len(sections)
-    sections_with_ext = sum(1 for sr in sections if sr.citation_refs)
+    citation_map = state.get("_citation_map") or {}
+    valid_refs = set(citation_map.keys())
+    sections_with_ext = sum(1 for sr in sections if any(ref in valid_refs for ref in sr.citation_refs))
     sections_with_gaps = sum(1 for sr in sections if sr.evidence_gaps)
     sections_truncated = sum(1 for sr in sections if sr.finish_reason == "truncated")
+    sections_failed = sum(1 for sr in sections if sr.finish_reason == "failed")
+    sections_completed = total_sections - sections_failed
 
     all_refs: set[str] = set()
     for sr in sections:
         all_refs.update(sr.citation_refs)
 
-    citation_map = state.get("_citation_map") or {}
-    valid_refs = set(citation_map.keys())
     invalid_refs = [ref for ref in all_refs if ref not in valid_refs]
+
+    # 无关引用检测（回归约束 §8.11.1：无关引用必须失败）。
+    # 判定为 off-domain 需同时满足：
+    #   1. 引用了合法标号（在 citation_map 中）；
+    #   2. 该标号不在本节生成时被允许的引用集（allowed_refs）内；
+    #   3. 该标号描述与本节子问题无任何主题重叠（_section_citation_map 会拒绝它）。
+    # 满足条件的引用即"错配引用"→ 交付失败，不得静默进入正式报告。
+    off_domain_refs: list[dict[str, str]] = []
+    for sr in sections:
+        allowed = set(sr.allowed_refs)
+        for ref in sr.citation_refs:
+            if ref not in valid_refs or ref in allowed:
+                continue
+            if _refs_with_topic_overlap(sr.title, [ref], citation_map):
+                # 描述仍与子问题有主题重叠（如超 limit 截断的合法候选）——
+                # 允许性存疑但不构成无关引用错配。
+                continue
+            off_domain_refs.append({
+                "sub_question_id": sr.sub_question_id,
+                "title": sr.title,
+                "ref": ref,
+            })
 
     return {
         "total_sections": total_sections,
@@ -979,14 +1453,29 @@ def _compute_deterministic_metrics(state: dict[str, Any]) -> dict[str, Any]:
         "external_evidence_coverage": round(sections_with_ext / max(1, total_sections), 2),
         "sections_with_gaps": sections_with_gaps,
         "sections_truncated": sections_truncated,
+        "sections_failed": sections_failed,
+        "sections_completed": sections_completed,
         "total_citation_refs": len(all_refs),
         "invalid_citation_refs": len(invalid_refs),
         "invalid_citation_list": invalid_refs,
+        "off_domain_evidence_in_report": len(off_domain_refs),
+        "off_domain_citation_list": off_domain_refs,
         "rag_status": state.get("_rag_status", "empty"),
         "rag_count": state.get("_rag_count", 0),
         "web_status": state.get("_web_status", "empty"),
         "web_count": state.get("_web_count", 0),
-        "analysis_only_sections": total_sections - sections_with_ext,
+        "analysis_only_sections": max(0, sections_completed - sections_with_ext),
+        "section_runs": [
+            {
+                "sub_question_id": sr.sub_question_id,
+                "title": sr.title,
+                "finish_reason": sr.finish_reason,
+                "elapsed_ms": sr.elapsed_ms,
+                "error": sr.error,
+                "usage": sr.usage,
+            }
+            for sr in sections
+        ],
     }
 
 
@@ -994,9 +1483,9 @@ def audit_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
     metrics = _compute_deterministic_metrics(state)
 
     ext_cov = metrics["external_evidence_coverage"]
-    if ext_cov >= 0.5:
+    if ext_cov >= 0.8 and metrics["sections_with_gaps"] == 0:
         confidence = "high"
-    elif ext_cov >= 0.2:
+    elif ext_cov >= 0.5:
         confidence = "medium"
     elif metrics["total_sections"] > 0:
         confidence = "low"
@@ -1011,51 +1500,75 @@ def audit_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
         gaps_lines.append("- [" + sr.title + "]: " + gap_text)
     gaps_text = "\n".join(gaps_lines)
 
-    prompt = CREDIBILITY_PROMPT.format(
-        metrics_json=json.dumps(metrics, ensure_ascii=False, indent=2),
-        gaps_text=gaps_text,
-        rag_status=metrics["rag_status"],
-        rag_count=metrics["rag_count"],
-        web_status=metrics["web_status"],
-        web_count=metrics["web_count"],
+    credibility_text = (
+        "\u786e\u5b9a\u6027\u7ed3\u679c\uff1a\u5171 " + str(metrics["total_sections"]) + " \u8282\uff0c"
+        "\u5b8c\u6210 " + str(metrics["sections_completed"]) + " \u8282\uff0c"
+        "\u5931\u8d25 " + str(metrics["sections_failed"]) + " \u8282\uff0c"
+        "\u622a\u65ad " + str(metrics["sections_truncated"]) + " \u8282\u3002"
+        "\u5176\u4e2d " + str(metrics["sections_with_external_evidence"]) + " \u8282\u4f7f\u7528\u4e86\u5916\u90e8\u8bc1\u636e\uff0c"
+        "\u5171\u4f7f\u7528 " + str(metrics["total_citation_refs"]) + " \u4e2a\u5f15\u7528\u7f16\u53f7\uff0c"
+        "\u5176\u4e2d\u65e0\u6548\u5f15\u7528 " + str(metrics["invalid_citation_refs"]) + " \u4e2a\u3002"
+        "\u6709 " + str(metrics["sections_with_gaps"]) + " \u8282\u660e\u786e\u6807\u8bb0\u4e86\u8bc1\u636e\u7f3a\u53e3\uff0c"
+        "\u56e0\u6b64\u5f53\u524d\u603b\u4f53\u53ef\u4fe1\u5ea6\u4e3a " + confidence + "\u3002"
+        "RAG \u72b6\u6001\uff1a" + metrics["rag_status"] + "\uff0c"
+        "Web \u72b6\u6001\uff1a" + metrics["web_status"] + "\u3002"
     )
-
-    credibility_text = ""
-    if _model_available(state, minimum=10.0):
-        credibility_text = _invoke_text(
-            model,
-            CREDIBILITY_SYSTEM,
-            prompt,
-            status=status_bar(state, model),
-        )
-
-    if not credibility_text:
-        credibility_text = (
-            "\u672c\u62a5\u544a\u5171 " + str(metrics["total_sections"]) + " \u8282\uff0c"
-            "\u5176\u4e2d " + str(metrics["sections_with_external_evidence"]) + " \u8282\u6709\u5916\u90e8\u8bc1\u636e\u652f\u6301\u3002"
-            "\u5916\u90e8\u8bc1\u636e\u8986\u76d6\u7387 " + str(int(metrics["external_evidence_coverage"] * 100)) + "%\u3002"
-            "RAG \u72b6\u6001\uff1a" + metrics["rag_status"] + "\uff0c"
-            "Web \u72b6\u6001\uff1a" + metrics["web_status"] + "\u3002"
-        )
-        if confidence == "low":
-            credibility_text += "\u591a\u6570\u5185\u5bb9\u6765\u81ea\u6a21\u578b\u5206\u6790\u5224\u65ad\uff0c\u5efa\u8bae\u7528\u6237\u5bf9\u5173\u952e\u7ed3\u8bba\u8fdb\u884c\u72ec\u7acb\u9a8c\u8bc1\u3002"
-        if metrics["sections_truncated"]:
-            credibility_text += " " + str(metrics["sections_truncated"]) + " \u8282\u56e0\u6a21\u578b\u8f93\u51fa\u957f\u5ea6\u9650\u5236\u88ab\u622a\u65ad\u3002"
+    if gaps_text:
+        credibility_text += "\n\n\u5404\u8282\u8bc1\u636e\u7f3a\u53e3\uff1a\n" + gaps_text
 
     run_status = "completed"
-    if metrics["sections_truncated"] > 0 or confidence in {"low", "unverified"}:
+    if metrics["sections_failed"] > 0 or metrics["sections_truncated"] > 0 or confidence in {"low", "unverified"}:
         run_status = "partial"
     if metrics["total_sections"] == 0:
         run_status = "failed"
+    delivery_status = {
+        "completed": "deliverable",
+        "partial": "limited",
+        "failed": "diagnostic_only",
+    }[run_status]
+    # 无关引用（引用错配）直接触发交付失败（§8.6）：正文仍可用，但不通过交付门禁。
+    if metrics["off_domain_evidence_in_report"] > 0:
+        delivery_status = "diagnostic_only"
+
+    source_statuses = {
+        "RAG": {
+            "status": "no_evidence" if metrics["rag_status"] == "empty" else metrics["rag_status"],
+            "result_count": metrics["rag_count"],
+        },
+        "Web": {
+            "status": "no_evidence" if metrics["web_status"] == "empty" else metrics["web_status"],
+            "result_count": metrics["web_count"],
+        },
+        "Model": {
+            "status": "success" if metrics["total_sections"] > 0 else "no_evidence",
+            "result_count": metrics["total_sections"],
+        },
+    }
+    previous_statuses = state.get("_source_statuses") or {}
+    for source in ("RAG", "Web"):
+        if source in previous_statuses:
+            source_statuses[source] = {
+                **previous_statuses[source],
+                "status": source_statuses[source]["status"],
+                "result_count": source_statuses[source]["result_count"],
+            }
 
     return {
         "_pipeline_stage": "audit",
         "_confidence": confidence,
         "_run_status": run_status,
+        "_delivery_status": delivery_status,
+        "_delivery_assessment": {
+            "status": delivery_status,
+            "run_status": run_status,
+            "sections_completed": metrics["sections_completed"],
+            "sections_failed": metrics["sections_failed"],
+        },
         "_report_available": metrics["total_sections"] > 0,
         "_credibility_text": credibility_text,
         "_audit_metrics": metrics,
         "_confidence_preliminary": True,
+        "_source_statuses": source_statuses,
     }
 
 
@@ -1080,27 +1593,36 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
 
     sections = [SectionResult.from_dict(item) for item in section_results_raw]
 
-    # ── Build evidence index from section citation_refs ──
+    # ── Build evidence index from claim-local citation refs ──
     all_claims: list[dict[str, Any]] = []
     for sr in sections:
         for claim_text in sr.key_claims:
+            claim_refs = sorted({
+                f"[{number}]"
+                for group in re.findall(r"\[((?:\d+\s*,\s*)*\d+)\]", claim_text)
+                for number in re.findall(r"\d+", group)
+                if f"[{number}]" in citation_map
+            }, key=_citation_sort_key)
+            wording = re.sub(r"\[(?:\d+)(?:\s*,\s*\d+)*\]", "", claim_text).strip()
             all_claims.append({
                 "section": sr.title,
-                "claim": claim_text,
-                "citations": sr.citation_refs,
-                "has_evidence": bool(sr.citation_refs),
+                "claim": wording or claim_text,
+                "citations": claim_refs,
+                "has_evidence": bool(claim_refs),
             })
 
     total_claims = len(all_claims)
     verified_claims = sum(1 for c in all_claims if c["has_evidence"])
     unverified = [c for c in all_claims if not c["has_evidence"]]
 
-    cit_refs_used = sum(len(c["citations"]) for c in all_claims)
+    cit_refs_used = len({ref for claim in all_claims for ref in claim["citations"]})
     cit_refs_available = len(citation_map)
 
     # ── Structured findings ──
     findings: dict[str, Any] = {
         "total_sections": len(sections),
+        "completed_sections": int(audit_metrics.get("sections_completed") or 0),
+        "failed_sections": int(audit_metrics.get("sections_failed") or 0),
         "total_claims": total_claims,
         "verified_claims": verified_claims,
         "unverified_claims": len(unverified),
@@ -1131,10 +1653,15 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
     # ── Build factcheck section ──
     fc_lines = ["\n## FactCheck \u9a8c\u8bc1\n"]  # "FactCheck 验证"
     fc_lines.append(
-        f"\u9a8c\u8bc1\u7ed3\u679c\uff1a**{factcheck_status.upper()}**\uff08"
+        f"\u5df2\u751f\u6210\u58f0\u660e\u7684\u5f15\u7528\u6838\u9a8c\u7ed3\u679c\uff1a**{factcheck_status.upper()}**\uff08"
         f"{verified_claims}/{total_claims} \u6761\u58f0\u660e\u6709\u8bc1\u636e\u652f\u6301\uff0c"
         f"\u8986\u76d6\u7387 {int(findings['verified_ratio']*100)}%\uff09\n"
     )
+    if findings["failed_sections"]:
+        fc_lines.append(
+            f"\n\u6ce8\uff1a\u8be5\u7ed3\u679c\u4ec5\u6838\u9a8c\u5df2\u751f\u6210\u7684\u58f0\u660e\uff1b"
+            f"{findings['failed_sections']}/{findings['total_sections']} \u4e2a\u6269\u5c55\u95ee\u9898\u672a\u5b8c\u6210\uff0c\u4e0d\u4ee3\u8868\u6574\u4efd\u62a5\u544a\u5b8c\u6574\u901a\u8fc7\u3002\n"
+        )
 
     if unverified:
         fc_lines.append("\n### \u7f3a\u4e4f\u8bc1\u636e\u652f\u6301\u7684\u58f0\u660e\n")
@@ -1146,6 +1673,36 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
 
     fc_text = "".join(fc_lines)
     report_with_fc = report + fc_text
+    run_summary = {
+        "mode": "answer_first",
+        "run_id": str(state.get("_run_id") or ""),
+        "query": str(state.get("query") or ""),
+        "run_status": str(state.get("_run_status") or "failed"),
+        "report_available": bool(state.get("_report_available")),
+        "confidence": confidence,
+        "elapsed_ms": float(state.get("_elapsed_ms") or 0.0),
+        "section_count": len(sections),
+        "external_evidence_count": len(citation_map),
+        "ledger_snapshot_id": str((state.get("_ledger_snapshot") or {}).get("snapshot_id") or ""),
+        "ledger_record_count": len((state.get("_ledger_snapshot") or {}).get("records") or []),
+        "ledger_snapshot": state.get("_ledger_snapshot") or {},
+        "retrieval_round": int(state.get("_retrieval_round") or 0),
+        "correction_round": int(state.get("_correction_round") or 0),
+        "analysis_only_count": int(audit_metrics.get("analysis_only_sections") or 0),
+        "invalid_citation_count": int(audit_metrics.get("invalid_citation_refs") or 0),
+        "missing_required_sections": not all(
+            heading in report_with_fc
+            for heading in ("## \u76f4\u63a5\u56de\u7b54", "## \u53ef\u4fe1\u5ea6\u8bf4\u660e", "## FactCheck \u9a8c\u8bc1")
+        ),
+        "off_domain_evidence_in_report": int((audit_metrics or {}).get("off_domain_evidence_in_report") or 0),
+        "off_domain_citation_list": (audit_metrics or {}).get("off_domain_citation_list") or [],
+        "report_markdown": report_with_fc,
+        "source_statuses": state.get("_source_statuses") or {},
+        "factcheck_status": factcheck_status,
+        "quality": audit_metrics,
+        "delivery_status": str(state.get("_delivery_status") or "diagnostic_only"),
+        "delivery_assessment": state.get("_delivery_assessment") or {},
+    }
 
     return {
         "_pipeline_stage": "factcheck",
@@ -1154,6 +1711,7 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
         "_verified_answer": fc_text,  # only the factcheck section, NOT full report
         "_confidence": confidence,
         "_report_markdown": report_with_fc,
+        "_run_summary": run_summary,
         "final_answer": report_with_fc[:8000],
     }
 
@@ -1197,17 +1755,15 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
 
     if credibility_text:
         lines.append("## \u53ef\u4fe1\u5ea6\u8bf4\u660e\n")
-        lines.append(credibility_text)
+        credibility_body = re.sub(
+            r"^(?:\s*##\s*\u53ef\u4fe1\u5ea6\u8bf4\u660e\s*)+",
+            "",
+            credibility_text,
+        ).strip()
+        lines.append(credibility_body)
         lines.append("")
 
     report = "\n".join(lines)
-
-    # Build evidence list from citation_map for compile_report
-    evidence = [{"evidence_refs": [ref], "claim": desc} for ref, desc in citation_map.items()] if citation_map else []
-    try:
-        report, _entries, _confidence = compile_report(report, evidence)
-    except Exception:
-        pass
 
     elapsed = round((time.time() - float(state.get("_started_at") or time.time())) * 1000, 0)
 
@@ -1234,24 +1790,45 @@ def create_v2_research_graph(
     graph = StateGraph(V2State)
 
     retriever = kwargs.get("retriever")
-    rag_tool = create_rag_tool(
-        retriever, None, None, profile,
-    ) if retriever else rag_agent
+    query_rewriter = kwargs.get("query_rewriter")
+    semantic_reranker = kwargs.get("semantic_reranker")
+    reranker_model = kwargs.get("reranker_model")
+    run_id = kwargs.get("run_id")
 
     deadline_at = kwargs.get("deadline_at")
     commit_reserve = float(kwargs.get("commit_reserve_seconds") or 30.0)
     rag_available = bool(kwargs.get("rag_available", True))
     web_available = bool(kwargs.get("web_available", True))
 
-    web_tool = create_web_tool(
-        profile,
-        run_id=new_run_id(),
-        deadline_at=deadline_at,
-        commit_reserve_seconds=commit_reserve,
+    # V2 wiring 修复（§8.11.2）：retriever 分支重建工具时必须携带调用方已配置
+    # 的查询改写器（query_rewriter）、语义重排器（semantic_reranker）与 run_id，
+    # 否则：LLM 查询改写被静默丢弃、语义重排降级为 "unreviewed"、web 工具的
+    # RunScopedCorpusProvider 错配到一个全新的 run_id（污染语料作用域与重放）。
+    if semantic_reranker is None and reranker_model is not None:
+        try:
+            semantic_reranker = SemanticReranker(reranker_model, batch_size=profile.candidate_limit)
+        except Exception:
+            semantic_reranker = None
+
+    rag_tool = (
+        create_rag_tool(retriever, query_rewriter, semantic_reranker, profile)
+        if retriever else rag_agent
+    )
+    web_tool = (
+        create_web_tool(
+            profile,
+            run_id=run_id or new_run_id(),
+            query_rewriter=query_rewriter,
+            deadline_at=deadline_at,
+            commit_reserve_seconds=commit_reserve,
+        )
+        if retriever else web_agent
     )
 
     graph.add_node("decompose", lambda s: decompose_node(s, planner_model, profile))
     graph.add_node("retrieve", lambda s: retrieve_node(s, rag_tool, web_tool, rag_available, web_available))
+    graph.add_node("barrier", barrier_node)
+    graph.add_node("correction", lambda s: correction_node(s, rag_tool, web_tool))
     graph.add_node("generate", lambda s: generate_node(s, synthesizer_model, profile))
     graph.add_node("synthesize", lambda s: synthesize_node(s, synthesizer_model))
     graph.add_node("audit", lambda s: audit_node(s, synthesizer_model))
@@ -1260,7 +1837,9 @@ def create_v2_research_graph(
 
     graph.set_entry_point("decompose")
     graph.add_edge("decompose", "retrieve")
-    graph.add_edge("retrieve", "generate")
+    graph.add_edge("retrieve", "barrier")
+    graph.add_edge("barrier", "correction")
+    graph.add_edge("correction", "generate")
     graph.add_edge("generate", "synthesize")
     graph.add_edge("synthesize", "audit")
     graph.add_edge("audit", "finalize")

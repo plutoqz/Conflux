@@ -116,6 +116,277 @@ class SourceCoverage:
         return asdict(self)
 
 
+LedgerVisibility = Literal["primary", "verification_only"]
+
+
+@dataclass(slots=True)
+class EvidenceRecord:
+    """Evidence metadata shared by retrieval stages and frozen at a Barrier."""
+
+    evidence_id: str
+    subquestion_id: str
+    query_id: str
+    source_identity: str
+    publisher: str
+    content_hash: str
+    source_type: str
+    source_authority: float = 0.0
+    claim_fitness: float = 0.0
+    published_at: str = ""
+    retrieved_at: str = ""
+    evidence_role: str = "direct_support"
+    claim: str = ""
+    verbatim_quote: str = ""
+    evidence_class: str = ""
+    url: str = ""
+    document_title: str = ""
+    evidence_refs: list[str] = field(default_factory=list)
+    visibility: LedgerVisibility = "primary"
+    relationship: str = "supports"
+    subquestion_ids: list[str] = field(default_factory=list)
+    supersedes: str = ""
+    promoted_from: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "EvidenceRecord":
+        visibility = str(payload.get("visibility") or "primary")
+        if visibility not in {"primary", "verification_only"}:
+            visibility = "primary"
+        subquestion_id = str(payload.get("subquestion_id") or "")
+        subquestion_ids = _string_list(payload.get("subquestion_ids"))
+        if subquestion_id and subquestion_id not in subquestion_ids:
+            subquestion_ids.insert(0, subquestion_id)
+        return cls(
+            evidence_id=str(payload.get("evidence_id") or ""),
+            subquestion_id=subquestion_id,
+            query_id=str(payload.get("query_id") or ""),
+            source_identity=str(payload.get("source_identity") or ""),
+            publisher=str(payload.get("publisher") or ""),
+            content_hash=str(payload.get("content_hash") or ""),
+            source_type=str(payload.get("source_type") or ""),
+            source_authority=_bounded_float(payload.get("source_authority"), default=0.0),
+            claim_fitness=_bounded_float(payload.get("claim_fitness"), default=0.0),
+            published_at=str(payload.get("published_at") or ""),
+            retrieved_at=str(payload.get("retrieved_at") or ""),
+            evidence_role=str(payload.get("evidence_role") or "direct_support"),
+            claim=str(payload.get("claim") or ""),
+            verbatim_quote=str(payload.get("verbatim_quote") or ""),
+            evidence_class=str(payload.get("evidence_class") or ""),
+            url=str(payload.get("url") or ""),
+            document_title=str(payload.get("document_title") or ""),
+            evidence_refs=_string_list(payload.get("evidence_refs")),
+            visibility=visibility,  # type: ignore[arg-type]
+            relationship=str(payload.get("relationship") or "supports"),
+            subquestion_ids=subquestion_ids,
+            supersedes=str(payload.get("supersedes") or ""),
+            promoted_from=str(payload.get("promoted_from") or ""),
+        )
+
+
+@dataclass(slots=True)
+class ActionProposal:
+    """One bounded coordinator-approved correction action."""
+
+    action_id: str
+    subquestion_id: str
+    source: str
+    query: str
+    trigger: str
+    round: int = 1
+    approved: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ActionProposal":
+        return cls(
+            action_id=str(payload.get("action_id") or ""),
+            subquestion_id=str(payload.get("subquestion_id") or ""),
+            source=str(payload.get("source") or ""),
+            query=str(payload.get("query") or ""),
+            trigger=str(payload.get("trigger") or ""),
+            round=max(1, _int_value(payload.get("round"), default=1)),
+            approved=bool(payload.get("approved", True)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerSnapshot:
+    """Read-only evidence view consumed after a Barrier."""
+
+    snapshot_id: str
+    run_id: str
+    round: str
+    records: tuple[EvidenceRecord, ...] = ()
+    source_statuses: tuple[tuple[str, dict[str, Any]], ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "snapshot_id": self.snapshot_id,
+            "run_id": self.run_id,
+            "round": self.round,
+            "records": [record.to_dict() for record in self.records],
+            "source_statuses": {key: value for key, value in self.source_statuses},
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "LedgerSnapshot":
+        statuses = payload.get("source_statuses") or {}
+        status_items = (
+            tuple((str(key), dict(value or {})) for key, value in statuses.items())
+            if isinstance(statuses, dict)
+            else ()
+        )
+        records = tuple(
+            EvidenceRecord.from_dict(item)
+            for item in payload.get("records") or []
+            if isinstance(item, dict)
+        )
+        return cls(
+            snapshot_id=str(payload.get("snapshot_id") or ""),
+            run_id=str(payload.get("run_id") or ""),
+            round=str(payload.get("round") or ""),
+            records=records,
+            source_statuses=status_items,
+        )
+
+    def primary_records(self) -> tuple[EvidenceRecord, ...]:
+        return tuple(record for record in self.records if record.visibility == "primary")
+
+
+@dataclass(slots=True)
+class EvidenceLedger:
+    """Single run-scoped append-only store for source evidence."""
+
+    run_id: str
+    records: dict[str, EvidenceRecord] = field(default_factory=dict)
+    source_statuses: dict[str, dict[str, Any]] = field(default_factory=dict)
+    action_proposals: list[ActionProposal] = field(default_factory=list)
+    snapshot_count: int = 0
+
+    def append_record(self, record: EvidenceRecord) -> str:
+        key = (record.source_identity, record.content_hash, record.visibility)
+        existing = next(
+            (
+                item
+                for item in self.records.values()
+                if (item.source_identity, item.content_hash, item.visibility) == key
+            ),
+            None,
+        )
+        if existing is not None:
+            for subquestion_id in [record.subquestion_id, *record.subquestion_ids]:
+                if subquestion_id and subquestion_id not in existing.subquestion_ids:
+                    existing.subquestion_ids.append(subquestion_id)
+            return existing.evidence_id
+        self.records[record.evidence_id] = record
+        return record.evidence_id
+
+    def append_source_result(
+        self,
+        result: Any,
+        *,
+        subquestion_id: str,
+        query_id: str,
+        visibility: LedgerVisibility = "primary",
+    ) -> list[str]:
+        from hashlib import sha256
+
+        ids: list[str] = []
+        claims = list(getattr(result, "claims", []) or [])
+        for claim in claims:
+            text = str(getattr(claim, "verbatim_quote", "") or getattr(claim, "claim", "")).strip()
+            if not text:
+                continue
+            content_hash = str(getattr(claim, "content_hash", "") or "")
+            if not content_hash:
+                content_hash = sha256(text.encode("utf-8")).hexdigest()
+            source = str(getattr(claim, "source", "") or getattr(result, "source", ""))
+            source_identity = str(
+                getattr(claim, "source_identity", "")
+                or getattr(claim, "url", "")
+                or getattr(claim, "paper_id", "")
+                or getattr(claim, "document_title", "")
+                or source
+            )
+            evidence_id = f"{self.run_id}:ev-{len(self.records) + len(ids) + 1:04d}"
+            record = EvidenceRecord(
+                evidence_id=evidence_id,
+                subquestion_id=subquestion_id,
+                query_id=query_id,
+                source_identity=source_identity,
+                publisher=str(getattr(claim, "organization", "") or source),
+                content_hash=content_hash,
+                source_type=source,
+                source_authority=float(getattr(claim, "authority", 0.0) or 0.0),
+                claim_fitness=float(getattr(claim, "relevance", 0.0) or 0.0),
+                published_at=str(getattr(claim, "published_at", "") or ""),
+                retrieved_at=str(getattr(claim, "retrieved_at", "") or ""),
+                evidence_role=str(getattr(claim, "evidence_role", "") or "direct_support"),
+                claim=str(getattr(claim, "claim", "") or text),
+                verbatim_quote=text,
+                evidence_class=str(getattr(claim, "evidence_class", "") or getattr(result, "evidence_class", "")),
+                url=str(getattr(claim, "url", "") or ""),
+                document_title=str(getattr(claim, "document_title", "") or ""),
+                evidence_refs=[str(item) for item in getattr(claim, "evidence_refs", []) or []],
+                visibility=visibility,
+                relationship=str(getattr(claim, "relationship", "supports") or "supports"),
+                subquestion_ids=[subquestion_id],
+            )
+            ids.append(self.append_record(record))
+        self.source_statuses[f"{subquestion_id}:{getattr(result, 'source', '')}:{visibility}"] = result.to_dict()
+        return ids
+
+    def add_action_proposal(self, proposal: ActionProposal) -> None:
+        if not any(item.action_id == proposal.action_id for item in self.action_proposals):
+            self.action_proposals.append(proposal)
+
+    def freeze(self, round_name: str) -> LedgerSnapshot:
+        self.snapshot_count += 1
+        return LedgerSnapshot(
+            snapshot_id=f"{self.run_id}:snapshot-{self.snapshot_count}",
+            run_id=self.run_id,
+            round=round_name,
+            records=tuple(self.records.values()),
+            source_statuses=tuple((key, dict(value)) for key, value in self.source_statuses.items()),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "records": [record.to_dict() for record in self.records.values()],
+            "source_statuses": self.source_statuses,
+            "action_proposals": [item.to_dict() for item in self.action_proposals],
+            "snapshot_count": self.snapshot_count,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "EvidenceLedger":
+        ledger = cls(
+            run_id=str(payload.get("run_id") or ""),
+            source_statuses={
+                str(key): dict(value or {})
+                for key, value in (payload.get("source_statuses") or {}).items()
+            },
+            action_proposals=[
+                ActionProposal.from_dict(item)
+                for item in payload.get("action_proposals") or []
+                if isinstance(item, dict)
+            ],
+            snapshot_count=max(0, _int_value(payload.get("snapshot_count"))),
+        )
+        for item in payload.get("records") or []:
+            if isinstance(item, dict):
+                record = EvidenceRecord.from_dict(item)
+                if record.evidence_id:
+                    ledger.records[record.evidence_id] = record
+        return ledger
+
+
 @dataclass(slots=True)
 class ClaimAssessment:
     claim_id: str
