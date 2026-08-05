@@ -12,11 +12,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> int:
+    load_dotenv(ROOT / ".env", override=False)
+    load_dotenv(Path.cwd() / ".env", override=False)
+
     parser = argparse.ArgumentParser(description="Run a real Conflux smoke test.")
     parser.add_argument("--real", action="store_true", help="Actually call configured APIs")
     parser.add_argument("--query", default="Explain how Conflux should handle RAG/Web/Model arbitration.")
