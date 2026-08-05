@@ -579,17 +579,30 @@ def evaluate_v2_quality(state: dict[str, Any]) -> dict[str, Any]:
         state.get("_generation_trace_invalid")
         or audit.get("generation_trace_invalid")
     )
+    claim_gate = (state.get("_delivery_assessment") or {}).get("claim_gate") or {}
+    claim_gate_status = str(claim_gate.get("status") or "not_applicable")
     supported = sum(1 for item in judgments if item.get("mode") == "verification" and item.get("verdict") == "supports")
     contradictory = sum(1 for item in judgments if item.get("mode") == "verification" and item.get("verdict") == "contradicts")
 
     scores = {
         "EvidenceLedger": 5 if snapshot.get("snapshot_id") and records else 3 if snapshot.get("snapshot_id") else 1,
-        "声明验证": 5 if supported and not contradictory else 3 if judgments else 1,
+        "声明验证": (
+            5 if claim_gate_status == "deliverable"
+            else 3 if claim_gate_status == "limited"
+            else 1 if claim_gate_status == "diagnostic_only"
+            else 5 if supported and not contradictory
+            else 3 if judgments else 1
+        ),
         "归因审计": 1 if generation_trace_invalid else 5,
         "最终交付": 5 if delivery_status == "deliverable" else 3 if delivery_status == "limited" else 1,
     }
     overall = round(sum(scores.values()) / len(scores), 2)
-    passed = delivery_status == "deliverable" and not generation_trace_invalid and not contradictory
+    passed = (
+        delivery_status == "deliverable"
+        and claim_gate_status in {"deliverable", "not_applicable"}
+        and not generation_trace_invalid
+        and not contradictory
+    )
     return {
         "scores": scores,
         "overall": overall,
@@ -600,6 +613,7 @@ def evaluate_v2_quality(state: dict[str, Any]) -> dict[str, Any]:
         "verification_judgment_count": sum(1 for item in judgments if item.get("mode") == "verification"),
         "supported_claim_count": supported,
         "contradictory_claim_count": contradictory,
+        "claim_delivery_gate": claim_gate,
         "generation_trace_invalid": generation_trace_invalid,
         "notes": [],
     }

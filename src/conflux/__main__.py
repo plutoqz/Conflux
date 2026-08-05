@@ -21,12 +21,14 @@ from .model_factory import (
 )
 from .query_planner import QueryRewriteProvider
 from .rag import HybridRetriever, SemanticReranker, chunk_documents, clear_index, create_vector_store, index_documents
+from .replay import build_replay_components, load_replay_bundle
 from .research_modes import resolve_research_profile
 from .tools import create_rag_tool, create_web_tool, set_model
 from .trace import (
     event_from_state_key,
     events_from_source_results,
     new_run_id,
+    TraceEvent,
     write_run_summary,
     write_trace_jsonl,
 )
@@ -119,11 +121,19 @@ def _new_v2_state(
     *,
     deadline_at: float | None = None,
     run_id: str | None = None,
+    depth: str = "standard",
+    timeout_seconds: int | None = None,
 ) -> dict:
     """Create initial state for the V2 answer_first pipeline."""
     from .graph_v2 import _new_state
 
-    return _new_state(query, deadline_at=deadline_at, run_id=run_id)
+    return _new_state(
+        query,
+        deadline_at=deadline_at,
+        run_id=run_id,
+        depth=depth,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def query_command(
@@ -141,6 +151,7 @@ def query_command(
     started_at: float | None = None,
     deadline_at: float | None = None,
     commit_reserve_seconds: float | None = None,
+    replay: str | None = None,
 ) -> dict:
     """Run one research query."""
 
@@ -160,47 +171,69 @@ def query_command(
         # P1/P1.5 pipelines were removed (plan stage K); normalize to V2.
         print(f"-> Warning: research.pipeline '{pipeline}' is no longer supported; using answer_first.")
         pipeline = "answer_first"
-    credential_problems = validate_runtime_credentials(
-        research_profile.depth,
-        include_legacy_presets=False,
-    )
-    if credential_problems:
-        print("Error: real API execution is missing required credentials.")
-        for problem in credential_problems:
-            print(f"- {problem}")
-        print("\nConfigure OPENAI_API_KEY, or source-specific CONFLUX_* API key overrides.")
-        sys.exit(2)
+    replay_bundle = load_replay_bundle(replay) if replay else None
+    if replay_bundle:
+        bundle_query = str(replay_bundle.get("query") or "").strip()
+        if bundle_query and bundle_query != query:
+            raise ValueError("replay bundle query does not match the requested query")
+        for key, expected in (
+            ("prompt_version", "research-prompts-v3"),
+            ("model_config_version", "research-model-profile-v1"),
+        ):
+            if replay_bundle.get(key) != expected:
+                raise ValueError(f"replay bundle {key} does not match the current V2 configuration")
+        run_id = str(replay_bundle.get("run_id") or run_id)
+        role_models, rag_tool, web_tool = build_replay_components(replay_bundle)
+        model_trace = None
+        vector_store = None
+        retriever = None
+        v2_rewriter = None
+        v2_semantic_reranker = None
+        print(f"-> Replay bundle: {Path(replay).resolve()}")
+    else:
+        credential_problems = validate_runtime_credentials(
+            research_profile.depth,
+            include_legacy_presets=False,
+        )
+        if credential_problems:
+            print("Error: real API execution is missing required credentials.")
+            for problem in credential_problems:
+                print(f"- {problem}")
+            print("\nConfigure OPENAI_API_KEY, or source-specific CONFLUX_* API key overrides.")
+            sys.exit(2)
 
-    vector_store = create_vector_store()
-    retriever = HybridRetriever(vector_store)
-    print("-> Initializing models...")
-    role_models, model_trace = create_research_models(
-        research_profile.depth,
-        deadline_at=deadline_at,
-        commit_reserve_seconds=commit_reserve_seconds,
-    )
-    set_model(role_models["analyst"])
-    v2_rewriter = QueryRewriteProvider(role_models["verifier"])
-    v2_semantic_reranker = SemanticReranker(role_models["reranker"], batch_size=research_profile.candidate_limit)
-    rag_tool = create_rag_tool(
-        retriever,
-        v2_rewriter,
-        v2_semantic_reranker,
-        research_profile,
-    )
-    web_tool = create_web_tool(
-        research_profile,
-        run_id=run_id,
-        query_rewriter=v2_rewriter,
-        deadline_at=deadline_at,
-        commit_reserve_seconds=commit_reserve_seconds,
-    )
+        vector_store = create_vector_store()
+        retriever = HybridRetriever(vector_store)
+        print("-> Initializing models...")
+        role_models, model_trace = create_research_models(
+            research_profile.depth,
+            deadline_at=deadline_at,
+            commit_reserve_seconds=commit_reserve_seconds,
+        )
+        set_model(role_models["analyst"])
+        v2_rewriter = QueryRewriteProvider(role_models["verifier"])
+        v2_semantic_reranker = SemanticReranker(role_models["reranker"], batch_size=research_profile.candidate_limit)
+        rag_tool = create_rag_tool(
+            retriever,
+            v2_rewriter,
+            v2_semantic_reranker,
+            research_profile,
+        )
+        web_tool = create_web_tool(
+            research_profile,
+            run_id=run_id,
+            query_rewriter=v2_rewriter,
+            deadline_at=deadline_at,
+            commit_reserve_seconds=commit_reserve_seconds,
+        )
 
     effective_thread_id = resume or thread_id or run_id
     checkpoint = create_checkpointer(checkpoint_backend)
     print(f"-> Mode: {mode}")
     print(f"-> Research pipeline: {pipeline}")
     print(f"-> Research depth: {research_profile.depth}")
+    if replay_bundle:
+        print("-> Execution mode: fixed replay")
     if model_trace:
         for role, identity in model_trace.get("roles", {}).items():
             print(f"-> Model {role}: {identity.get('model')} ({identity.get('preset')})")
@@ -209,9 +242,13 @@ def query_command(
     print(f"-> Checkpoint backend: {checkpoint.backend}")
 
     # V2 answer_first pipeline — simplified 4-step flow
-    retriever = HybridRetriever(vector_store)
-    rag_agent = create_sub_agent("rag", role_models["reranker"], rag_tool)
-    web_agent = create_sub_agent("web", role_models["reranker"], web_tool)
+    if replay_bundle:
+        rag_agent = rag_tool
+        web_agent = web_tool
+    else:
+        retriever = HybridRetriever(vector_store)
+        rag_agent = create_sub_agent("rag", role_models["reranker"], rag_tool)
+        web_agent = create_sub_agent("web", role_models["reranker"], web_tool)
     graph = create_v2_research_graph(
         rag_agent,
         web_agent,
@@ -232,6 +269,8 @@ def query_command(
         query,
         deadline_at=deadline_at,
         run_id=run_id,
+        depth=research_profile.depth,
+        timeout_seconds=research_profile.timeout_seconds,
     )
     final_state, trace_events = _run_phase2_graph(
         graph,
@@ -286,11 +325,16 @@ def query_command(
             "trace_path": str(trace_path),
             "run_status": final_state.get("_run_status"),
             "report_available": bool(final_state.get("_report_available")),
-            "confidence": final_state.get("_confidence"),
-            "source_statuses": final_state.get("_source_statuses") or {},
-            "factcheck_status": final_state.get("_factcheck_status") or "",
-            "quality": final_state.get("_audit_metrics") or {},
-        })
+             "confidence": final_state.get("_confidence"),
+             "source_statuses": final_state.get("_source_statuses") or {},
+             "factcheck_status": final_state.get("_factcheck_status") or "",
+             "quality": final_state.get("_audit_metrics") or {},
+             "budget_consumed": final_state.get("_budget_state") or {},
+             "degradation_reason": (final_state.get("_budget_state") or {}).get("degradation_reasons") or [],
+             "dropped_reason": (final_state.get("_budget_state") or {}).get("dropped_reasons") or [],
+             "replay_mode": bool(replay_bundle),
+             "replay_bundle": str(Path(replay).resolve()) if replay else "",
+         })
     write_run_summary(summary, summary_path)
     final_state["_report_artifacts"] = {
         "markdown_path": summary["report_md_path"],
@@ -374,6 +418,40 @@ def _run_phase2_graph(
                         print(json.dumps(trace_event.to_dict(), ensure_ascii=False))
                     else:
                         print(f"[done] {label} ({len(str(value))} chars)")
+
+    budget = event.get("_budget_state") or {}
+    observability_event = TraceEvent(
+        stage="v2_run_summary",
+        status=str(event.get("_run_status") or "failed"),
+        elapsed_ms=float(event.get("_elapsed_ms") or 0.0),
+        run_id=run_id,
+        thread_id=thread_id,
+        summary="V2 query plan, evidence, verification and budget summary",
+        metadata={
+            "query_plan": event.get("_sub_questions") or [],
+            "provider_trace": {
+                key: value.get("provider_trace", [])
+                for key, value in (event.get("_source_statuses") or {}).items()
+                if isinstance(value, dict)
+            },
+            "candidate_evidence": event.get("_round0_results") or {},
+            "dropped_reason": budget.get("dropped_reasons") or [],
+            "claim_ids": [
+                item.get("claim_id")
+                for item in event.get("_claim_records") or []
+                if isinstance(item, dict)
+            ],
+            "verification_result": event.get("_model_verification") or {},
+            "conflict_search": event.get("_model_arbitration") or {},
+            "budget_consumed": budget,
+            "degradation_reason": budget.get("degradation_reasons") or [],
+            "prompt_version": "research-prompts-v3",
+            "model_config_version": "research-model-profile-v1",
+        },
+    )
+    events.append(observability_event)
+    if stream_events:
+        print(json.dumps(observability_event.to_dict(), ensure_ascii=False))
 
     print("=" * 60)
     return event, events
@@ -557,7 +635,7 @@ def main() -> None:
 
     # ── legacy research CLI (preserved) ─────────────────────────
     research_parser = sub.add_parser("research", help="Run a research query (default)")
-    research_parser.add_argument("query", nargs="?", help="Research question")
+    research_parser.add_argument("query_positional", nargs="?", help="Research question")
     research_parser.add_argument("--index", help="Index a document directory")
     research_parser.add_argument("--query", dest="query_opt", help="Research question used with --index")
     research_parser.add_argument("--mode", choices=["phase2"], default="phase2", help="Run mode (phase2 only)")
@@ -568,6 +646,7 @@ def main() -> None:
     research_parser.add_argument("--checkpoint-backend", default="none", choices=["none", "memory"], help="Checkpoint backend")
     research_parser.add_argument("--stream-events", action="store_true", help="Print structured trace events as JSON lines")
     research_parser.add_argument("--trace-dir", help="Directory for .trace.jsonl and .summary.json outputs")
+    research_parser.add_argument("--replay", help="Run V2 from a fixed replay bundle without external APIs")
 
     # ── also accept top-level args for backward compat ──────────
     parser.add_argument("query", nargs="?", help="Research question (legacy mode)")
@@ -581,6 +660,7 @@ def main() -> None:
     parser.add_argument("--checkpoint-backend", default="none", choices=["none", "memory"], help="Checkpoint backend")
     parser.add_argument("--stream-events", action="store_true", help="Print structured trace events as JSON lines")
     parser.add_argument("--trace-dir", help="Directory for .trace.jsonl and .summary.json outputs")
+    parser.add_argument("--replay", help="Run V2 from a fixed replay bundle without external APIs")
 
     args = parser.parse_args()
 
@@ -589,7 +669,7 @@ def main() -> None:
     elif args.command == "workflow":
         _workflow_command(args)
     elif args.command == "research" or (not args.command and (args.query or args.query_opt or args.index)):
-        actual_query = args.query or args.query_opt
+        actual_query = getattr(args, "query_positional", None) or args.query or args.query_opt
         if args.index:
             index_command(args.index)
         if actual_query:
@@ -601,9 +681,10 @@ def main() -> None:
                 resume=args.resume,
                 checkpoint_backend=args.checkpoint_backend,
                 stream_events=args.stream_events,
-                trace_dir=args.trace_dir,
-                depth=args.depth,
-            )
+                 trace_dir=args.trace_dir,
+                 depth=args.depth,
+                 replay=args.replay,
+             )
         elif not args.index:
             parser.print_help()
             print("\nExamples:")

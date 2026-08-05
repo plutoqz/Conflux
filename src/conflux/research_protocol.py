@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 
 ClaimType = Literal["external_fact", "parametric_background", "analysis", "recommendation", "open_question"]
+AtomicClaimType = Literal["direct_fact", "multi_source_fact", "derived_analysis", "model_analysis"]
+ClaimImportance = Literal["critical", "high", "medium", "low"]
+VerificationVerdict = Literal["supports", "contradicts", "insufficient", "uncertain"]
 CoverageStatus = Literal["available", "covered", "failed", "not_needed", "gap"]
 EvidenceRelation = Literal["supports", "limits", "contradicts", "context"]
 
@@ -253,27 +257,120 @@ class ClaimRecord:
     claim_id: str
     subquestion_id: str
     text: str
-    claim_type: str = "analysis"
+    claim_type: str = "model_analysis"
+    importance: str = "medium"
+    evidence_ids: list[str] = field(default_factory=list)
     derivation_type: str = "model_analysis"
     derivation_inputs: list[str] = field(default_factory=list)
     generation_attribution: dict[str, Any] = field(default_factory=dict)
-    verification_result: dict[str, Any] = field(default_factory=dict)
+    verification_result: dict[str, Any] = field(default_factory=lambda: {
+        "verdict": "uncertain",
+        "confidence": 0.0,
+        "reason": "claim has not been independently verified",
+        "verifier_version": "",
+    })
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ClaimRecord":
+        verification = dict(payload.get("verification_result") or {})
         return cls(
             claim_id=str(payload.get("claim_id") or ""),
             subquestion_id=str(payload.get("subquestion_id") or ""),
             text=str(payload.get("text") or payload.get("claim") or "").strip(),
-            claim_type=str(payload.get("claim_type") or "analysis"),
+            claim_type=str(payload.get("claim_type") or "model_analysis"),
+            importance=str(payload.get("importance") or "medium"),
+            evidence_ids=_string_list(payload.get("evidence_ids")),
             derivation_type=str(payload.get("derivation_type") or "model_analysis"),
             derivation_inputs=_string_list(payload.get("derivation_inputs")),
             generation_attribution=dict(payload.get("generation_attribution") or {}),
-            verification_result=dict(payload.get("verification_result") or {}),
+            verification_result={
+                "verdict": str(verification.get("verdict") or "uncertain"),
+                "confidence": _bounded_float(verification.get("confidence"), default=0.0),
+                "reason": str(verification.get("reason") or "claim has not been independently verified"),
+                "verifier_version": str(verification.get("verifier_version") or ""),
+            },
         )
+
+
+ATOMIC_CLAIM_TYPES = frozenset({
+    "direct_fact",
+    "multi_source_fact",
+    "derived_analysis",
+    "model_analysis",
+})
+VERIFICATION_VERDICTS = frozenset({
+    "supports",
+    "contradicts",
+    "insufficient",
+    "uncertain",
+})
+EXTERNAL_EVIDENCE_CLASSES = frozenset({
+    "peer_reviewed",
+    "preprint",
+    "authoritative_document",
+})
+
+
+def claim_record_protocol_errors(
+    record: ClaimRecord,
+    snapshot: "LedgerSnapshot",
+    *,
+    known_claim_ids: set[str] | None = None,
+) -> list[str]:
+    """Return deterministic protocol violations for one atomic claim."""
+
+    errors: list[str] = []
+    evidence_by_id = {item.evidence_id: item for item in snapshot.records}
+    if not record.claim_id:
+        errors.append("missing_claim_id")
+    if not record.subquestion_id:
+        errors.append("missing_subquestion_id")
+    if not record.text:
+        errors.append("missing_claim_text")
+    if record.claim_type not in ATOMIC_CLAIM_TYPES:
+        errors.append("invalid_claim_type")
+    if record.importance not in {"critical", "high", "medium", "low"}:
+        errors.append("invalid_importance")
+
+    unknown_evidence = [item for item in record.evidence_ids if item not in evidence_by_id]
+    if unknown_evidence:
+        errors.append("unknown_evidence_id")
+
+    if record.claim_type in {"direct_fact", "multi_source_fact"}:
+        usable = [
+            evidence_by_id[item]
+            for item in record.evidence_ids
+            if item in evidence_by_id
+            and evidence_by_id[item].visibility == "primary"
+            and evidence_by_id[item].evidence_class in EXTERNAL_EVIDENCE_CLASSES
+            and evidence_by_id[item].relationship == "supports"
+        ]
+        if not usable:
+            errors.append("fact_without_valid_external_support")
+        if record.claim_type == "multi_source_fact":
+            source_identities = {item.source_identity for item in usable if item.source_identity}
+            if len(source_identities) < 2:
+                errors.append("multi_source_fact_needs_independent_sources")
+    elif record.claim_type == "derived_analysis":
+        if not record.derivation_inputs:
+            errors.append("derived_analysis_missing_inputs")
+        known_inputs = set(evidence_by_id) | set(known_claim_ids or set())
+        if any(item not in known_inputs for item in record.derivation_inputs):
+            errors.append("unknown_derivation_input")
+
+    verification = record.verification_result
+    if set(verification) < {"verdict", "confidence", "reason", "verifier_version"}:
+        errors.append("incomplete_verification_result")
+    if verification.get("verdict") not in VERIFICATION_VERDICTS:
+        errors.append("invalid_verification_verdict")
+    if not str(verification.get("reason") or "").strip():
+        errors.append("missing_verification_reason")
+    if not str(verification.get("verifier_version") or "").strip():
+        errors.append("missing_verifier_version")
+    return errors
 
 
 @dataclass(frozen=True, slots=True)
@@ -980,6 +1077,119 @@ class DynamicResearchBudget:
             timeout_seconds=max(1, _int_value(payload.get("timeout_seconds"), default=240)),
             global_hard_limits=_int_dict(payload.get("global_hard_limits")),
         )
+
+
+@dataclass(slots=True)
+class BudgetState:
+    """Run-level hard budget shared by retrieval, model and verification stages."""
+
+    depth: str = "standard"
+    timeout_seconds: int = 180
+    hard_limits: dict[str, int] = field(default_factory=dict)
+    retrieval_requests: int = 0
+    model_calls: int = 0
+    verification_pairs: int = 0
+    correction_rounds: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    elapsed_ms: float = 0.0
+    rejected_operations: int = 0
+    degradation_reasons: list[str] = field(default_factory=list)
+    dropped_reasons: list[str] = field(default_factory=list)
+    _lock: Any = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    @classmethod
+    def for_depth(cls, depth: str = "standard", *, timeout_seconds: int | None = None) -> "BudgetState":
+        limits = {
+            "quick": {
+                "retrieval_requests": 8,
+                "model_calls": 4,
+                "verification_pairs": 16,
+                "correction_rounds": 0,
+            },
+            "standard": {
+                "retrieval_requests": 14,
+                "model_calls": 7,
+                "verification_pairs": 32,
+                "correction_rounds": 1,
+            },
+            "deep": {
+                "retrieval_requests": 24,
+                "model_calls": 10,
+                "verification_pairs": 64,
+                "correction_rounds": 1,
+            },
+        }.get(str(depth or "standard"), {})
+        return cls(
+            depth=str(depth or "standard"),
+            timeout_seconds=max(1, int(timeout_seconds or 180)),
+            hard_limits=dict(limits),
+        )
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "BudgetState":
+        state = cls(
+            depth=str(payload.get("depth") or "standard"),
+            timeout_seconds=max(1, _int_value(payload.get("timeout_seconds"), default=180)),
+            hard_limits=_int_dict(payload.get("hard_limits")),
+            retrieval_requests=max(0, _int_value(payload.get("retrieval_requests"))),
+            model_calls=max(0, _int_value(payload.get("model_calls"))),
+            verification_pairs=max(0, _int_value(payload.get("verification_pairs"))),
+            correction_rounds=max(0, _int_value(payload.get("correction_rounds"))),
+            input_tokens=max(0, _int_value(payload.get("input_tokens"))),
+            output_tokens=max(0, _int_value(payload.get("output_tokens"))),
+            elapsed_ms=max(0.0, float(payload.get("elapsed_ms") or 0.0)),
+            rejected_operations=max(0, _int_value(payload.get("rejected_operations"))),
+            degradation_reasons=_string_list(payload.get("degradation_reasons")),
+            dropped_reasons=_string_list(payload.get("dropped_reasons")),
+        )
+        return state
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "depth": self.depth,
+            "timeout_seconds": self.timeout_seconds,
+            "hard_limits": dict(self.hard_limits),
+            "retrieval_requests": self.retrieval_requests,
+            "model_calls": self.model_calls,
+            "verification_pairs": self.verification_pairs,
+            "correction_rounds": self.correction_rounds,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "elapsed_ms": round(self.elapsed_ms, 2),
+            "rejected_operations": self.rejected_operations,
+            "degradation_reasons": list(dict.fromkeys(self.degradation_reasons)),
+            "dropped_reasons": list(dict.fromkeys(self.dropped_reasons)),
+        }
+
+    def reserve(self, operation: str, amount: int = 1, *, reason: str = "") -> bool:
+        amount = max(1, int(amount))
+        with self._lock:
+            current = int(getattr(self, operation))
+            limit = int(self.hard_limits.get(operation, 0))
+            if limit and current + amount > limit:
+                self.rejected_operations += 1
+                if reason and reason not in self.degradation_reasons:
+                    self.degradation_reasons.append(reason)
+                return False
+            setattr(self, operation, current + amount)
+            return True
+
+    def record_usage(self, response: Any, *, elapsed_ms: float = 0.0) -> None:
+        usage = getattr(response, "usage_metadata", None) or {}
+        metadata = getattr(response, "response_metadata", None) or {}
+        token_usage = metadata.get("token_usage") or metadata.get("usage") or {}
+        input_tokens = usage.get("input_tokens") or token_usage.get("prompt_tokens") or 0
+        output_tokens = usage.get("output_tokens") or token_usage.get("completion_tokens") or 0
+        with self._lock:
+            self.input_tokens += max(0, _int_value(input_tokens))
+            self.output_tokens += max(0, _int_value(output_tokens))
+            self.elapsed_ms += max(0.0, float(elapsed_ms))
+
+    def add_drop(self, reason: str) -> None:
+        with self._lock:
+            if reason and reason not in self.dropped_reasons:
+                self.dropped_reasons.append(reason)
 
 
 @dataclass(slots=True)

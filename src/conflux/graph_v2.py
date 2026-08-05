@@ -25,6 +25,8 @@ class V2State(TypedDict, total=False):
     _run_id: str
     _started_at: float
     _deadline_at: float
+    _research_depth: str
+    _budget_state: dict
     _pipeline_stage: str
     _run_status: str
     _delivery_status: str
@@ -40,6 +42,7 @@ class V2State(TypedDict, total=False):
     _rag_count: int
     _web_count: int
     _citation_map: dict
+    _citation_bindings: dict
     _section_results: list
     _direct_answer: str
     _cross_synthesis: str
@@ -86,10 +89,24 @@ from ._graph_utils import (
 )
 from .rag.reranker import SemanticReranker
 from .research_modes import ResearchModeProfile
-from .research_protocol import ClaimRecord, ActionProposal, EvidenceLedger, JudgmentRecord, LedgerSnapshot
+from .research_protocol import (
+    ATOMIC_CLAIM_TYPES,
+    BudgetState,
+    ClaimRecord,
+    ActionProposal,
+    EvidenceLedger,
+    JudgmentRecord,
+    LedgerSnapshot,
+    claim_record_protocol_errors,
+)
 from .research_prompts import (
     ARBITRATION_PROMPT,
     ARBITRATION_SYSTEM,
+    CLAIM_GENERATION_NO_EVIDENCE_PROMPT,
+    CLAIM_GENERATION_PROMPT,
+    CLAIM_GENERATION_SYSTEM,
+    CLAIM_SYNTHESIS_PROMPT,
+    CLAIM_SYNTHESIS_SYSTEM,
     INDEPENDENT_ANALYSIS_PROMPT,
     INDEPENDENT_ANALYSIS_SYSTEM,
     VERIFICATION_PROMPT,
@@ -113,6 +130,7 @@ class SectionResult:
     summary: str = ""
     key_claims: list[str] = field(default_factory=list)
     citation_refs: list[str] = field(default_factory=list)
+    claim_drafts: list[dict[str, Any]] = field(default_factory=list)
     # 生成该节时被允许引用的全局引用标号（由 _section_citation_map 按主题重叠选出）。
     # 后置审计用它判定"无关引用"（off-domain）：正文引用了不在 allowed_refs 中、
     # 且与该节子问题无主题重叠的合法标号 → 交付失败。
@@ -132,6 +150,7 @@ class SectionResult:
             "summary": self.summary,
             "key_claims": self.key_claims,
             "citation_refs": self.citation_refs,
+            "claim_drafts": self.claim_drafts,
             "allowed_refs": self.allowed_refs,
             "analysis_judgments": self.analysis_judgments,
             "evidence_gaps": self.evidence_gaps,
@@ -150,6 +169,7 @@ class SectionResult:
             summary=str(payload.get("summary") or ""),
             key_claims=[str(item) for item in payload.get("key_claims") or []],
             citation_refs=[str(item) for item in payload.get("citation_refs") or []],
+            claim_drafts=[dict(item) for item in payload.get("claim_drafts") or [] if isinstance(item, dict)],
             allowed_refs=[str(item) for item in payload.get("allowed_refs") or []],
             analysis_judgments=[str(item) for item in payload.get("analysis_judgments") or []],
             evidence_gaps=[str(item) for item in payload.get("evidence_gaps") or []],
@@ -379,14 +399,19 @@ def _new_state(
     query: str,
     deadline_at: float | None = None,
     run_id: str | None = None,
+    depth: str = "standard",
+    timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
     run_id = run_id or new_run_id()
     ledger = EvidenceLedger(run_id=run_id)
+    budget_state = BudgetState.for_depth(depth, timeout_seconds=timeout_seconds)
     return {
         "query": query,
         "_run_id": run_id,
         "_started_at": time.time(),
         "_deadline_at": deadline_at,
+        "_research_depth": depth,
+        "_budget_state": budget_state.to_dict(),
         "_pipeline_stage": "init",
         "_run_status": "failed",
         "_report_available": False,
@@ -400,6 +425,7 @@ def _new_state(
         "_rag_count": 0,
         "_web_count": 0,
         "_citation_map": {},
+        "_citation_bindings": {},
         "_section_results": [],
         "_direct_answer": "",
         "_cross_synthesis": "",
@@ -533,12 +559,66 @@ def _model_available(state: dict[str, Any], minimum: float = 20.0) -> bool:
     return _deadline_remaining(state) >= minimum
 
 
-def _invoke_json(model: Any, system: str, prompt: str, *, status: str = "") -> tuple[str, dict[str, Any]]:
+class _BudgetRejected(RuntimeError):
+    """Raised when a stage would exceed the run-level hard budget."""
+
+
+def _budget_state_for(state: dict[str, Any]) -> BudgetState:
+    payload = state.get("_budget_state")
+    if isinstance(payload, dict):
+        return BudgetState.from_dict(payload)
+    return BudgetState.for_depth(
+        str(state.get("_research_depth") or "standard"),
+        timeout_seconds=int(state.get("_budget_timeout_seconds") or 180),
+    )
+
+
+def _budget_update(budget_state: BudgetState) -> dict[str, Any]:
+    return {"_budget_state": budget_state.to_dict()}
+
+
+def _budgeted_model_invoke(
+    model: Any,
+    messages: list[Any],
+    budget_state: BudgetState | None,
+    *,
+    role: str,
+) -> Any:
+    if budget_state is None:
+        return model.invoke(messages)
+    reason = f"model_budget_exhausted:{role}"
+    if not budget_state.reserve("model_calls", reason=reason):
+        budget_state.add_drop(f"model_call_dropped:{role}")
+        raise _BudgetRejected(reason)
+    started = time.perf_counter()
     try:
-        response = model.invoke([
-            SystemMessage(content=system + status),
-            HumanMessage(content=prompt),
-        ])
+        response = model.invoke(messages)
+    except BaseException:
+        budget_state.record_usage(None, elapsed_ms=(time.perf_counter() - started) * 1000)
+        raise
+    budget_state.record_usage(response, elapsed_ms=(time.perf_counter() - started) * 1000)
+    return response
+
+
+def _invoke_json(
+    model: Any,
+    system: str,
+    prompt: str,
+    *,
+    status: str = "",
+    budget_state: BudgetState | None = None,
+    role: str = "model",
+) -> tuple[str, dict[str, Any]]:
+    try:
+        response = _budgeted_model_invoke(
+            model,
+            [
+                SystemMessage(content=system + status),
+                HumanMessage(content=prompt),
+            ],
+            budget_state,
+            role=role,
+        )
         content = str(response.content) if hasattr(response, "content") else str(response)
         # Strip <｜end▁of▁thinking｜>  think  blocks from models that emit them
         content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
@@ -552,32 +632,53 @@ def _invoke_json(model: Any, system: str, prompt: str, *, status: str = "") -> t
         return "", {}
 
 
-def _invoke_text(model: Any, system: str, prompt: str, *, status: str = "") -> str:
+def _invoke_text(
+    model: Any,
+    system: str,
+    prompt: str,
+    *,
+    status: str = "",
+    budget_state: BudgetState | None = None,
+    role: str = "model",
+) -> str:
     try:
-        response = model.invoke([
-            SystemMessage(content=system + status),
-            HumanMessage(content=prompt),
-        ])
+        response = _budgeted_model_invoke(
+            model,
+            [
+                SystemMessage(content=system + status),
+                HumanMessage(content=prompt),
+            ],
+            budget_state,
+            role=role,
+        )
         return str(response.content) if hasattr(response, "content") else str(response)
     except Exception:
         return ""
 
 
-def _run_independent_analysis(state: dict[str, Any], model: Any) -> dict[str, Any]:
+def _run_independent_analysis(
+    state: dict[str, Any],
+    model: Any,
+    budget_state: BudgetState | None = None,
+) -> dict[str, Any]:
     if model is None or not _model_available(state, minimum=15.0):
         return {}
+    budget_state = budget_state or _budget_state_for(state)
     prompt = INDEPENDENT_ANALYSIS_PROMPT.format(query=str(state.get("query") or ""))
     _, payload = _invoke_json(
         model,
         INDEPENDENT_ANALYSIS_SYSTEM,
         prompt,
         status=status_bar(state, model),
+        budget_state=budget_state,
+        role="independent_analysis",
     )
     return payload if isinstance(payload, dict) else {}
 
 
 def independent_analysis_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
-    payload = _run_independent_analysis(state, model)
+    budget_state = _budget_state_for(state)
+    payload = _run_independent_analysis(state, model, budget_state)
     ledger = EvidenceLedger.from_dict(state.get("_evidence_ledger") or {})
     if payload:
         ledger.append_judgment(JudgmentRecord(
@@ -592,12 +693,18 @@ def independent_analysis_node(state: dict[str, Any], model: Any) -> dict[str, An
         "_pipeline_stage": "independent_analysis",
         "_independent_analysis": payload,
         "_evidence_ledger": ledger.to_dict(),
+        **_budget_update(budget_state),
     }
 
 
-def _arbitration_payload(state: dict[str, Any], model: Any) -> dict[str, Any]:
+def _arbitration_payload(
+    state: dict[str, Any],
+    model: Any,
+    budget_state: BudgetState | None = None,
+) -> dict[str, Any]:
     if model is None or not _model_available(state, minimum=15.0):
         return {}
+    budget_state = budget_state or _budget_state_for(state)
     subquestions = [
         {
             "id": str(item.get("id") or ""),
@@ -615,12 +722,15 @@ def _arbitration_payload(state: dict[str, Any], model: Any) -> dict[str, Any]:
         ARBITRATION_SYSTEM,
         prompt,
         status=status_bar(state, model),
+        budget_state=budget_state,
+        role="arbitration",
     )
     return payload if isinstance(payload, dict) else {}
 
 
 def arbitration_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
-    payload = _arbitration_payload(state, model)
+    budget_state = _budget_state_for(state)
+    payload = _arbitration_payload(state, model, budget_state)
     ledger = EvidenceLedger.from_dict(state.get("_evidence_ledger") or {})
     snapshot_id = str((state.get("_ledger_snapshot") or {}).get("snapshot_id") or "")
     subquestion_ids = {
@@ -702,22 +812,127 @@ def arbitration_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
         "_evidence_ledger": ledger.to_dict(),
         "_ledger_snapshot": snapshot.to_dict(),
         "_ledger_snapshots": [*(state.get("_ledger_snapshots") or []), snapshot.to_dict()],
+        **_budget_update(budget_state),
     }
 
 
-def _verification_payload(state: dict[str, Any], model: Any) -> dict[str, Any]:
+def _deterministic_claim_verification(
+    record: ClaimRecord,
+    snapshot: LedgerSnapshot,
+) -> dict[str, Any]:
+    evidence_by_id = {item.evidence_id: item for item in snapshot.records}
+    unknown_ids = [item for item in record.evidence_ids if item not in evidence_by_id]
+    if unknown_ids:
+        return {
+            "verdict": "uncertain",
+            "confidence": 0.0,
+            "reason": "unknown evidence ID: " + ", ".join(unknown_ids),
+            "verifier_version": "rules-v1",
+            "invalid_evidence_ids": unknown_ids,
+        }
+
+    if record.claim_type not in ATOMIC_CLAIM_TYPES:
+        return {
+            "verdict": "uncertain",
+            "confidence": 0.0,
+            "reason": "invalid atomic claim type",
+            "verifier_version": "rules-v1",
+        }
+
+    usable = [
+        evidence_by_id[item]
+        for item in record.evidence_ids
+        if item in evidence_by_id
+        and evidence_by_id[item].visibility == "primary"
+        and evidence_by_id[item].evidence_class in {
+            "peer_reviewed",
+            "preprint",
+            "authoritative_document",
+        }
+        and evidence_by_id[item].relationship == "supports"
+    ]
+    if record.claim_type == "direct_fact":
+        if usable:
+            return {
+                "verdict": "supports",
+                "confidence": 1.0,
+                "reason": "direct fact has valid primary external support",
+                "verifier_version": "rules-v1",
+            }
+        return {
+            "verdict": "insufficient",
+            "confidence": 0.0,
+            "reason": "direct fact has no valid primary external support",
+            "verifier_version": "rules-v1",
+        }
+    if record.claim_type == "multi_source_fact":
+        identities = {item.source_identity for item in usable if item.source_identity}
+        if len(identities) >= 2:
+            return {
+                "verdict": "supports",
+                "confidence": 1.0,
+                "reason": "multi-source fact has independent primary external support",
+                "verifier_version": "rules-v1",
+            }
+        return {
+            "verdict": "insufficient",
+            "confidence": 0.0,
+            "reason": "multi-source fact lacks two independent source identities",
+            "verifier_version": "rules-v1",
+        }
+    if record.claim_type == "derived_analysis":
+        known_inputs = {item.evidence_id for item in snapshot.records}
+        if not record.derivation_inputs or any(item not in known_inputs for item in record.derivation_inputs):
+            return {
+                "verdict": "insufficient",
+                "confidence": 0.0,
+                "reason": "derived analysis has incomplete derivation inputs",
+                "verifier_version": "rules-v1",
+            }
+        return {
+            "verdict": "supports",
+            "confidence": 1.0,
+            "reason": "derived analysis records its derivation inputs",
+            "verifier_version": "rules-v1",
+        }
+    return {
+        "verdict": "supports",
+        "confidence": 1.0,
+        "reason": "claim is explicitly marked as model analysis",
+        "verifier_version": "rules-v1",
+    }
+
+
+def _verification_payload(
+    state: dict[str, Any],
+    model: Any,
+    budget_state: BudgetState | None = None,
+) -> dict[str, Any]:
     if model is None or not _model_available(state, minimum=15.0):
         return {}
+    budget_state = budget_state or _budget_state_for(state)
     claims = [
         {
             "claim_id": str(item.get("claim_id") or ""),
             "subquestion_id": str(item.get("subquestion_id") or ""),
             "claim": str(item.get("text") or ""),
+            "claim_type": str(item.get("claim_type") or ""),
+            "importance": str(item.get("importance") or "medium"),
+            "evidence_ids": [str(value) for value in item.get("evidence_ids") or []],
             "derivation_inputs": [str(value) for value in item.get("derivation_inputs") or []],
         }
         for item in state.get("_claim_records") or []
         if isinstance(item, dict)
     ]
+    if not claims and not (state.get("_section_results") or []):
+        return {}
+    if claims and not budget_state.reserve(
+        "verification_pairs",
+        len(claims),
+        reason="verification_budget_exhausted",
+    ):
+        budget_state.add_drop("verification_pairs_dropped")
+        return {}
     prompt = VERIFICATION_PROMPT.format(
         claims_json=json.dumps(claims, ensure_ascii=False),
         snapshot_json=json.dumps(state.get("_ledger_snapshot") or {}, ensure_ascii=False),
@@ -727,85 +942,105 @@ def _verification_payload(state: dict[str, Any], model: Any) -> dict[str, Any]:
         VERIFICATION_SYSTEM,
         prompt,
         status=status_bar(state, model),
+        budget_state=budget_state,
+        role="verification",
     )
     return payload if isinstance(payload, dict) else {}
 
 
 def verification_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
-    payload = _verification_payload(state, model)
+    budget_state = _budget_state_for(state)
+    payload = _verification_payload(state, model, budget_state)
     ledger = EvidenceLedger.from_dict(state.get("_evidence_ledger") or {})
-    snapshot_id = str((state.get("_ledger_snapshot") or {}).get("snapshot_id") or "")
-    checks = list(payload.get("checks") or []) if isinstance(payload, dict) else []
-    allowed_verdicts = {"supports", "contradicts", "insufficient", "uncertain"}
-    valid_evidence_ids = {
-        str(item.get("evidence_id") or "")
-        for item in (state.get("_ledger_snapshot") or {}).get("records") or []
-        if isinstance(item, dict) and str(item.get("evidence_id") or "")
+    snapshot = LedgerSnapshot.from_dict(state.get("_ledger_snapshot") or {})
+    snapshot_id = snapshot.snapshot_id
+    checks = {
+        str(item.get("claim_id") or ""): item
+        for item in (payload.get("checks") or [])
+        if isinstance(item, dict) and str(item.get("claim_id") or "")
     }
+    checks_by_text = {
+        str(item.get("claim") or "").strip(): item
+        for item in (payload.get("checks") or [])
+        if isinstance(item, dict) and str(item.get("claim") or "").strip()
+    }
+    valid_evidence_ids = {record.evidence_id for record in snapshot.records}
     claim_records = [
         ClaimRecord.from_dict(item)
         for item in state.get("_claim_records") or []
         if isinstance(item, dict)
     ]
-    for index, item in enumerate(checks):
-        if not isinstance(item, dict):
-            continue
-        verdict = str(item.get("verdict") or "uncertain")
-        if verdict not in allowed_verdicts:
-            verdict = "uncertain"
-        check = {
-            **item,
-            "verdict": verdict,
-            "evidence_ids": [
-                str(value)
-                for value in item.get("evidence_ids") or []
-                if str(value) in valid_evidence_ids
-            ],
-        }
-        claim_id = str(item.get("claim_id") or "")
-        claim_text = str(item.get("claim") or "").strip()
-        for record in claim_records:
-            if (claim_id and record.claim_id == claim_id) or (
-                not claim_id and claim_text and record.text == claim_text
-            ):
-                record.verification_result = check
-                break
+    judgments: list[dict[str, Any]] = []
+    for index, record in enumerate(claim_records, start=1):
+        deterministic = _deterministic_claim_verification(record, snapshot)
+        item = checks.get(record.claim_id) or checks_by_text.get(record.text) or {}
+        model_ids = [str(value) for value in item.get("evidence_ids") or []]
+        unknown_model_ids = [value for value in model_ids if value not in valid_evidence_ids]
+        model_verdict = str(item.get("verdict") or "")
+        if model_verdict not in {"supports", "contradicts", "insufficient", "uncertain"}:
+            model_verdict = ""
+
+        if unknown_model_ids:
+            result = {
+                "verdict": "uncertain",
+                "confidence": 0.0,
+                "reason": "verifier returned unknown evidence ID: " + ", ".join(unknown_model_ids),
+                "verifier_version": "rules-v1",
+                "evidence_ids": model_ids,
+                "invalid_evidence_ids": unknown_model_ids,
+            }
+        elif model_verdict:
+            result = {
+                "verdict": model_verdict,
+                "confidence": max(0.0, min(1.0, float(item.get("confidence") or 0.0))),
+                "reason": str(item.get("reason") or deterministic.get("reason") or ""),
+                "verifier_version": "model-v1",
+                "evidence_ids": model_ids,
+            }
+            if deterministic["verdict"] in {"insufficient", "uncertain"} and model_verdict == "supports":
+                result = {
+                    **deterministic,
+                    "evidence_ids": model_ids,
+                    "model_verdict": model_verdict,
+                }
+        else:
+            result = {**deterministic, "evidence_ids": list(record.evidence_ids)}
+
+        record.verification_result = result
+        judgments.append(result)
         ledger.append_judgment(JudgmentRecord(
-            judgment_id=f"{state.get('_run_id', '')}:judgment:verification-{index + 1}",
+            judgment_id=f"{state.get('_run_id', '')}:judgment:verification-{index}",
             mode="verification",
-            verdict=verdict,
-            rationale=str(item.get("reason") or ""),
-            confidence=float(item.get("confidence") or 0.0),
+            verdict=str(result["verdict"]),
+            rationale=str(result.get("reason") or ""),
+            confidence=float(result.get("confidence") or 0.0),
             input_snapshot_id=snapshot_id,
-            evidence_ids=list(check["evidence_ids"]),
-            payload=check,
+            evidence_ids=[str(value) for value in result.get("evidence_ids") or [] if str(value) in valid_evidence_ids],
+            payload={"claim_id": record.claim_id, **result},
         ))
     payload = {
         **payload,
         "mode": "verification",
         "status": "completed" if payload else "unavailable",
         "input_snapshot_id": snapshot_id,
+        "checks_applied": len(judgments),
     }
-    if payload:
-        snapshot = ledger.freeze("verification")
-        return {
-            "_pipeline_stage": "verification",
-            "_model_verification": payload,
-            "_claim_records": [record.to_dict() for record in claim_records],
-            "_evidence_ledger": ledger.to_dict(),
-            "_ledger_snapshot": snapshot.to_dict(),
-            "_ledger_snapshots": [*(state.get("_ledger_snapshots") or []), snapshot.to_dict()],
-        }
+    snapshot = ledger.freeze("verification")
     return {
         "_pipeline_stage": "verification",
         "_model_verification": payload,
         "_claim_records": [record.to_dict() for record in claim_records],
         "_evidence_ledger": ledger.to_dict(),
+        "_ledger_snapshot": snapshot.to_dict(),
+        "_ledger_snapshots": [*(state.get("_ledger_snapshots") or []), snapshot.to_dict()],
+        **_budget_update(budget_state),
     }
 
 
 def attribution_audit_node(state: dict[str, Any]) -> dict[str, Any]:
     citation_map = state.get("_citation_map") or {}
+    snapshot = LedgerSnapshot.from_dict(state.get("_ledger_snapshot") or {})
+    evidence_by_id = {record.evidence_id: record for record in snapshot.records}
     claim_records = [
         ClaimRecord.from_dict(item)
         for item in state.get("_claim_records") or []
@@ -818,6 +1053,8 @@ def attribution_audit_node(state: dict[str, Any]) -> dict[str, Any]:
     invalid_refs: list[dict[str, str]] = []
     unattributed_refs: list[dict[str, str]] = []
     invalid_bindings: list[dict[str, str]] = []
+    invalid_evidence_ids: list[dict[str, str]] = []
+    invalid_evidence_bindings: list[dict[str, str]] = []
     for section_raw in state.get("_section_results") or []:
         section = SectionResult.from_dict(section_raw)
         body_refs = set(_extract_citation_refs(section.body))
@@ -840,6 +1077,22 @@ def attribution_audit_node(state: dict[str, Any]) -> dict[str, Any]:
             })
 
     for record in claim_records:
+        for evidence_id in record.evidence_ids:
+            evidence = evidence_by_id.get(evidence_id)
+            if evidence is None:
+                invalid_evidence_ids.append({
+                    "claim_id": record.claim_id,
+                    "evidence_id": evidence_id,
+                })
+            elif record.subquestion_id not in {
+                evidence.subquestion_id,
+                *evidence.subquestion_ids,
+            }:
+                invalid_evidence_bindings.append({
+                    "claim_id": record.claim_id,
+                    "evidence_id": evidence_id,
+                    "subquestion_id": record.subquestion_id,
+                })
         refs = [str(value) for value in record.generation_attribution.get("citation_refs") or []]
         allowed_refs = set(record.generation_attribution.get("allowed_refs") or [])
         for ref in refs:
@@ -848,12 +1101,26 @@ def attribution_audit_node(state: dict[str, Any]) -> dict[str, Any]:
                     "claim_id": record.claim_id,
                     "ref": ref,
                 })
+        if record.claim_type in {"direct_fact", "multi_source_fact"} and record.evidence_ids and not refs:
+            invalid_evidence_bindings.append({
+                "claim_id": record.claim_id,
+                "evidence_id": record.evidence_ids[0],
+                "subquestion_id": record.subquestion_id,
+            })
 
     audit = {
-        "generation_trace_invalid": bool(invalid_refs or unattributed_refs or invalid_bindings),
+        "generation_trace_invalid": bool(
+            invalid_refs
+            or unattributed_refs
+            or invalid_bindings
+            or invalid_evidence_ids
+            or invalid_evidence_bindings
+        ),
         "invalid_refs": invalid_refs,
         "unattributed_refs": unattributed_refs,
         "invalid_bindings": invalid_bindings,
+        "invalid_evidence_ids": invalid_evidence_ids,
+        "invalid_evidence_bindings": invalid_evidence_bindings,
         "claim_count": len(claim_records),
     }
     return {
@@ -1064,7 +1331,15 @@ def decompose_node(state: dict[str, Any], model: Any, profile: ResearchModeProfi
     query = state["query"]
     prompt = DECOMPOSE_PROMPT.format(today=date.today().isoformat(), query=query, max_subquestions=max_subquestions)
     status = status_bar(state, model)
-    _, payload = _invoke_json(model, DECOMPOSE_SYSTEM, prompt, status=status)
+    budget_state = _budget_state_for(state)
+    _, payload = _invoke_json(
+        model,
+        DECOMPOSE_SYSTEM,
+        prompt,
+        status=status,
+        budget_state=budget_state,
+        role="decompose",
+    )
 
     core_question = str(payload.get("core_question") or "").strip() or query
     sub_questions_raw = list(payload.get("sub_questions") or [])
@@ -1095,6 +1370,7 @@ def decompose_node(state: dict[str, Any], model: Any, profile: ResearchModeProfi
         "_pipeline_stage": "decompose",
         "_core_question": core_question,
         "_sub_questions": sub_questions,
+        **_budget_update(budget_state),
     }
 
 
@@ -1234,6 +1510,28 @@ def _build_citation_map_from_snapshot(snapshot: LedgerSnapshot) -> dict[str, str
     return citation_map
 
 
+def _citation_bindings_from_snapshot(
+    snapshot: LedgerSnapshot,
+    citation_map: dict[str, str] | None = None,
+) -> dict[str, list[str]]:
+    citation_map = citation_map or _build_citation_map_from_snapshot(snapshot)
+    bindings: dict[str, list[str]] = {}
+    for record in snapshot.primary_records():
+        evidence_text = _usable_evidence_text(
+            EvidenceItem(
+                claim=record.claim,
+                source=record.source_type,
+                verbatim_quote=record.verbatim_quote,
+            )
+        )
+        if not evidence_text:
+            continue
+        for ref, description in citation_map.items():
+            if evidence_text[:80] in description:
+                bindings.setdefault(record.evidence_id, []).append(ref)
+    return bindings
+
+
 def _correction_proposals(state: dict[str, Any], snapshot: LedgerSnapshot) -> list[ActionProposal]:
     if int(state.get("_correction_round") or 0) > 0:
         return []
@@ -1296,8 +1594,10 @@ def _retrieve_round0_node(
 ) -> dict[str, Any]:
     sub_questions = state.get("_sub_questions") or []
     run_id = str(state.get("_run_id") or "")
+    budget_state = _budget_state_for(state)
     ledger = EvidenceLedger.from_dict(state.get("_evidence_ledger") or {"run_id": run_id})
     round_results: dict[str, dict[str, SourceResult]] = {}
+    skipped_results: list[tuple[str, str, SourceResult]] = []
 
     def retrieve_one(sub_question: dict[str, Any], source: str, tool: Any) -> tuple[str, str, SourceResult]:
         subquestion_id = str(sub_question.get("id") or "")
@@ -1305,6 +1605,7 @@ def _retrieve_round0_node(
         query_id = f"{run_id}:round-0:{subquestion_id}:{source}"
         if not tool:
             return subquestion_id, source, SourceResult(source=source, status="no_evidence", content="")
+        started = time.perf_counter()
         try:
             result = _invoke_retrieval_tool(tool, query, source)
         except Exception as exc:
@@ -1315,22 +1616,68 @@ def _retrieve_round0_node(
                 error=f"{type(exc).__name__}: {exc}",
                 content="",
             )
+        finally:
+            budget_state.record_usage(None, elapsed_ms=(time.perf_counter() - started) * 1000)
         result = _bind_result(result, subquestion_id, query_id)
         return subquestion_id, source, result
 
     jobs = []
     for sub_question in sub_questions:
         if rag_available:
-            jobs.append((sub_question, "RAG", rag_tool))
+            if rag_tool and budget_state.reserve(
+                "retrieval_requests",
+                reason="retrieval_budget_exhausted:round0",
+            ):
+                jobs.append((sub_question, "RAG", rag_tool))
+            else:
+                if rag_tool:
+                    budget_state.add_drop("retrieval_dropped:round0:RAG")
+                skipped_results.append((
+                    str(sub_question.get("id") or ""),
+                    "RAG",
+                    SourceResult(
+                        source="RAG",
+                        status="no_evidence",
+                        content="",
+                        detail="retrieval budget exhausted",
+                    ),
+                ))
         if web_available:
-            jobs.append((sub_question, "Web", web_tool))
+            if web_tool and budget_state.reserve(
+                "retrieval_requests",
+                reason="retrieval_budget_exhausted:round0",
+            ):
+                jobs.append((sub_question, "Web", web_tool))
+            else:
+                if web_tool:
+                    budget_state.add_drop("retrieval_dropped:round0:Web")
+                skipped_results.append((
+                    str(sub_question.get("id") or ""),
+                    "Web",
+                    SourceResult(
+                        source="Web",
+                        status="no_evidence",
+                        content="",
+                        detail="retrieval budget exhausted",
+                    ),
+                ))
     with ThreadPoolExecutor(max_workers=max(1, len(jobs) + bool(independent_model))) as executor:
         futures = [executor.submit(retrieve_one, *job) for job in jobs]
         independent_future = (
-            executor.submit(_run_independent_analysis, state, independent_model)
+            executor.submit(_run_independent_analysis, state, independent_model, budget_state)
             if independent_model is not None
             else None
         )
+        for subquestion_id, source, result in skipped_results:
+            query_id = f"{run_id}:round-0:{subquestion_id}:{source}"
+            result = _bind_result(result, subquestion_id, query_id)
+            ledger.append_source_result(
+                result,
+                subquestion_id=subquestion_id,
+                query_id=query_id,
+                visibility="primary",
+            )
+            round_results.setdefault(subquestion_id, {})[source] = result
         for future in futures:
             subquestion_id, source, result = future.result()
             ledger.append_source_result(
@@ -1379,6 +1726,7 @@ def _retrieve_round0_node(
         "_rag_available": rag_available,
         "_web_available": web_available,
         "_run_status": "partial",
+        **_budget_update(budget_state),
     }
 
 def retrieve_node(
@@ -1408,18 +1756,21 @@ def barrier_node(state: dict[str, Any]) -> dict[str, Any]:
     proposals = _correction_proposals(state, snapshot)
     for proposal in proposals:
         ledger.add_action_proposal(proposal)
+    citation_map = _build_citation_map_from_snapshot(snapshot)
     return {
         "_pipeline_stage": "barrier",
         "_ledger_snapshot": snapshot.to_dict(),
         "_ledger_snapshots": [snapshot.to_dict()],
         "_evidence_ledger": ledger.to_dict(),
         "_correction_actions": [proposal.to_dict() for proposal in proposals],
-        "_citation_map": _build_citation_map_from_snapshot(snapshot),
+        "_citation_map": citation_map,
+        "_citation_bindings": _citation_bindings_from_snapshot(snapshot, citation_map),
         "_round": "barrier",
     }
 
 
 def correction_node(state: dict[str, Any], rag_tool: Any, web_tool: Any) -> dict[str, Any]:
+    budget_state = _budget_state_for(state)
     actions = [
         ActionProposal.from_dict(item)
         for item in state.get("_correction_actions") or []
@@ -1430,6 +1781,20 @@ def correction_node(state: dict[str, Any], rag_tool: Any, web_tool: Any) -> dict
             "_pipeline_stage": "correction_skipped",
             "_round": "round_1_skipped",
             "_retrieval_round": 1,
+            **_budget_update(budget_state),
+        }
+
+    if not budget_state.reserve(
+        "correction_rounds",
+        reason="correction_budget_exhausted",
+    ):
+        budget_state.add_drop("correction_round_dropped")
+        return {
+            "_pipeline_stage": "correction_skipped",
+            "_round": "round_1_skipped",
+            "_retrieval_round": 1,
+            "_correction_round": 0,
+            **_budget_update(budget_state),
         }
 
     ledger = EvidenceLedger.from_dict(state.get("_evidence_ledger") or {})
@@ -1437,16 +1802,51 @@ def correction_node(state: dict[str, Any], rag_tool: Any, web_tool: Any) -> dict
     def correct_one(proposal: ActionProposal) -> tuple[str, SourceResult]:
         tool = rag_tool if proposal.source == "RAG" else web_tool
         query_id = f"{state.get('_run_id', '')}:round-1:{proposal.subquestion_id}:{proposal.source}"
-        result = _bind_result(
-            _invoke_retrieval_tool(tool, proposal.query, proposal.source),
-            proposal.subquestion_id,
-            query_id,
-        )
+        started = time.perf_counter()
+        try:
+            raw_result = _invoke_retrieval_tool(tool, proposal.query, proposal.source)
+        finally:
+            budget_state.record_usage(None, elapsed_ms=(time.perf_counter() - started) * 1000)
+        result = _bind_result(raw_result, proposal.subquestion_id, query_id)
         return proposal.action_id, result
 
     correction_results: dict[str, SourceResult] = {}
+    skipped: list[tuple[ActionProposal, SourceResult]] = []
+    runnable_actions: list[ActionProposal] = []
+    for proposal in actions:
+        tool = rag_tool if proposal.source == "RAG" else web_tool
+        if tool and budget_state.reserve(
+            "retrieval_requests",
+            reason="retrieval_budget_exhausted:correction",
+        ):
+            runnable_actions.append(proposal)
+        else:
+            budget_state.add_drop(f"retrieval_dropped:correction:{proposal.source}")
+            skipped.append((
+                proposal,
+                SourceResult(
+                    source=proposal.source,
+                    status="no_evidence",
+                    content="",
+                    detail="correction retrieval budget exhausted",
+                ),
+            ))
     with ThreadPoolExecutor(max_workers=max(1, len(actions))) as executor:
-        futures = [executor.submit(correct_one, proposal) for proposal in actions]
+        futures = [executor.submit(correct_one, proposal) for proposal in runnable_actions]
+        for proposal, result in skipped:
+            action_id = proposal.action_id
+            result = _bind_result(
+                result,
+                proposal.subquestion_id,
+                f"{state.get('_run_id', '')}:round-1:{proposal.subquestion_id}:{proposal.source}",
+            )
+            ledger.append_source_result(
+                result,
+                subquestion_id=proposal.subquestion_id,
+                query_id=str(result.metadata.get("query_id") or ""),
+                visibility="verification_only",
+            )
+            correction_results[action_id] = result
         for future in futures:
             action_id, result = future.result()
             ledger.append_source_result(
@@ -1458,6 +1858,7 @@ def correction_node(state: dict[str, Any], rag_tool: Any, web_tool: Any) -> dict
             correction_results[action_id] = result
 
     snapshot = ledger.freeze("round_1")
+    citation_map = _build_citation_map_from_snapshot(snapshot)
     return {
         "_pipeline_stage": "correction",
         "_round": "round_1",
@@ -1473,13 +1874,64 @@ def correction_node(state: dict[str, Any], rag_tool: Any, web_tool: Any) -> dict
             *(state.get("_ledger_snapshots") or []),
             snapshot.to_dict(),
         ],
-        "_citation_map": _build_citation_map_from_snapshot(snapshot),
+        "_citation_map": citation_map,
+        "_citation_bindings": _citation_bindings_from_snapshot(snapshot, citation_map),
+        **_budget_update(budget_state),
     }
 
 
 # ============================================================
 # Stage 4: Concurrent Section Generation
 # ============================================================
+
+def _parse_json_payload(content: str) -> dict[str, Any]:
+    json_start = content.find("{")
+    json_end = content.rfind("}")
+    if json_start < 0 or json_end <= json_start:
+        return {}
+    try:
+        payload = json.loads(content[json_start:json_end + 1])
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _claim_draft_body(claim_drafts: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for item in claim_drafts:
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        refs = "".join(str(ref) for ref in item.get("citation_refs") or [])
+        claim_type = str(item.get("claim_type") or "model_analysis")
+        suffix = refs
+        if claim_type == "derived_analysis":
+            suffix += "（推导分析）"
+        elif claim_type == "model_analysis":
+            suffix += "（分析判断）"
+        lines.append(text + suffix)
+    return "\n\n".join(lines)
+
+
+def _normalize_claim_drafts(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    drafts: list[dict[str, Any]] = []
+    for item in payload.get("claims") or []:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or item.get("claim") or "").strip()
+        if not text:
+            continue
+        drafts.append({
+            "text": text,
+            "claim_type": str(item.get("claim_type") or "model_analysis"),
+            "importance": str(item.get("importance") or "medium"),
+            "evidence_ids": [str(value) for value in item.get("evidence_ids") or []],
+            "derivation_type": str(item.get("derivation_type") or "model_analysis"),
+            "derivation_inputs": [str(value) for value in item.get("derivation_inputs") or []],
+            "citation_refs": [str(value) for value in item.get("citation_refs") or []],
+        })
+    return drafts
+
 
 def _generate_section(
     sub_question: dict[str, Any],
@@ -1490,6 +1942,8 @@ def _generate_section(
     model: Any,
     target_length: int = 3000,
     status: str = "",
+    evidence_records: list[dict[str, Any]] | None = None,
+    budget_state: BudgetState | None = None,
 ) -> SectionResult:
     started = time.perf_counter()
     sq_id = str(sub_question.get("id") or "")
@@ -1502,32 +1956,51 @@ def _generate_section(
     web_empty = not web_results or web_results.strip() in _EMPTY_EVIDENCE_MARKERS
     no_evidence = rag_empty and web_empty
 
-    allowed_refs: list[str] = []
     if no_evidence:
-        prompt = SECTION_NO_EVIDENCE_PROMPT.format(
-            core_question=core_question,
-            sub_question=title,
-            target_length=target_length,
-        )
+        section_citations = {}
+    elif evidence_records:
+        section_citations = {}
+        for item in evidence_records:
+            refs = item.get("citation_refs") or []
+            if item.get("citation_ref"):
+                refs = [item.get("citation_ref"), *refs]
+            description = str(item.get("quote") or item.get("claim") or item.get("description") or "")
+            for ref in refs:
+                ref = str(ref)
+                if ref in citation_map and ref not in section_citations:
+                    section_citations[ref] = description or str(citation_map.get(ref) or "")
     else:
         section_citations = _section_citation_map(title, citation_map)
-        allowed_refs = list(section_citations.keys())
-        rag_count = sum("\u6765\u6e90\uff1aRAG" in value for value in section_citations.values())
-        web_count = sum("\u6765\u6e90\uff1aWeb" in value for value in section_citations.values())
-        prompt = SECTION_PROMPT.format(
+    allowed_refs = list(section_citations.keys())
+    if no_evidence:
+        prompt = CLAIM_GENERATION_NO_EVIDENCE_PROMPT.format(
             core_question=core_question,
             sub_question=title,
-            rag_results=f"\u5df2\u7b5b\u9009 {rag_count} \u6761\u672c\u5730\u8bc1\u636e\uff0c\u8be6\u89c1 citation_map\u3002",
-            web_results=f"\u5df2\u7b5b\u9009 {web_count} \u6761\u7f51\u7edc\u8bc1\u636e\uff0c\u8be6\u89c1 citation_map\u3002",
-            citation_map_json=json.dumps(section_citations, ensure_ascii=False),
-            target_length=target_length,
+        )
+    else:
+        prompt = CLAIM_GENERATION_PROMPT.format(
+            core_question=core_question,
+            sub_question=title,
+            evidence_json=json.dumps(
+                evidence_records
+                or [
+                    {"evidence_id": ref, "citation_ref": ref, "description": description}
+                    for ref, description in section_citations.items()
+                ],
+                ensure_ascii=False,
+            ),
         )
 
     try:
-        response = model.invoke([
-            SystemMessage(content=SECTION_SYSTEM + status),
-            HumanMessage(content=prompt),
-        ])
+        response = _budgeted_model_invoke(
+            model,
+            [
+                SystemMessage(content=CLAIM_GENERATION_SYSTEM + status),
+                HumanMessage(content=prompt),
+            ],
+            budget_state,
+            role="section_generation",
+        )
         content = _strip_think(str(response.content))
         finish_reason = "complete"
         usage_payload = getattr(response, "usage_metadata", None) or {}
@@ -1546,7 +2019,36 @@ def _generate_section(
         finish_reason = "failed"
         error = f"{type(exc).__name__}: {exc}"
 
-    parsed = _parse_section_summary(content)
+    payload = _parse_json_payload(content)
+    claim_drafts = _normalize_claim_drafts(payload)
+    if claim_drafts:
+        parsed = {
+            "summary": str(payload.get("summary") or "").strip(),
+            "citation_refs": [
+                ref
+                for item in claim_drafts
+                for ref in item.get("citation_refs") or []
+                if ref in citation_map
+            ],
+            "evidence_gaps": [str(item) for item in payload.get("evidence_gaps") or []],
+            "analysis_judgments": [str(item) for item in payload.get("analysis_judgments") or []],
+            "key_claims": [str(item.get("text") or "") for item in claim_drafts],
+            "body": _claim_draft_body(claim_drafts),
+        }
+    else:
+        parsed = _parse_section_summary(content)
+        claim_drafts = [
+            {
+                "text": re.sub(r"\[(?:\d+)(?:\s*,\s*\d+)*\]", "", text).strip() or text,
+                "claim_type": "direct_fact" if _claim_citation_refs(text, citation_map) else "model_analysis",
+                "importance": "medium",
+                "evidence_ids": [],
+                "derivation_type": "direct_evidence" if _claim_citation_refs(text, citation_map) else "model_analysis",
+                "derivation_inputs": [],
+                "citation_refs": _claim_citation_refs(text, citation_map),
+            }
+            for text in parsed.get("key_claims") or []
+        ]
     body_text = parsed.get("body") or content
 
     return SectionResult(
@@ -1556,6 +2058,7 @@ def _generate_section(
         summary=parsed.get("summary", ""),
         key_claims=parsed.get("key_claims", []),
         citation_refs=parsed.get("citation_refs", []),
+        claim_drafts=claim_drafts,
         allowed_refs=allowed_refs,
         analysis_judgments=parsed.get("analysis_judgments", []),
         evidence_gaps=parsed.get("evidence_gaps", []),
@@ -1614,33 +2117,151 @@ def _build_claim_records(
     sections: list[SectionResult],
 ) -> list[ClaimRecord]:
     citation_map = state.get("_citation_map") or {}
+    snapshot = LedgerSnapshot.from_dict(state.get("_ledger_snapshot") or {})
     run_id = str(state.get("_run_id") or "")
     records: list[ClaimRecord] = []
     for section in sections:
-        for index, claim_text in enumerate(section.key_claims, start=1):
-            text = re.sub(r"\[(?:\d+)(?:\s*,\s*\d+)*\]", "", str(claim_text)).strip()
-            citation_refs = _claim_citation_refs(str(claim_text), citation_map)
-            evidence_ids = _citation_evidence_ids(state, citation_refs)
+        drafts = section.claim_drafts or [
+            {
+                "text": claim_text,
+                "claim_type": "direct_fact" if _claim_citation_refs(str(claim_text), citation_map) else "model_analysis",
+                "importance": "medium",
+                "evidence_ids": [],
+                "derivation_type": "direct_evidence" if _claim_citation_refs(str(claim_text), citation_map) else "model_analysis",
+                "derivation_inputs": [],
+                "citation_refs": _claim_citation_refs(str(claim_text), citation_map),
+            }
+            for claim_text in section.key_claims
+        ]
+        for index, draft in enumerate(drafts, start=1):
+            text = str(draft.get("text") or "").strip()
+            citation_refs = [str(value) for value in draft.get("citation_refs") or []]
+            evidence_ids = [str(value) for value in draft.get("evidence_ids") or []]
+            if not evidence_ids:
+                evidence_ids = _citation_evidence_ids(
+                    state,
+                    [ref for ref in citation_refs if ref in citation_map],
+                )
+            claim_type = str(draft.get("claim_type") or "model_analysis")
+            importance = str(draft.get("importance") or "medium")
+            if re.search(r"\d|%|日期|因果|导致|最高|最低|比较|优于|必须|禁止|仅限|不能|风险", text, re.IGNORECASE):
+                importance = "critical"
             records.append(ClaimRecord(
                 claim_id=f"{run_id}:claim:{section.sub_question_id}:{index:02d}",
                 subquestion_id=section.sub_question_id,
-                text=text or str(claim_text),
-                claim_type="external_fact" if citation_refs else "analysis",
-                derivation_type="evidence" if citation_refs else "model_analysis",
-                derivation_inputs=evidence_ids or citation_refs,
+                text=text,
+                claim_type=claim_type,
+                importance=importance,
+                evidence_ids=evidence_ids,
+                derivation_type=str(draft.get("derivation_type") or "model_analysis"),
+                derivation_inputs=[str(value) for value in draft.get("derivation_inputs") or []],
                 generation_attribution={
                     "section_title": section.title,
                     "citation_refs": citation_refs,
                     "evidence_ids": evidence_ids,
                     "allowed_refs": list(section.allowed_refs),
+                    "generation_trace": "structured_claims" if section.claim_drafts else "legacy_claim_parse",
                 },
             ))
     return records
 
 
+def _section_evidence_records(
+    state: dict[str, Any],
+    subquestion_id: str,
+    citation_map: dict[str, str],
+) -> list[dict[str, Any]]:
+    snapshot = LedgerSnapshot.from_dict(state.get("_ledger_snapshot") or {})
+    bindings = state.get("_citation_bindings") or {}
+    allowed_refs = set(_section_citation_map(
+        str(next(
+            (
+                item.get("question")
+                for item in state.get("_sub_questions") or []
+                if str(item.get("id") or "") == subquestion_id
+            ),
+            subquestion_id,
+        )),
+        citation_map,
+    ))
+    allowed_evidence_ids = {
+        evidence_id
+        for evidence_id, refs in bindings.items()
+        if set(refs) & allowed_refs
+    }
+    records: list[dict[str, Any]] = []
+    for record in snapshot.primary_records():
+        if subquestion_id not in {
+            record.subquestion_id,
+            *record.subquestion_ids,
+        }:
+            continue
+        if record.evidence_id not in allowed_evidence_ids:
+            continue
+        records.append({
+            "evidence_id": record.evidence_id,
+            "subquestion_id": record.subquestion_id,
+            "source_type": record.source_type,
+            "source_identity": record.source_identity,
+            "evidence_class": record.evidence_class,
+            "relationship": record.relationship,
+            "claim": record.claim,
+            "quote": record.verbatim_quote,
+            "citation_refs": bindings.get(record.evidence_id) or [],
+        })
+    return records
+
+
+def _compile_claim_record_body(
+    section: SectionResult,
+    claim_records: list[ClaimRecord],
+    citation_map: dict[str, str],
+) -> str:
+    records = [
+        record
+        for record in claim_records
+        if record.subquestion_id == section.sub_question_id
+    ]
+    if not records:
+        return section.body
+    lines: list[str] = []
+    for record in records:
+        refs = [
+            str(value)
+            for value in record.generation_attribution.get("citation_refs") or []
+            if str(value) in citation_map
+        ]
+        suffix = "".join(refs)
+        if record.claim_type == "derived_analysis":
+            suffix += "（推导分析）"
+        elif record.claim_type == "model_analysis":
+            suffix += "（分析判断）"
+        lines.append(record.text + suffix)
+    return "\n\n".join(lines)
+
+
+def _render_claim_record(record: ClaimRecord, citation_map: dict[str, str]) -> str:
+    refs = [
+        str(value)
+        for value in record.generation_attribution.get("citation_refs") or []
+        if str(value) in citation_map
+    ]
+    suffix = "".join(refs)
+    if record.claim_type == "derived_analysis":
+        suffix += "（推导分析）"
+    elif record.claim_type == "model_analysis":
+        suffix += "（分析判断）"
+    return record.text + suffix
+
+
 def generate_node(state: dict[str, Any], model: Any, profile: ResearchModeProfile | None = None) -> dict[str, Any]:
+    budget_state = _budget_state_for(state)
     if not _model_available(state, minimum=15.0):
-        return {"_pipeline_stage": "generate_skipped", "_section_results": []}
+        return {
+            "_pipeline_stage": "generate_skipped",
+            "_section_results": [],
+            **_budget_update(budget_state),
+        }
 
     core_question = state.get("_core_question") or state["query"]
     sub_questions = state.get("_sub_questions") or []
@@ -1649,7 +2270,29 @@ def generate_node(state: dict[str, Any], model: Any, profile: ResearchModeProfil
     citation_map = state.get("_citation_map") or {}
 
     if not sub_questions:
-        return {"_pipeline_stage": "generate_skipped", "_section_results": []}
+        return {
+            "_pipeline_stage": "generate_skipped",
+            "_section_results": [],
+            **_budget_update(budget_state),
+        }
+
+    priority = {"critical": 0, "high": 1, "medium": 2, "normal": 2, "low": 3}
+    original_order = {
+        str(item.get("id") or ""): index
+        for index, item in enumerate(sub_questions)
+    }
+    sub_questions = sorted(
+        sub_questions,
+        key=lambda item: priority.get(str(item.get("importance") or "medium").casefold(), 2),
+    )
+    model_limit = int(budget_state.hard_limits.get("model_calls") or 0)
+    if model_limit:
+        current_model_calls = int(budget_state.model_calls)
+        downstream_reserve = 2 if sub_questions else 0
+        generation_capacity = max(0, model_limit - current_model_calls - downstream_reserve)
+        if len(sub_questions) > generation_capacity:
+            budget_state.add_drop("low_priority_sections_dropped")
+            sub_questions = sub_questions[:generation_capacity]
 
     max_concurrency = max(1, profile.max_parallel_subquestions) if profile else 3
     section_timeout = float(profile.role_timeout_seconds.get("synthesizer", profile.model_timeout_seconds)) if profile else 90.0
@@ -1678,6 +2321,12 @@ def generate_node(state: dict[str, Any], model: Any, profile: ResearchModeProfil
                     _generate_section,
                     sq, core_question, rag_results, web_results, citation_map, model,
                     status=status,
+                    evidence_records=_section_evidence_records(
+                        state,
+                        str(sq.get("id") or ""),
+                        citation_map,
+                    ),
+                    budget_state=budget_state,
                 ))
         for future in futures:
             try:
@@ -1705,12 +2354,14 @@ def generate_node(state: dict[str, Any], model: Any, profile: ResearchModeProfil
                 usage=dict(attempt.usage) if attempt else {},
             ))
 
+    results.sort(key=lambda item: original_order.get(item.sub_question_id, len(original_order)))
     claim_records = _build_claim_records(state, results)
     return {
         "_pipeline_stage": "generate",
         "_section_results": [sr.to_dict() for sr in results],
         "_claim_records": [record.to_dict() for record in claim_records],
         "_run_status": "completed" if not errors else "partial",
+        **_budget_update(budget_state),
     }
 
 
@@ -1719,9 +2370,58 @@ def generate_node(state: dict[str, Any], model: Any, profile: ResearchModeProfil
 # ============================================================
 
 def synthesize_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
+    budget_state = _budget_state_for(state)
     core_question = state.get("_core_question") or state["query"]
     section_results_raw = state.get("_section_results") or []
     sections = [SectionResult.from_dict(item) for item in section_results_raw]
+    claim_records = [
+        ClaimRecord.from_dict(item)
+        for item in state.get("_claim_records") or []
+        if isinstance(item, dict)
+    ]
+    if claim_records:
+        citation_map = state.get("_citation_map") or {}
+        claims_json = json.dumps(
+            [
+                {
+                    "claim_id": record.claim_id,
+                    "subquestion_id": record.subquestion_id,
+                    "text": record.text,
+                    "claim_type": record.claim_type,
+                    "importance": record.importance,
+                }
+                for record in claim_records
+            ],
+            ensure_ascii=False,
+        )
+        selected: dict[str, Any] = {}
+        if _model_available(state, minimum=15.0):
+            _, selected = _invoke_json(
+                model,
+                CLAIM_SYNTHESIS_SYSTEM,
+                CLAIM_SYNTHESIS_PROMPT.format(
+                    core_question=core_question,
+                    claims_json=claims_json,
+                ),
+                status=status_bar(state, model),
+                budget_state=budget_state,
+                role="claim_synthesis",
+            )
+        by_id = {record.claim_id: record for record in claim_records}
+        direct_ids = [str(value) for value in selected.get("direct_claim_ids") or []]
+        cross_ids = [str(value) for value in selected.get("cross_synthesis_claim_ids") or []]
+        direct_records = [by_id[item] for item in direct_ids if item in by_id]
+        cross_records = [by_id[item] for item in cross_ids if item in by_id]
+        if not direct_records:
+            direct_records = claim_records[:4]
+        if not cross_records:
+            cross_records = claim_records
+        return {
+            "_pipeline_stage": "synthesize",
+            "_direct_answer": "\n\n".join(_render_claim_record(item, citation_map) for item in direct_records),
+            "_cross_synthesis": "\n\n".join(_render_claim_record(item, citation_map) for item in cross_records),
+            **_budget_update(budget_state),
+        }
 
     if not sections:
         # No sections were generated (all timed out or evidence was empty).
@@ -1748,9 +2448,11 @@ def synthesize_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
                 fallback_answer = _invoke_text(
                     model,
                     "你是一名研究分析师。检索失败时，基于背景知识给出诚实的分析判断。",
-                    fallback_prompt,
-                    status=status_bar(state, model),
-                )
+                fallback_prompt,
+                status=status_bar(state, model),
+                budget_state=budget_state,
+                role="synthesis_fallback",
+            )
             except Exception:
                 pass
             if not fallback_answer:
@@ -1763,6 +2465,7 @@ def synthesize_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
             "_pipeline_stage": "synthesize",
             "_direct_answer": fallback_answer or "",
             "_cross_synthesis": "",
+            **_budget_update(budget_state),
         }
 
     # 构建更丰富的输入：每节前 500 字正文 + 结构化摘要
@@ -1786,7 +2489,14 @@ def synthesize_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
     cross_synthesis = ""
     if _model_available(state, minimum=15.0):
         try:
-            _, payload = _invoke_json(model, GLOBAL_SYSTEM, prompt, status=status_bar(state, model))
+            _, payload = _invoke_json(
+                model,
+                GLOBAL_SYSTEM,
+                prompt,
+                status=status_bar(state, model),
+                budget_state=budget_state,
+                role="global_synthesis",
+            )
             direct_answer = str(payload.get("direct_answer") or "").strip()
             cross_synthesis = str(payload.get("cross_synthesis") or "").strip()
         except Exception:
@@ -1822,6 +2532,7 @@ def synthesize_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
         "_pipeline_stage": "synthesize",
         "_direct_answer": direct_answer,
         "_cross_synthesis": cross_synthesis,
+        **_budget_update(budget_state),
     }
 
 
@@ -1904,6 +2615,102 @@ def _compute_deterministic_metrics(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _claim_delivery_assessment(state: dict[str, Any]) -> dict[str, Any]:
+    claim_records = [
+        ClaimRecord.from_dict(item)
+        for item in state.get("_claim_records") or []
+        if isinstance(item, dict)
+    ]
+    if not claim_records:
+        return {"status": "not_applicable", "claim_gate": False}
+
+    snapshot = LedgerSnapshot.from_dict(state.get("_ledger_snapshot") or {})
+    known_claim_ids = {record.claim_id for record in claim_records}
+    protocol_errors: dict[str, list[str]] = {}
+    for record in claim_records:
+        errors = claim_record_protocol_errors(
+            record,
+            snapshot,
+            known_claim_ids=known_claim_ids,
+        )
+        if errors:
+            protocol_errors[record.claim_id] = errors
+
+    factual = [
+        record
+        for record in claim_records
+        if record.claim_type in {"direct_fact", "multi_source_fact"}
+    ]
+    supported = [
+        record
+        for record in factual
+        if record.verification_result.get("verdict") == "supports"
+    ]
+    contradictory = [
+        record
+        for record in claim_records
+        if record.verification_result.get("verdict") == "contradicts"
+    ]
+    unresolved = [
+        record
+        for record in claim_records
+        if record.verification_result.get("verdict") in {"insufficient", "uncertain"}
+    ]
+    key_failures = [
+        record.claim_id
+        for record in factual
+        if record.importance in {"critical", "high"}
+        and record.verification_result.get("verdict") != "supports"
+    ]
+    support_ratio = len(supported) / max(1, len(factual))
+    hard_failures: list[str] = []
+    if protocol_errors:
+        hard_failures.append("claim_protocol_invalid")
+    if contradictory:
+        hard_failures.append("conflicting_claim_evidence")
+    if key_failures:
+        hard_failures.append("critical_claim_not_supported")
+    if state.get("_generation_trace_invalid"):
+        hard_failures.append("generation_trace_invalid")
+
+    if hard_failures:
+        status = "diagnostic_only"
+    elif support_ratio >= 0.90 and not unresolved:
+        status = "deliverable"
+    elif support_ratio >= 0.50:
+        status = "limited"
+    else:
+        status = "diagnostic_only"
+
+    verdicts = {
+        verdict: sum(
+            1 for record in claim_records
+            if record.verification_result.get("verdict") == verdict
+        )
+        for verdict in ("supports", "contradicts", "insufficient", "uncertain")
+    }
+    limitations: list[str] = []
+    if unresolved:
+        limitations.append("insufficient_or_uncertain_claims_present")
+    if factual and support_ratio < 0.90:
+        limitations.append("ordinary_fact_support_below_0.90")
+    return {
+        "status": status,
+        "claim_gate": True,
+        "hard_failures": hard_failures,
+        "limitations": limitations,
+        "protocol_errors": protocol_errors,
+        "metrics": {
+            "total_claims": len(claim_records),
+            "factual_claims": len(factual),
+            "supported_factual_claims": len(supported),
+            "factual_support_ratio": round(support_ratio, 3),
+            "critical_claim_failures": key_failures,
+            "verification_verdicts": verdicts,
+        },
+    }
+
+
 def audit_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
     metrics = _compute_deterministic_metrics(state)
 
@@ -1957,6 +2764,10 @@ def audit_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
     if metrics["generation_trace_invalid"]:
         delivery_status = "diagnostic_only"
 
+    claim_delivery = _claim_delivery_assessment(state)
+    if claim_delivery.get("claim_gate"):
+        delivery_status = claim_delivery["status"]
+
     source_statuses = {
         "RAG": {
             "status": "no_evidence" if metrics["rag_status"] == "empty" else metrics["rag_status"],
@@ -1990,6 +2801,7 @@ def audit_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
             "run_status": run_status,
             "sections_completed": metrics["sections_completed"],
             "sections_failed": metrics["sections_failed"],
+            "claim_gate": claim_delivery,
         },
         "_report_available": metrics["total_sections"] > 0,
         "_credibility_text": credibility_text,
@@ -2069,6 +2881,8 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
 
     cit_refs_used = len({ref for claim in all_claims for ref in claim["citations"]})
     cit_refs_available = len(citation_map)
+    claim_delivery = (state.get("_delivery_assessment") or {}).get("claim_gate") or {}
+    structured_claim_gate = bool(claim_delivery.get("claim_gate"))
 
     # ── Structured findings ──
     findings: dict[str, Any] = {
@@ -2087,12 +2901,21 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
             verdict: sum(1 for claim in all_claims if claim.get("verification_verdict") == verdict)
             for verdict in ("supports", "contradicts", "insufficient", "uncertain")
         },
+        "claim_delivery_gate": claim_delivery,
+        "factual_support_ratio": (claim_delivery.get("metrics") or {}).get("factual_support_ratio"),
+        "critical_claim_failures": (claim_delivery.get("metrics") or {}).get("critical_claim_failures") or [],
         "generation_trace_invalid": bool(state.get("_generation_trace_invalid")),
         "attribution_audit": state.get("_attribution_audit") or {},
     }
 
     # ── Determine factcheck status ──
-    if total_claims == 0:
+    if structured_claim_gate:
+        factcheck_status = {
+            "deliverable": "passed",
+            "limited": "partial",
+            "diagnostic_only": "failed",
+        }.get(str(claim_delivery.get("status") or "diagnostic_only"), "failed")
+    elif total_claims == 0:
         factcheck_status = "skipped"
     elif findings["verified_ratio"] >= 0.8:
         factcheck_status = "passed"
@@ -2132,6 +2955,7 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
 
     fc_text = "".join(fc_lines)
     report_with_fc = report + fc_text
+    budget_consumed = _budget_state_for(state).to_dict()
     run_summary = {
         "mode": "answer_first",
         "run_id": str(state.get("_run_id") or ""),
@@ -2164,6 +2988,11 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
         "quality": audit_metrics,
         "delivery_status": str(state.get("_delivery_status") or "diagnostic_only"),
         "delivery_assessment": state.get("_delivery_assessment") or {},
+        "budget_consumed": budget_consumed,
+        "degradation_reason": list(budget_consumed.get("degradation_reasons") or []),
+        "dropped_reason": list(budget_consumed.get("dropped_reasons") or []),
+        "prompt_version": "research-prompts-v3",
+        "model_config_version": "research-model-profile-v1",
     }
 
     return {
@@ -2190,6 +3019,11 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
     section_results_raw = state.get("_section_results") or []
     sections = [SectionResult.from_dict(item) for item in section_results_raw]
     citation_map = state.get("_citation_map") or {}
+    claim_records = [
+        ClaimRecord.from_dict(item)
+        for item in state.get("_claim_records") or []
+        if isinstance(item, dict)
+    ]
 
     lines = ["# " + core_question + "\n"]
     if direct_answer:
@@ -2199,7 +3033,7 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
 
     for sr in sections:
         lines.append("## " + sr.title + "\n")
-        body_clean = _strip_think(sr.body)
+        body_clean = _strip_think(_compile_claim_record_body(sr, claim_records, citation_map))
         lines.append(body_clean)
         lines.append("")
 

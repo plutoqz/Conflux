@@ -454,6 +454,9 @@ def write_v2_report_artifacts(
         "## FactCheck\n\n" + _json_block({
             "status": state.get("_factcheck_status") or "",
             "findings": state.get("_factcheck_findings") or {},
+            "budget_consumed": state.get("_budget_state") or {},
+            "degradation_reason": (state.get("_budget_state") or {}).get("degradation_reasons") or [],
+            "dropped_reason": (state.get("_budget_state") or {}).get("dropped_reasons") or [],
         }) + "\n"
     )
 
@@ -471,7 +474,67 @@ def write_v2_report_artifacts(
     )
 
 
+def _build_v2_evidence_payload_from_ledger(state: dict[str, Any]) -> dict[str, Any]:
+    citation_map = state.get("_citation_map") or {}
+    snapshot = state.get("_ledger_snapshot") or {}
+    bindings = state.get("_citation_bindings") or {}
+    nodes = []
+    for record in snapshot.get("records") or []:
+        if not isinstance(record, dict) or record.get("visibility", "primary") != "primary":
+            continue
+        evidence_id = str(record.get("evidence_id") or "")
+        nodes.append({
+            "id": evidence_id,
+            "source": str(record.get("source_type") or ""),
+            "claim": str(record.get("claim") or ""),
+            "verbatim_quote": str(record.get("verbatim_quote") or ""),
+            "evidence_class": str(record.get("evidence_class") or ""),
+            "source_identity": str(record.get("source_identity") or ""),
+            "evidence_refs": [str(ref) for ref in bindings.get(evidence_id) or []],
+            "evidence_ids": [evidence_id],
+        })
+    for claim in state.get("_claim_records") or []:
+        if not isinstance(claim, dict):
+            continue
+        if claim.get("claim_type") not in {"derived_analysis", "model_analysis"}:
+            continue
+        attribution = claim.get("generation_attribution") or {}
+        nodes.append({
+            "id": str(claim.get("claim_id") or f"model-{len(nodes) + 1}"),
+            "source": "Model",
+            "claim": str(claim.get("text") or ""),
+            "evidence_refs": [str(ref) for ref in attribution.get("citation_refs") or []],
+            "evidence_ids": [str(value) for value in claim.get("evidence_ids") or []],
+            "claim_type": str(claim.get("claim_type") or ""),
+        })
+    source_counts: dict[str, int] = {}
+    for node in nodes:
+        source = str(node.get("source") or "")
+        source_counts[source] = source_counts.get(source, 0) + 1
+    return {
+        "schema_version": "v2",
+        "summary": {"total_nodes": len(nodes), "source_counts": source_counts},
+        "source_statuses": state.get("_source_statuses") or {},
+        "nodes": nodes,
+        "citation_map": citation_map,
+        "audit_metrics": state.get("_audit_metrics") or {},
+        "claim_records": state.get("_claim_records") or [],
+        "attribution_audit": state.get("_attribution_audit") or {},
+        "ledger_snapshot": snapshot,
+        "factcheck": {
+            "status": state.get("_factcheck_status") or "",
+            "findings": state.get("_factcheck_findings") or {},
+        },
+        "budget_consumed": state.get("_budget_state") or {},
+        "degradation_reason": (state.get("_budget_state") or {}).get("degradation_reasons") or [],
+        "dropped_reason": (state.get("_budget_state") or {}).get("dropped_reasons") or [],
+        "run_summary": state.get("_run_summary") or {},
+    }
+
+
 def build_v2_evidence_payload(state: dict[str, Any]) -> dict[str, Any]:
+    if (state.get("_ledger_snapshot") or {}).get("records"):
+        return _build_v2_evidence_payload_from_ledger(state)
     citation_map = state.get("_citation_map") or {}
     nodes = []
     for index, (ref, description) in enumerate(citation_map.items(), start=1):
@@ -525,6 +588,9 @@ def build_v2_evidence_payload(state: dict[str, Any]) -> dict[str, Any]:
             "status": state.get("_factcheck_status") or "",
             "findings": state.get("_factcheck_findings") or {},
         },
+        "budget_consumed": state.get("_budget_state") or {},
+        "degradation_reason": (state.get("_budget_state") or {}).get("degradation_reasons") or [],
+        "dropped_reason": (state.get("_budget_state") or {}).get("dropped_reasons") or [],
         "run_summary": state.get("_run_summary") or {},
     }
 

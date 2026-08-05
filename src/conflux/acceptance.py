@@ -252,8 +252,23 @@ def _validate_v2_report(
             isinstance(item, dict)
             and str(item.get("claim_id") or "").strip()
             and str(item.get("text") or "").strip()
+            and item.get("claim_type") in {
+                "direct_fact",
+                "multi_source_fact",
+                "derived_analysis",
+                "model_analysis",
+            }
+            and item.get("importance") in {"critical", "high", "medium", "low"}
+            and isinstance(item.get("evidence_ids"), list)
             and isinstance(item.get("derivation_inputs") or [], list)
+            and isinstance(item.get("generation_attribution") or {}, dict)
             and isinstance(item.get("verification_result") or {}, dict)
+            and {
+                "verdict",
+                "confidence",
+                "reason",
+                "verifier_version",
+            }.issubset(set((item.get("verification_result") or {}).keys()))
             for item in claim_records
         )
     )
@@ -261,6 +276,11 @@ def _validate_v2_report(
     checks["delivery_decision_present"] = (
         not protocol_present
         or delivery_status in {"deliverable", "limited", "diagnostic_only"}
+    )
+    claim_gate = (run_summary.get("delivery_assessment") or {}).get("claim_gate") or {}
+    checks["claim_delivery_gate_present"] = (
+        not claim_records
+        or bool(claim_gate.get("claim_gate"))
     )
     generation_trace_invalid = bool(
         audit_metrics.get("generation_trace_invalid")
@@ -277,6 +297,8 @@ def _validate_v2_report(
         issues.append("V2 ClaimRecord 缺少声明文本或验证结构。")
     if not checks["delivery_decision_present"]:
         issues.append("V2 运行摘要缺少最终交付决策。")
+    if not checks["claim_delivery_gate_present"]:
+        issues.append("V2 ClaimRecord 缺少声明级交付门禁结果。")
     if not checks["attribution_audit_consistent"]:
         issues.append("V2 归因审计失败但最终交付决策未降级为 diagnostic_only。")
 

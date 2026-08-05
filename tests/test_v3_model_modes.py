@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from conflux.graph_v2 import (  # noqa: E402
     SectionResult,
     _build_claim_records,
+    _generate_section,
     _new_state,
     _subquestion_query,
     attribution_audit_node,
@@ -21,7 +22,7 @@ from conflux.graph_v2 import (  # noqa: E402
     retrieve_node,
     verification_node,
 )
-from conflux.research_protocol import EvidenceLedger, LedgerSnapshot  # noqa: E402
+from conflux.research_protocol import EvidenceLedger, EvidenceRecord, LedgerSnapshot  # noqa: E402
 from conflux.source_status import EvidenceItem, SourceResult  # noqa: E402
 
 
@@ -225,3 +226,110 @@ def test_ledger_snapshot_round_trip_is_replayable():
 
     assert replayed.to_dict() == snapshot.to_dict()
     assert replayed.snapshot_id == "replay-run:snapshot-1"
+
+
+def test_structured_claim_generation_populates_claim_record_protocol():
+    state = _new_state("research question")
+    evidence = EvidenceRecord(
+        evidence_id="run-test:ev-0001",
+        subquestion_id="sq-1",
+        query_id="run-test:query-1",
+        source_identity="source-a",
+        publisher="Publisher",
+        content_hash="hash-a",
+        source_type="Web",
+        evidence_class="authoritative_document",
+        claim="The source directly supports the atomic statement with enough context for verification.",
+        verbatim_quote="The source directly supports the atomic statement with enough context for verification.",
+    )
+    ledger = EvidenceLedger("run-test")
+    ledger.append_record(evidence)
+    state["_ledger_snapshot"] = ledger.freeze("final").to_dict()
+    state["_citation_map"] = {"[1]": "The source directly supports the atomic statement with enough context for verification.（来源：Web）"}
+
+    model = _Model({
+        "claims": [{
+            "text": "The atomic statement is supported.",
+            "claim_type": "direct_fact",
+            "importance": "high",
+            "evidence_ids": ["run-test:ev-0001"],
+            "derivation_type": "direct_evidence",
+            "derivation_inputs": [],
+            "citation_refs": ["[1]"],
+        }],
+    })
+    section = _generate_section(
+        {"id": "sq-1", "question": "atomic statement"},
+        "research question",
+        "retrieved evidence",
+        "retrieved evidence",
+        state["_citation_map"],
+        model,
+        evidence_records=[{
+            "evidence_id": "run-test:ev-0001",
+            "citation_ref": "[1]",
+            "claim": evidence.claim,
+        }],
+    )
+    records = _build_claim_records(state, [section])
+
+    assert records[0].claim_type == "direct_fact"
+    assert records[0].importance == "high"
+    assert records[0].evidence_ids == ["run-test:ev-0001"]
+    assert records[0].generation_attribution["generation_trace"] == "structured_claims"
+
+
+def test_verification_rejects_unsupported_direct_fact_even_when_model_says_supports():
+    state = _new_state("question")
+    state["_claim_records"] = [{
+        "claim_id": "run-test:claim:sq-1:01",
+        "subquestion_id": "sq-1",
+        "text": "unsupported fact",
+        "claim_type": "direct_fact",
+        "importance": "critical",
+        "evidence_ids": [],
+        "derivation_type": "direct_evidence",
+        "derivation_inputs": [],
+    }]
+    ledger = EvidenceLedger.from_dict(state["_evidence_ledger"])
+    state["_ledger_snapshot"] = ledger.freeze("final").to_dict()
+    result = verification_node(state, _Model({
+        "checks": [{
+            "claim_id": "run-test:claim:sq-1:01",
+            "verdict": "supports",
+            "confidence": 1.0,
+            "evidence_ids": [],
+        }],
+    }))
+
+    verification = result["_claim_records"][0]["verification_result"]
+    assert verification["verdict"] == "insufficient"
+    assert verification["verifier_version"] == "rules-v1"
+
+
+def test_critical_claim_failure_blocks_claim_delivery():
+    from conflux.graph_v2 import _claim_delivery_assessment
+
+    state = _new_state("question")
+    state["_claim_records"] = [{
+        "claim_id": "run-test:claim:sq-1:01",
+        "subquestion_id": "sq-1",
+        "text": "critical fact",
+        "claim_type": "direct_fact",
+        "importance": "critical",
+        "evidence_ids": [],
+        "derivation_type": "direct_evidence",
+        "verification_result": {
+            "verdict": "insufficient",
+            "confidence": 0.0,
+            "reason": "no support",
+            "verifier_version": "rules-v1",
+        },
+    }]
+    ledger = EvidenceLedger.from_dict(state["_evidence_ledger"])
+    state["_ledger_snapshot"] = ledger.freeze("final").to_dict()
+
+    assessment = _claim_delivery_assessment(state)
+
+    assert assessment["status"] == "diagnostic_only"
+    assert "critical_claim_not_supported" in assessment["hard_failures"]
