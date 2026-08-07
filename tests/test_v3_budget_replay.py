@@ -138,11 +138,12 @@ def _replay_bundle():
                         "status": "success",
                         "content": "Replay uses fixed provider responses.",
                         "claims": [{
-                            "claim": "Replay uses fixed provider responses.",
-                            "verbatim_quote": "Replay uses fixed provider responses.",
+                            "claim": "Replay uses fixed provider responses so every pipeline step consumes only recorded payloads without calling live providers.",
+                            "verbatim_quote": "Replay uses fixed provider responses so every pipeline step consumes only recorded payloads without calling live providers.",
                             "source_identity": "replay-rag",
                             "content_hash": "replay-rag-hash",
                             "evidence_class": "authoritative_document",
+                            "relevance": 0.9,
                         }],
                     }
                 }

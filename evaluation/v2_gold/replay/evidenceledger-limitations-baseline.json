@@ -1,0 +1,99 @@
+{
+  "schema_version": "conflux-v2-replay-v1",
+  "run_id": "evidenceledger-limitations-replay",
+  "query": "What are the main limitations of EvidenceLedger-based RAG verification for research reports?",
+  "depth": "deep",
+  "prompt_version": "research-prompts-v3",
+  "model_config_version": "research-model-profile-v1",
+  "fixture_type": "synthetic_controlled_replay",
+  "fixture_note": "This fixture isolates workflow behavior. Its source payloads are synthetic and must not be reported as live-provider quality evidence.",
+  "models": {
+    "planner": {
+      "responses": [
+        {
+          "content": "{\"core_question\":\"What are the main limitations of EvidenceLedger-based RAG verification for research reports?\",\"sub_questions\":[{\"question\":\"What provenance and source-quality limitations affect EvidenceLedger records in research reports?\",\"search_queries\":[\"EvidenceLedger provenance source quality limitations\"],\"search_queries_en\":[]},{\"question\":\"How can conflicting evidence affect reliability conclusions from EvidenceLedger-based verification?\",\"search_queries\":[\"EvidenceLedger conflicting evidence reliability\"],\"search_queries_en\":[]},{\"question\":\"What scalability limitations arise when EvidenceLedger verification is applied to large research collections?\",\"search_queries\":[\"EvidenceLedger scalability large research collections\"],\"search_queries_en\":[]},{\"question\":\"Which EvidenceLedger limitations should remain unclaimed when no direct evidence is retrieved?\",\"search_queries\":[\"EvidenceLedger limitations no direct evidence\"],\"search_queries_en\":[]}]}"
+        },
+        {
+          "content": "{\"judgments\":[{\"subquestion_id\":\"sq-1\",\"verdict\":\"covered\",\"confidence\":1.0},{\"subquestion_id\":\"sq-2\",\"verdict\":\"conflict\",\"confidence\":1.0},{\"subquestion_id\":\"sq-3\",\"verdict\":\"covered\",\"confidence\":1.0},{\"subquestion_id\":\"sq-4\",\"verdict\":\"gap\",\"confidence\":1.0}],\"action_proposals\":[]}"
+        }
+      ]
+    },
+    "analyst": {
+      "responses": [
+        {"content": "{\"summary\":\"Independent analysis keeps provenance, conflict, scalability, and unsupported-claim limits separate.\"}"}
+      ]
+    },
+    "synthesizer": {
+      "responses": [
+        {
+          "content": "{\"summary\":\"Provenance evidence is useful only when source quality remains inspectable.\",\"claims\":[{\"text\":\"EvidenceLedger provenance records cannot by themselves establish source quality; the source identity and authority still need independent assessment.\",\"claim_type\":\"direct_fact\",\"importance\":\"medium\",\"evidence_ids\":[\"evidenceledger-limitations-replay:ev-0002\"],\"derivation_type\":\"direct_evidence\",\"derivation_inputs\":[],\"citation_refs\":[\"[1]\"]}]}"
+        },
+        {
+          "content": "{\"summary\":\"Conflicting records require a qualified conclusion.\",\"claims\":[{\"text\":\"When ledgered sources conflict, the system should report a qualified reliability conclusion rather than treat the ledger as proof that one source is true.\",\"claim_type\":\"derived_analysis\",\"importance\":\"medium\",\"evidence_ids\":[\"evidenceledger-limitations-replay:ev-0003\",\"evidenceledger-limitations-replay:ev-0004\"],\"derivation_type\":\"cross_source_synthesis\",\"derivation_inputs\":[\"evidenceledger-limitations-replay:ev-0003\",\"evidenceledger-limitations-replay:ev-0004\"],\"citation_refs\":[\"[2]\",\"[3]\"]}]}"
+        },
+        {
+          "content": "{\"summary\":\"Large collections create a bounded processing problem.\",\"claims\":[{\"text\":\"Large research collections can make EvidenceLedger verification latency-sensitive because each claim still requires evidence retrieval, binding, and review.\",\"claim_type\":\"direct_fact\",\"importance\":\"medium\",\"evidence_ids\":[\"evidenceledger-limitations-replay:ev-0005\"],\"derivation_type\":\"direct_evidence\",\"derivation_inputs\":[],\"citation_refs\":[\"[4]\"]}]}"
+        },
+        {
+          "content": "{\"summary\":\"No direct evidence was returned for this requested limitation.\",\"claims\":[],\"evidence_gaps\":[\"No direct evidence for an additional limitation was retrieved.\"]}"
+        },
+        {
+          "content": "{\"direct_claim_ids\":[\"evidenceledger-limitations-replay:claim:sq-1:01\",\"evidenceledger-limitations-replay:claim:sq-2:01\",\"evidenceledger-limitations-replay:claim:sq-3:01\"],\"cross_synthesis_claim_ids\":[\"evidenceledger-limitations-replay:claim:sq-1:01\",\"evidenceledger-limitations-replay:claim:sq-2:01\",\"evidenceledger-limitations-replay:claim:sq-3:01\"]}"
+        }
+      ]
+    },
+    "verifier": {
+      "responses": [
+        {
+          "content": "{\"checks\":[{\"claim_id\":\"evidenceledger-limitations-replay:claim:sq-1:01\",\"verdict\":\"supports\",\"confidence\":1.0,\"evidence_ids\":[\"evidenceledger-limitations-replay:ev-0002\"]},{\"claim_id\":\"evidenceledger-limitations-replay:claim:sq-2:01\",\"verdict\":\"supports\",\"confidence\":1.0,\"evidence_ids\":[\"evidenceledger-limitations-replay:ev-0003\",\"evidenceledger-limitations-replay:ev-0004\"]},{\"claim_id\":\"evidenceledger-limitations-replay:claim:sq-3:01\",\"verdict\":\"supports\",\"confidence\":1.0,\"evidence_ids\":[\"evidenceledger-limitations-replay:ev-0005\"]}]}"
+        }
+      ]
+    }
+  },
+  "retrieval": {
+    "RAG": {
+      "by_query": {
+        "EvidenceLedger provenance source quality limitations": {
+          "status": "success",
+          "content": "Fixture context about provenance fields.",
+          "claims": [{"source":"RAG","claim":"A ledger can retain provenance fields, but field retention alone does not independently validate the authority or completeness of the original source.","verbatim_quote":"A ledger can retain provenance fields, but field retention alone does not independently validate the authority or completeness of the original source.","source_identity":"fixture-rag-context","content_hash":"fixture-rag-context-v1","evidence_class":"community_content","relevance":0.45,"relationship":"context"}]
+        },
+        "EvidenceLedger conflicting evidence reliability": {
+          "status": "success",
+          "content": "Fixture evidence about conflicting evidence.",
+          "claims": [{"source":"RAG","claim":"EvidenceLedger verification can expose disagreement between source-backed claims, so a reliability conclusion must retain the unresolved conflict instead of collapsing it into one answer.","verbatim_quote":"EvidenceLedger verification can expose disagreement between source-backed claims, so a reliability conclusion must retain the unresolved conflict instead of collapsing it into one answer.","source_identity":"fixture-rag-conflict","content_hash":"fixture-rag-conflict-v1","evidence_class":"peer_reviewed","relevance":0.92,"relationship":"supports","document_title":"Fixture Conflict Study"}]
+        },
+        "EvidenceLedger scalability large research collections": {
+          "status": "success",
+          "content": "Fixture evidence about large-collection latency.",
+          "claims": [{"source":"RAG","claim":"For large research collections, every claim-to-evidence binding adds retrieval and review work, making end-to-end verification latency sensitive to collection size and claim volume.","verbatim_quote":"For large research collections, every claim-to-evidence binding adds retrieval and review work, making end-to-end verification latency sensitive to collection size and claim volume.","source_identity":"fixture-rag-scale","content_hash":"fixture-rag-scale-v1","evidence_class":"peer_reviewed","relevance":0.95,"relationship":"supports","document_title":"Fixture Scale Study"}]
+        },
+        "EvidenceLedger limitations no direct evidence": {"status":"no_evidence","content":""},
+        "How can conflicting evidence affect reliability conclusions from EvidenceLedger-based verification? official primary source conflict verification": {"status":"no_evidence","content":""},
+        "Which EvidenceLedger limitations should remain unclaimed when no direct evidence is retrieved? narrow evidence verification": {"status":"no_evidence","content":""}
+      }
+    },
+    "Web": {
+      "by_query": {
+        "EvidenceLedger provenance source quality limitations": {
+          "status": "success",
+          "content": "Fixture direct evidence about provenance and source quality.",
+          "claims": [{"source":"Web","claim":"An EvidenceLedger record preserves provenance links, but provenance metadata cannot establish source quality without separate checks of source identity, authority, and coverage.","verbatim_quote":"An EvidenceLedger record preserves provenance links, but provenance metadata cannot establish source quality without separate checks of source identity, authority, and coverage.","source_identity":"fixture-web-provenance","content_hash":"fixture-web-provenance-v1","evidence_class":"authoritative_document","relevance":0.98,"relationship":"supports","document_title":"Fixture Provenance Guidance","url":"https://fixture.invalid/provenance"}]
+        },
+        "EvidenceLedger conflicting evidence reliability": {
+          "status": "success",
+          "content": "Fixture counterevidence about conflict.",
+          "claims": [{"source":"Web","claim":"A ledger that records competing sources does not prove that either source is true; unresolved disagreement remains a limitation for reliability conclusions.","verbatim_quote":"A ledger that records competing sources does not prove that either source is true; unresolved disagreement remains a limitation for reliability conclusions.","source_identity":"fixture-web-counterevidence","content_hash":"fixture-web-counterevidence-v1","evidence_class":"authoritative_document","relevance":0.94,"relationship":"contradicts","document_title":"Fixture Counterevidence Notice","url":"https://fixture.invalid/conflict"}]
+        },
+        "EvidenceLedger scalability large research collections": {
+          "status": "success",
+          "content": "Fixture related but incomplete implementation note.",
+          "claims": [{"source":"Web","claim":"The fixture implementation note lists cache settings but does not measure EvidenceLedger latency or throughput for large research collections.","verbatim_quote":"The fixture implementation note lists cache settings but does not measure EvidenceLedger latency or throughput for large research collections.","source_identity":"fixture-web-scale-context","content_hash":"fixture-web-scale-context-v1","evidence_class":"community_content","relevance":0.36,"relationship":"context"}]
+        },
+        "EvidenceLedger limitations no direct evidence": {"status":"no_evidence","content":""},
+        "How can conflicting evidence affect reliability conclusions from EvidenceLedger-based verification? official primary source conflict verification": {"status":"no_evidence","content":""},
+        "Which EvidenceLedger limitations should remain unclaimed when no direct evidence is retrieved? narrow evidence verification": {"status":"no_evidence","content":""}
+      }
+    }
+  }
+}

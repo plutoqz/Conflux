@@ -123,6 +123,7 @@ def _new_v2_state(
     run_id: str | None = None,
     depth: str = "standard",
     timeout_seconds: int | None = None,
+    baseline_variant: str = "B4",
 ) -> dict:
     """Create initial state for the V2 answer_first pipeline."""
     from .graph_v2 import _new_state
@@ -133,6 +134,7 @@ def _new_v2_state(
         run_id=run_id,
         depth=depth,
         timeout_seconds=timeout_seconds,
+        baseline_variant=baseline_variant,
     )
 
 
@@ -152,6 +154,7 @@ def query_command(
     deadline_at: float | None = None,
     commit_reserve_seconds: float | None = None,
     replay: str | None = None,
+    baseline_variant: str = "B4",
 ) -> dict:
     """Run one research query."""
 
@@ -172,6 +175,7 @@ def query_command(
         print(f"-> Warning: research.pipeline '{pipeline}' is no longer supported; using answer_first.")
         pipeline = "answer_first"
     replay_bundle = load_replay_bundle(replay) if replay else None
+    baseline_variant = str(baseline_variant or "B4").upper()
     if replay_bundle:
         bundle_query = str(replay_bundle.get("query") or "").strip()
         if bundle_query and bundle_query != query:
@@ -232,6 +236,7 @@ def query_command(
     print(f"-> Mode: {mode}")
     print(f"-> Research pipeline: {pipeline}")
     print(f"-> Research depth: {research_profile.depth}")
+    print(f"-> Baseline variant: {baseline_variant}")
     if replay_bundle:
         print("-> Execution mode: fixed replay")
     if model_trace:
@@ -264,6 +269,8 @@ def query_command(
         run_id=run_id,
         deadline_at=deadline_at,
         commit_reserve_seconds=commit_reserve_seconds,
+        baseline_variant=baseline_variant,
+        max_parallel_subquestions=1 if replay_bundle else None,
     )
     initial_state = _new_v2_state(
         query,
@@ -271,6 +278,7 @@ def query_command(
         run_id=run_id,
         depth=research_profile.depth,
         timeout_seconds=research_profile.timeout_seconds,
+        baseline_variant=baseline_variant,
     )
     final_state, trace_events = _run_phase2_graph(
         graph,
@@ -334,6 +342,8 @@ def query_command(
              "dropped_reason": (final_state.get("_budget_state") or {}).get("dropped_reasons") or [],
              "replay_mode": bool(replay_bundle),
              "replay_bundle": str(Path(replay).resolve()) if replay else "",
+             "baseline_variant": final_state.get("_baseline_variant") or baseline_variant,
+             "baseline_policy": final_state.get("_baseline_policy") or {},
          })
     write_run_summary(summary, summary_path)
     final_state["_report_artifacts"] = {
@@ -647,6 +657,7 @@ def main() -> None:
     research_parser.add_argument("--stream-events", action="store_true", help="Print structured trace events as JSON lines")
     research_parser.add_argument("--trace-dir", help="Directory for .trace.jsonl and .summary.json outputs")
     research_parser.add_argument("--replay", help="Run V2 from a fixed replay bundle without external APIs")
+    research_parser.add_argument("--baseline-variant", choices=["B2", "B3", "B4"], default="B4")
 
     # ── also accept top-level args for backward compat ──────────
     parser.add_argument("query", nargs="?", help="Research question (legacy mode)")
@@ -661,6 +672,7 @@ def main() -> None:
     parser.add_argument("--stream-events", action="store_true", help="Print structured trace events as JSON lines")
     parser.add_argument("--trace-dir", help="Directory for .trace.jsonl and .summary.json outputs")
     parser.add_argument("--replay", help="Run V2 from a fixed replay bundle without external APIs")
+    parser.add_argument("--baseline-variant", choices=["B2", "B3", "B4"], default="B4")
 
     args = parser.parse_args()
 
@@ -684,6 +696,7 @@ def main() -> None:
                  trace_dir=args.trace_dir,
                  depth=args.depth,
                  replay=args.replay,
+                 baseline_variant=args.baseline_variant,
              )
         elif not args.index:
             parser.print_help()

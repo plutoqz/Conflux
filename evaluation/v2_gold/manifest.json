@@ -1,0 +1,49 @@
+{
+  "schema_version": "conflux-v2-gold-v1",
+  "dataset_id": "v2-gold-seed-20260805",
+  "annotation_status": "seeded_manual_labels",
+  "annotation_policy": {
+    "retrieval_grade": {
+      "0": "irrelevant or off-domain",
+      "1": "related context but insufficient for the subquestion",
+      "2": "partially relevant and potentially useful, but incomplete",
+      "3": "directly answers the subquestion and is admissible evidence"
+    },
+    "unknown_retrieved_evidence": "reported separately and never silently treated as relevant",
+    "verification_verdicts": ["supports", "contradicts", "insufficient", "uncertain"],
+    "cost_policy": "null until provider pricing is fixed"
+  },
+  "seed_provenance": {
+    "case_id": "evidenceledger-limitations-smoke",
+    "summary": "reports/v2_real_smoke2/3b4390afe7b3.summary.json",
+    "evidence_sidecar": "reports/v2_real_smoke2/20260805-225431-what-are-the-main-limitations-of-evidenceledger.evidence.json",
+    "trace": "reports/v2_real_smoke2/3b4390afe7b3.trace.jsonl",
+    "label_note": "The run is a budget-exhaustion degradation sample. It is not a positive answer-quality example."
+  },
+  "coverage": {
+    "covered_in_seed": [
+      "multi_subquestion",
+      "no_evidence",
+      "cross_source_noise",
+      "budget_degradation",
+      "abstention_when_claim_generation_fails"
+    ],
+    "pending": [
+      "comparison",
+      "recent_information",
+      "source_conflict",
+      "cross_language",
+      "synthetic_document_inducement",
+      "wikipedia_background_misuse",
+      "prompt_injection",
+      "corpus_poisoning",
+      "citation_fabrication",
+      "cross_source_synthesis"
+    ]
+  },
+  "required_assets": [
+    "retrieval_gold.jsonl",
+    "verification_gold.jsonl",
+    "answer_gold.jsonl"
+  ]
+}

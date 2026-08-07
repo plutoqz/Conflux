@@ -26,6 +26,8 @@ class V2State(TypedDict, total=False):
     _started_at: float
     _deadline_at: float
     _research_depth: str
+    _baseline_variant: str
+    _baseline_policy: dict
     _budget_state: dict
     _pipeline_stage: str
     _run_status: str
@@ -112,6 +114,7 @@ from .research_prompts import (
     VERIFICATION_PROMPT,
     VERIFICATION_SYSTEM,
 )
+from .sanitize import is_admissible_evidence_text
 from .source_status import EvidenceItem, SourceResult, parse_source_results
 from .tools.rag import create_rag_tool
 from .tools.web import create_web_tool
@@ -395,22 +398,50 @@ CREDIBILITY_PROMPT = """\u8bf7\u6839\u636e\u4ee5\u4e0b\u4e8b\u5b9e\u6570\u636e\u
 # State
 # ============================================================
 
+BASELINE_VARIANTS = frozenset({"B2", "B3", "B4"})
+
+
+def _normalize_baseline_variant(value: str | None) -> str:
+    variant = str(value or "B4").strip().upper()
+    if variant not in BASELINE_VARIANTS:
+        raise ValueError("baseline_variant must be one of: B2, B3, B4")
+    return variant
+
+
+def _baseline_policy(variant: str) -> dict[str, Any]:
+    return {
+        "variant": variant,
+        "hard_budget_enforced": variant == "B4",
+        "claim_verification_enabled": variant in {"B3", "B4"},
+        "correction_source_policy": (
+            "web_preferred_for_conflict_or_gap" if variant == "B4"
+            else "rag_first_when_available"
+        ),
+    }
+
+
 def _new_state(
     query: str,
     deadline_at: float | None = None,
     run_id: str | None = None,
     depth: str = "standard",
     timeout_seconds: int | None = None,
+    baseline_variant: str = "B4",
 ) -> dict[str, Any]:
     run_id = run_id or new_run_id()
+    baseline_variant = _normalize_baseline_variant(baseline_variant)
     ledger = EvidenceLedger(run_id=run_id)
     budget_state = BudgetState.for_depth(depth, timeout_seconds=timeout_seconds)
+    if baseline_variant != "B4":
+        budget_state.hard_limits = {}
     return {
         "query": query,
         "_run_id": run_id,
         "_started_at": time.time(),
         "_deadline_at": deadline_at,
         "_research_depth": depth,
+        "_baseline_variant": baseline_variant,
+        "_baseline_policy": _baseline_policy(baseline_variant),
         "_budget_state": budget_state.to_dict(),
         "_pipeline_stage": "init",
         "_run_status": "failed",
@@ -843,11 +874,10 @@ def _deterministic_claim_verification(
         evidence_by_id[item]
         for item in record.evidence_ids
         if item in evidence_by_id
-        and evidence_by_id[item].visibility == "primary"
-        and evidence_by_id[item].evidence_class in {
-            "peer_reviewed",
-            "preprint",
-            "authoritative_document",
+        and _record_is_generation_eligible(evidence_by_id[item])
+        and record.subquestion_id in {
+            evidence_by_id[item].subquestion_id,
+            *evidence_by_id[item].subquestion_ids,
         }
         and evidence_by_id[item].relationship == "supports"
     ]
@@ -887,6 +917,16 @@ def _deterministic_claim_verification(
                 "verdict": "insufficient",
                 "confidence": 0.0,
                 "reason": "derived analysis has incomplete derivation inputs",
+                "verifier_version": "rules-v1",
+            }
+        if any(
+            not _record_is_generation_eligible(evidence_by_id[item])
+            for item in record.derivation_inputs
+        ):
+            return {
+                "verdict": "insufficient",
+                "confidence": 0.0,
+                "reason": "derived analysis uses evidence that is not eligible for generation",
                 "verifier_version": "rules-v1",
             }
         return {
@@ -1130,12 +1170,7 @@ def attribution_audit_node(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-_LOW_QUALITY_EVIDENCE_MARKERS = (
-    "ingestion action:",
-    "relevance score:",
-    "press enter to search",
-    "advanced search",
-)
+_MIN_GENERATION_CLAIM_FITNESS = 0.60
 
 
 def _normalized_source_key(claim: EvidenceItem) -> str:
@@ -1158,10 +1193,25 @@ def _normalized_source_key(claim: EvidenceItem) -> str:
 
 def _usable_evidence_text(claim: EvidenceItem) -> str:
     text = re.sub(r"\s+", " ", claim.verbatim_quote or claim.claim).strip()
-    lowered = text.casefold()
-    if len(text) < 80 or any(marker in lowered for marker in _LOW_QUALITY_EVIDENCE_MARKERS):
-        return ""
-    return text
+    return text if is_admissible_evidence_text(text) else ""
+
+
+def _record_is_generation_eligible(record: Any) -> bool:
+    """Keep retrieval context visible without letting it ground report claims."""
+
+    if record.visibility != "primary":
+        return False
+    if record.evidence_class not in {"peer_reviewed", "preprint", "authoritative_document"}:
+        return False
+    if record.relationship not in {"supports", "contradicts", "limits", "context"}:
+        return False
+    if float(record.claim_fitness or 0.0) < _MIN_GENERATION_CLAIM_FITNESS:
+        return False
+    return bool(_usable_evidence_text(EvidenceItem(
+        claim=record.claim,
+        source=record.source_type,
+        verbatim_quote=record.verbatim_quote,
+    )))
 
 
 def _build_citation_map(rag_raw: str, web_raw: str) -> dict[str, str]:
@@ -1217,19 +1267,46 @@ def _section_citation_map(sub_question: str, citation_map: dict[str, str], limit
     存在一个 term/bigram 重叠的引用；全部无重叠时返回空 dict——宁可让该节
     走（分析判断），也不把无关证据错配给本节。
     """
+    # Function words are not topic terms: they must not count as "specific topic
+    # overlap" when a RAG anchor is also present.
+    _FUNCTION_WORDS = frozenset({
+        "how", "what", "why", "when", "where", "which", "who", "whom", "whose",
+        "does", "do", "did", "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "will", "would", "can", "could", "should", "may",
+        "might", "must", "the", "a", "an", "and", "or", "but", "of", "in", "on",
+        "at", "to", "for", "from", "with", "by", "about", "than", "that", "this",
+        "these", "those", "not", "no", "vs", "versus", "via",
+    })
     terms = {
         term.casefold()
         for term in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,}", sub_question)
+        if term.casefold() not in _FUNCTION_WORDS
     }
     for sequence in re.findall(r"[\u4e00-\u9fff]{2,}", sub_question):
         terms.update(sequence[index:index + 2] for index in range(len(sequence) - 1))
+    requires_rag_anchor = bool(re.search(
+        r"\brag\b|retrieval[- ]augmented",
+        sub_question,
+        flags=re.IGNORECASE,
+    ))
+    generic_rag_terms = {"rag", "retrieval", "retrieval-augmented", "augmented", "generation"}
     scored = []
     for position, (ref, description) in enumerate(citation_map.items()):
         lowered = description.casefold()
-        score = sum(1 for term in terms if term in lowered)
+        matched_terms = {term for term in terms if term in lowered}
+        score = len(matched_terms)
         if score == 0:
             # 无主题重叠：不分配该全局引用
             continue
+        if requires_rag_anchor:
+            has_rag_anchor = bool(re.search(
+                r"\brag\b|retrieval[- ]augmented",
+                lowered,
+                flags=re.IGNORECASE,
+            ))
+            topic_matches = matched_terms - generic_rag_terms
+            if not has_rag_anchor or not topic_matches:
+                continue
         scored.append((-score, position, ref, description))
     return {
         ref: description
@@ -1468,7 +1545,7 @@ def _build_citation_map_from_snapshot(snapshot: LedgerSnapshot) -> dict[str, str
     seen_claims: set[str] = set()
     index = 1
     for record in snapshot.primary_records():
-        if record.evidence_class not in {"peer_reviewed", "preprint", "authoritative_document"}:
+        if not _record_is_generation_eligible(record):
             continue
         evidence_text = _usable_evidence_text(
             EvidenceItem(
@@ -1544,7 +1621,11 @@ def _correction_proposals(state: dict[str, Any], snapshot: LedgerSnapshot) -> li
     for sub_question in state.get("_sub_questions") or []:
         subquestion_id = str(sub_question.get("id") or "")
         source_results = results.get(subquestion_id) or {}
-        records = primary_by_subquestion.get(subquestion_id, [])
+        records = [
+            record
+            for record in primary_by_subquestion.get(subquestion_id, [])
+            if _record_is_generation_eligible(record)
+        ]
         trigger = ""
         if any(record.relationship == "contradicts" for record in records):
             trigger = "conflict"
@@ -1567,7 +1648,10 @@ def _correction_proposals(state: dict[str, Any], snapshot: LedgerSnapshot) -> li
                 "Web",
             )
         else:
-            source = "Web" if state.get("_web_available", True) else "RAG"
+            if str(state.get("_baseline_variant") or "B4") == "B4":
+                source = "Web" if state.get("_web_available", True) else "RAG"
+            else:
+                source = "RAG" if state.get("_rag_available", True) else "Web"
         suffix = {
             "conflict": " official primary source conflict verification",
             "low_relevance": " focused evidence verification",
@@ -1951,10 +2035,13 @@ def _generate_section(
     error = ""
     usage: dict[str, int] = {}
 
-    # Detect empty evidence: both RAG and web returned nothing usable
-    rag_empty = not rag_results or rag_results.strip() in _EMPTY_EVIDENCE_MARKERS
-    web_empty = not web_results or web_results.strip() in _EMPTY_EVIDENCE_MARKERS
-    no_evidence = rag_empty and web_empty
+    # A nonempty provider payload is not evidence if the Ledger rejected every record.
+    if evidence_records is not None:
+        no_evidence = not evidence_records
+    else:
+        rag_empty = not rag_results or rag_results.strip() in _EMPTY_EVIDENCE_MARKERS
+        web_empty = not web_results or web_results.strip() in _EMPTY_EVIDENCE_MARKERS
+        no_evidence = rag_empty and web_empty
 
     if no_evidence:
         section_citations = {}
@@ -2034,6 +2121,15 @@ def _generate_section(
             "analysis_judgments": [str(item) for item in payload.get("analysis_judgments") or []],
             "key_claims": [str(item.get("text") or "") for item in claim_drafts],
             "body": _claim_draft_body(claim_drafts),
+        }
+    elif isinstance(payload, dict) and "claims" in payload:
+        parsed = {
+            "summary": str(payload.get("summary") or "").strip(),
+            "citation_refs": [],
+            "evidence_gaps": [str(item) for item in payload.get("evidence_gaps") or []],
+            "analysis_judgments": [str(item) for item in payload.get("analysis_judgments") or []],
+            "key_claims": [],
+            "body": str(payload.get("summary") or "").strip(),
         }
     else:
         parsed = _parse_section_summary(content)
@@ -2121,6 +2217,15 @@ def _build_claim_records(
     run_id = str(state.get("_run_id") or "")
     records: list[ClaimRecord] = []
     for section in sections:
+        allowed_evidence_ids = {
+            record.evidence_id
+            for record in snapshot.primary_records()
+            if section.sub_question_id in {
+                record.subquestion_id,
+                *record.subquestion_ids,
+            }
+            and _record_is_generation_eligible(record)
+        }
         drafts = section.claim_drafts or [
             {
                 "text": claim_text,
@@ -2135,13 +2240,26 @@ def _build_claim_records(
         ]
         for index, draft in enumerate(drafts, start=1):
             text = str(draft.get("text") or "").strip()
-            citation_refs = [str(value) for value in draft.get("citation_refs") or []]
-            evidence_ids = [str(value) for value in draft.get("evidence_ids") or []]
+            citation_refs = [
+                str(value)
+                for value in draft.get("citation_refs") or []
+                if str(value) in set(section.allowed_refs)
+            ]
+            evidence_ids = [
+                str(value)
+                for value in draft.get("evidence_ids") or []
+                if str(value) in allowed_evidence_ids
+            ]
             if not evidence_ids:
                 evidence_ids = _citation_evidence_ids(
                     state,
                     [ref for ref in citation_refs if ref in citation_map],
                 )
+                evidence_ids = [
+                    evidence_id
+                    for evidence_id in evidence_ids
+                    if evidence_id in allowed_evidence_ids
+                ]
             claim_type = str(draft.get("claim_type") or "model_analysis")
             importance = str(draft.get("importance") or "medium")
             if re.search(r"\d|%|日期|因果|导致|最高|最低|比较|优于|必须|禁止|仅限|不能|风险", text, re.IGNORECASE):
@@ -2254,7 +2372,13 @@ def _render_claim_record(record: ClaimRecord, citation_map: dict[str, str]) -> s
     return record.text + suffix
 
 
-def generate_node(state: dict[str, Any], model: Any, profile: ResearchModeProfile | None = None) -> dict[str, Any]:
+def generate_node(
+    state: dict[str, Any],
+    model: Any,
+    profile: ResearchModeProfile | None = None,
+    *,
+    max_parallel_subquestions: int | None = None,
+) -> dict[str, Any]:
     budget_state = _budget_state_for(state)
     if not _model_available(state, minimum=15.0):
         return {
@@ -2294,7 +2418,11 @@ def generate_node(state: dict[str, Any], model: Any, profile: ResearchModeProfil
             budget_state.add_drop("low_priority_sections_dropped")
             sub_questions = sub_questions[:generation_capacity]
 
-    max_concurrency = max(1, profile.max_parallel_subquestions) if profile else 3
+    max_concurrency = (
+        max(1, int(max_parallel_subquestions))
+        if max_parallel_subquestions is not None
+        else (max(1, profile.max_parallel_subquestions) if profile else 3)
+    )
     section_timeout = float(profile.role_timeout_seconds.get("synthesizer", profile.model_timeout_seconds)) if profile else 90.0
     deadline_s = state.get("_deadline_at", 0)
     results: list[SectionResult] = []
@@ -2958,6 +3086,8 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
     budget_consumed = _budget_state_for(state).to_dict()
     run_summary = {
         "mode": "answer_first",
+        "baseline_variant": str(state.get("_baseline_variant") or "B4"),
+        "baseline_policy": state.get("_baseline_policy") or _baseline_policy("B4"),
         "run_id": str(state.get("_run_id") or ""),
         "query": str(state.get("query") or ""),
         "run_status": str(state.get("_run_status") or "failed"),
@@ -3093,6 +3223,8 @@ def create_v2_research_graph(
     arbitration_model = kwargs.get("arbitration_model")
     verifier_model = kwargs.get("verifier_model")
     run_id = kwargs.get("run_id")
+    baseline_variant = _normalize_baseline_variant(kwargs.get("baseline_variant"))
+    replay_parallelism = kwargs.get("max_parallel_subquestions")
 
     deadline_at = kwargs.get("deadline_at")
     commit_reserve = float(kwargs.get("commit_reserve_seconds") or 30.0)
@@ -3139,7 +3271,15 @@ def create_v2_research_graph(
     graph.add_node("barrier", barrier_node)
     graph.add_node("arbitration", lambda s: arbitration_node(s, arbitration_model))
     graph.add_node("correction", lambda s: correction_node(s, rag_tool, web_tool))
-    graph.add_node("generate", lambda s: generate_node(s, synthesizer_model, profile))
+    graph.add_node(
+        "generate",
+        lambda s: generate_node(
+            s,
+            synthesizer_model,
+            profile,
+            max_parallel_subquestions=replay_parallelism,
+        ),
+    )
     graph.add_node("verification", lambda s: verification_node(s, verifier_model))
     graph.add_node("attribution_audit", attribution_audit_node)
     graph.add_node("synthesize", lambda s: synthesize_node(s, synthesizer_model))
@@ -3153,9 +3293,12 @@ def create_v2_research_graph(
     graph.add_edge("barrier", "arbitration")
     graph.add_edge("arbitration", "correction")
     graph.add_edge("correction", "generate")
-    graph.add_edge("generate", "verification")
-    graph.add_edge("verification", "attribution_audit")
-    graph.add_edge("attribution_audit", "synthesize")
+    if baseline_variant == "B2":
+        graph.add_edge("generate", "synthesize")
+    else:
+        graph.add_edge("generate", "verification")
+        graph.add_edge("verification", "attribution_audit")
+        graph.add_edge("attribution_audit", "synthesize")
     graph.add_edge("synthesize", "audit")
     graph.add_edge("audit", "finalize")
     graph.add_edge("finalize", "factcheck")

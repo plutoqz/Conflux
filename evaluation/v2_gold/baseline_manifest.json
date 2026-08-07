@@ -1,0 +1,18 @@
+{
+  "schema_version": "conflux-v2-baseline-v1",
+  "comparison_order": ["B0", "B1", "B2", "B3", "B4"],
+  "comparison_policy": {
+    "same_cases": true,
+    "same_replay_bundle": true,
+    "one_primary_variable_per_step": true,
+    "report_quality_latency_tokens_cost": true,
+    "missing_cost_must_remain_null": true
+  },
+  "conditions": [
+    {"id":"B0","status":"historical_reference","artifact":"reports/evaluation/v2_batch_deepseek/batch_result.json","note":"Historical live-provider reference; not replay-equivalent."},
+    {"id":"B1","status":"historical_frozen_snapshot","artifact":"reports/evaluation/v2_batch_b1/batch_result.json","note":"V2 wiring repair snapshot; existing blind-review metrics are retained."},
+    {"id":"B2","status":"fixed_replay_baseline","artifact":"reports/evaluation/v2_gold/baselines/B2/evidenceledger-limitations-replay.summary.json","evaluation":"reports/evaluation/v2_gold/baselines/B2/evaluation.json","note":"2026-08-06 controlled replay: per-subquestion retrieval and EvidenceLedger, without claim verification or attribution audit."},
+    {"id":"B3","status":"fixed_replay_baseline","artifact":"reports/evaluation/v2_gold/baselines/B3/evidenceledger-limitations-replay.summary.json","evaluation":"reports/evaluation/v2_gold/baselines/B3/evaluation.json","note":"2026-08-06 controlled replay: B2 plus selective claim verification and attribution audit; unified hard budget remains disabled."},
+    {"id":"B4","status":"fixed_replay_baseline","artifact":"reports/evaluation/v2_gold/baselines/B4/evidenceledger-limitations-replay.summary.json","evaluation":"reports/evaluation/v2_gold/baselines/B4/evaluation.json","note":"2026-08-06 controlled replay: B3 plus the depth-specific hard budget and Web-preferred correction-source policy."}
+  ]
+}

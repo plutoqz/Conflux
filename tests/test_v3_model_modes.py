@@ -239,6 +239,7 @@ def test_structured_claim_generation_populates_claim_record_protocol():
         content_hash="hash-a",
         source_type="Web",
         evidence_class="authoritative_document",
+        claim_fitness=0.95,
         claim="The source directly supports the atomic statement with enough context for verification.",
         verbatim_quote="The source directly supports the atomic statement with enough context for verification.",
     )
