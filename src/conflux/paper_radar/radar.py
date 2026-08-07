@@ -140,6 +140,12 @@ def run_paper_radar(
             stats=stats,
         )
         deep_read = min(len(deep_pairs), config.deep_read_limit)
+        if stats.needs_review_paper_ids:
+            needs_review_ids = set(stats.needs_review_paper_ids)
+            for link in links:
+                if link.paper_identity.canonical_id in needs_review_ids:
+                    link.status = PaperLinkStatus.NEEDS_REVIEW
+            stats.needs_review = len(needs_review_ids)
 
     # Write output if out_dir specified
     if out_dir:

@@ -284,6 +284,9 @@ class RadarRunStats(BaseModel):
     llm_total_tokens: int = 0
     llm_elapsed_ms: int = 0
     llm_fallback_count: int = 0
+    # P2 unreviewed semantics: LLM review failures must not auto-promote.
+    needs_review: int = 0
+    needs_review_paper_ids: list[str] = Field(default_factory=list)
     started_at: datetime = Field(default_factory=datetime.utcnow)
     finished_at: datetime | None = None
     elapsed_seconds: float = 0.0

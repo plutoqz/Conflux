@@ -393,6 +393,59 @@ class TestRadarPipeline:
 
 # ── Phase 1/2: Domain model extensions ────────────────────────────
 
+
+class TestUnreviewedSemantics:
+    def test_llm_review_failure_marks_link_needs_review(self, monkeypatch):
+        from conflux.core.p2_contracts import (
+            PaperIdentity,
+            PaperLinkStatus,
+            ProjectPaperLink,
+        )
+        from conflux.paper_radar.radar import run_paper_radar
+        from conflux.project_registry.models import ProjectDefinition
+        from conflux.research_profile import load_profile
+        from conflux.paper_ingestion.models import PaperRecord
+
+        def mock_execute(queries):
+            return [PaperRecord(
+                id="2401.00001", title="Test GIS Paper",
+                abstract="A test paper about GIS agents.",
+                source="arxiv", doi="10.1234/test",
+            )], []
+
+        def fake_links(papers, project_id, intents, context, relevance_scores=None):
+            return [ProjectPaperLink(
+                project_id=project_id,
+                paper_identity=PaperIdentity(source="arxiv", canonical_id="2401.00001"),
+                status=PaperLinkStatus.SHORTLISTED,
+                relevance=0.9,
+            )]
+
+        def fake_deep_analysis(papers, context, intents, *, download_dir=None,
+                               max_papers=5, llm_model=None, stats=None):
+            # Simulates an LLM review failure recorded by deep analysis.
+            assert stats is not None
+            stats.needs_review_paper_ids.append("2401.00001")
+            return []
+
+        monkeypatch.setattr("conflux.paper_radar.radar._execute_queries", mock_execute)
+        monkeypatch.setattr("conflux.paper_radar.radar._create_project_links", fake_links)
+        monkeypatch.setattr("conflux.paper_radar.radar.run_deep_analysis", fake_deep_analysis)
+
+        proj = ProjectDefinition(id="test", name="Test", path=".")
+        proj.plan.overall_goal = "Test goal"
+        proj.research = {"profile": "profiles/example_gis_agent.yaml", "deep_read_limit": 1}
+        profile = load_profile("profiles/example_gis_agent.yaml", validate=False)
+
+        result = run_paper_radar(proj, profile)
+
+        assert result.links[0].status == PaperLinkStatus.NEEDS_REVIEW
+        assert result.stats.needs_review == 1
+        assert result.stats.needs_review_paper_ids == ["2401.00001"]
+        # Deterministic fallback suggestions still visible, but the link is not auto-promoted.
+        assert result.stats.saved == 0
+
+
 class TestDomainExtensions:
     def test_research_profile_loads_tracks(self):
         from conflux.research_profile import load_profile

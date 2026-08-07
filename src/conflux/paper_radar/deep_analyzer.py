@@ -162,10 +162,19 @@ def _analyze_one_paper(
             stats.llm_total_tokens += telemetry["total_tokens"]
             stats.llm_elapsed_ms += telemetry["elapsed_ms"]
             stats.llm_fallback_count += 1 if telemetry["fell_back"] else 0
-        if llm_suggestions:
+        if telemetry["reviewed"]:
+            # The LLM completed the review; its verdict (even no suggestions)
+            # wins and must not be overwritten by the deterministic fallback.
             return llm_suggestions
+        if stats is not None:
+            paper_id = str(
+                paper_dict.get("id") or link.paper_identity.canonical_id or ""
+            )
+            if paper_id and paper_id not in stats.needs_review_paper_ids:
+                stats.needs_review_paper_ids.append(paper_id)
 
-    # Step 4: Deterministic keyword analysis (legacy fallback)
+    # Step 4: Deterministic keyword analysis (legacy fallback; only when the
+    # LLM is absent or its review failed)
     scored_chunks = _score_chunks(chunks, context)
 
     # Step 4: Generate suggestions based on evidence
@@ -268,7 +277,13 @@ def _llm_analyze_paper(
     total_tokens, elapsed_ms and fell_back.  An empty suggestion list signals
     the caller to fall back to the deterministic analysis.
     """
-    telemetry = {"calls": 1, "total_tokens": 0, "elapsed_ms": 0, "fell_back": False}
+    telemetry = {
+        "calls": 1,
+        "total_tokens": 0,
+        "elapsed_ms": 0,
+        "fell_back": False,
+        "reviewed": False,
+    }
     started = time.monotonic()
 
     # Build the prompt — abstract-first, top full-text chunks when available.
@@ -308,13 +323,12 @@ def _llm_analyze_paper(
         telemetry["fell_back"] = True
         return [], telemetry
 
+    telemetry["reviewed"] = True
     suggestions = _llm_payload_to_suggestions(
         payload=payload,
         link=link,
         run_id=run_id,
     )
-    if not suggestions:
-        telemetry["fell_back"] = True
     return suggestions, telemetry
 
 

@@ -165,7 +165,7 @@ class TestLLMAnalysisFallback:
         assert telemetry["fell_back"] is True
         assert telemetry["total_tokens"] == 120
 
-    def test_empty_suggestions_falls_back(self):
+    def test_empty_suggestions_is_a_completed_review(self):
         model = _FakeLLM(json.dumps({"relevance": 0.1, "suggestions": []}))
         link = _link()
         suggestions, telemetry = _llm_analyze_paper(
@@ -177,7 +177,8 @@ class TestLLMAnalysisFallback:
             llm_model=model,
         )
         assert suggestions == []
-        assert telemetry["fell_back"] is True
+        assert telemetry["reviewed"] is True
+        assert telemetry["fell_back"] is False
 
 
 class TestRunDeepAnalysisWithLLM:
@@ -282,3 +283,41 @@ class TestParseLLMJson:
         assert _parse_llm_json("no braces here") is None
         assert _parse_llm_json("{bad") is None
         assert _parse_llm_json("") is None
+
+
+class TestRunDeepAnalysisUnreviewedSemantics:
+    def test_llm_failure_marks_paper_needs_review(self):
+        class _Boom:
+            def invoke(self, messages):
+                raise RuntimeError("timeout")
+
+        stats = RadarRunStats(project_id="test", run_id="run-1")
+        suggestions = run_deep_analysis(
+            [(_link("2401.00001"), _paper_dict(abstract="GIS agents with knowledge graphs"))],
+            _context(),
+            [],
+            max_papers=1,
+            llm_model=_Boom(),
+            stats=stats,
+        )
+        # Deterministic fallback still offers provisional suggestions...
+        assert len(suggestions) >= 1
+        # ...but the paper is recorded as needs_review (unreviewed semantics).
+        assert stats.needs_review_paper_ids == ["2401.00001"]
+        assert stats.llm_fallback_count == 1
+
+    def test_llm_empty_suggestions_are_not_overwritten_by_fallback(self):
+        model = _FakeLLM(json.dumps({"relevance": 0.1, "suggestions": []}))
+        stats = RadarRunStats(project_id="test", run_id="run-1")
+        suggestions = run_deep_analysis(
+            [(_link("2401.00001"), _paper_dict(abstract="GIS agents with knowledge graphs"))],
+            _context(),
+            [],
+            max_papers=1,
+            llm_model=model,
+            stats=stats,
+        )
+        # The LLM reviewed the paper as irrelevant: no deterministic override.
+        assert suggestions == []
+        assert stats.needs_review_paper_ids == []
+        assert stats.llm_fallback_count == 0

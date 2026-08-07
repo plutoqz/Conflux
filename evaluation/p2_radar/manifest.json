@@ -1,0 +1,32 @@
+{
+  "schema_version": "conflux-p2-radar-labels-v1",
+  "dataset_id": "p2-radar-seed-20260808",
+  "annotation_status": "seed_draft_from_smoke_suggestions",
+  "project": {
+    "id": "radar-smoke",
+    "profile": "profiles/example_gis_agent.yaml",
+    "overall_goal": "验证知识图谱增强 GIS Agent 工作流的有效性与可复现性",
+    "source_run": "reports/eval/paper_radar/paper_radar_smoke.json"
+  },
+  "annotation_policy": {
+    "relevance": {
+      "0": "irrelevant to project goal",
+      "1": "background or weakly related",
+      "2": "relevant and potentially useful",
+      "3": "directly addresses project goal / methods"
+    },
+    "research_value": {
+      "0": "none",
+      "1": "low",
+      "2": "medium",
+      "3": "high"
+    },
+    "evidence_quality": {
+      "0": "no evidence",
+      "1": "abstract only",
+      "2": "partial text",
+      "3": "full-text grounded"
+    }
+  },
+  "label_note": "Seed labels drafted from smoke-run suggestion summaries on 2026-08-08. They demonstrate the labeling schema only; final labels require manual review on real candidate lists."
+}
