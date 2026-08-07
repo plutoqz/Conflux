@@ -535,7 +535,9 @@ def _top_chunk_refs(scored_chunks: list[dict[str, Any]], n: int) -> list[str]:
     for chunk in scored_chunks[:n]:
         if chunk.get("score", 0) > 0:
             refs.append(f"p{chunk['page']}:c{chunk['chunk_idx']}")
-    return refs if refs else ["abstract"]
+    # "abstract" is a valid fallback only when an abstract chunk exists;
+    # metadata-only papers must not claim evidence they do not have.
+    return refs if refs else (["abstract"] if scored_chunks else [])
 
 
 def _evidence_confidence(scored_chunks: list[dict[str, Any]]) -> float:
@@ -609,6 +611,11 @@ def _make_suggestion(
     raw = f"{link.project_id}-{link.paper_identity.canonical_id}-{s_type.value}-{summary[:40]}"
     sid = hashlib.sha256(raw.encode()).hexdigest()[:12]
 
+    evidence_kind = (
+        "no available evidence"
+        if not evidence_refs
+        else ("full text" if evidence_refs[0] != "abstract" else "abstract")
+    )
     return ProjectImpactSuggestion(
         id=sid,
         project_id=link.project_id,
@@ -616,7 +623,7 @@ def _make_suggestion(
         type=s_type,
         target_id=target_id,
         summary=summary,
-        rationale=f"Based on analysis of {'full text' if evidence_refs[0] != 'abstract' else 'abstract'} analysis. "
+        rationale=f"Based on analysis of {evidence_kind} analysis. "
                   f"Evidence refs: {', '.join(evidence_refs[:3])}.",
         evidence_refs=evidence_refs,
         confidence=confidence,
