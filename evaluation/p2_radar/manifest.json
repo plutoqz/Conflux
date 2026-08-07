@@ -1,12 +1,12 @@
 {
   "schema_version": "conflux-p2-radar-labels-v1",
-  "dataset_id": "p2-radar-seed-20260808",
-  "annotation_status": "seed_draft_from_smoke_suggestions",
+  "dataset_id": "p2-radar-real-20260808",
+  "annotation_status": "agent_labeled_20260808_pending_spotcheck",
   "project": {
     "id": "radar-smoke",
     "profile": "profiles/example_gis_agent.yaml",
     "overall_goal": "验证知识图谱增强 GIS Agent 工作流的有效性与可复现性",
-    "source_run": "reports/eval/paper_radar/paper_radar_smoke.json"
+    "source_run": "reports/evaluation/p2_radar/label_run/radar_run.json"
   },
   "annotation_policy": {
     "relevance": {
@@ -28,5 +28,5 @@
       "3": "full-text grounded"
     }
   },
-  "label_note": "Seed labels drafted from smoke-run suggestion summaries on 2026-08-08. They demonstrate the labeling schema only; final labels require manual review on real candidate lists."
+  "label_note": "75 candidates labeled by codex-agent on behalf of the user on 2026-08-08 from a real arXiv multi-Track retrieval (5 QuerySpecs, 3 tracks). Labels are based on title+abstract against the project goal (knowledge-graph-augmented GIS agent verification/reproducibility). Evidence quality is abstract-only (1). Spot-check recommended before treating as final."
 }
