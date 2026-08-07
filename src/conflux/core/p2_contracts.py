@@ -289,6 +289,10 @@ class RadarRunStats(BaseModel):
     needs_review_paper_ids: list[str] = Field(default_factory=list)
     # P2 project-scoped state: stable rejects are not re-reviewed on repeat runs.
     skipped_seen_rejected: int = 0
+    # P2 query-level reporting: one entry per executed QuerySpec.
+    query_stats: list[dict[str, Any]] = Field(default_factory=list)
+    # P2 query-level reporting: one entry per executed QuerySpec.
+    query_stats: list[dict[str, Any]] = Field(default_factory=list)
     started_at: datetime = Field(default_factory=datetime.utcnow)
     finished_at: datetime | None = None
     elapsed_seconds: float = 0.0

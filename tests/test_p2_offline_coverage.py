@@ -38,12 +38,16 @@ class TestSourceResilience:
         monkeypatch.setattr(
             "conflux.paper_ingestion.semantic_scholar_source.search_semantic_scholar", ok
         )
+        stats = RadarRunStats(project_id="test", run_id="r")
         papers, failed = _execute_queries([
             _spec(PaperSource.ARXIV, "gis agent"),
             _spec(PaperSource.SEMANTIC_SCHOLAR, "gis agent"),
-        ])
+        ], stats=stats)
         assert len(papers) == 1
         assert failed == ["arxiv"]
+        assert stats.query_stats[0]["failed"] is True
+        assert stats.query_stats[1]["failed"] is False
+        assert stats.query_stats[1]["candidate_count"] == 1
 
     def test_multi_source_queries_merge_results(self, monkeypatch):
         def arxiv(query, *, max_results=10, start=0):
@@ -56,13 +60,16 @@ class TestSourceResilience:
         monkeypatch.setattr(
             "conflux.paper_ingestion.semantic_scholar_source.search_semantic_scholar", s2
         )
+        stats = RadarRunStats(project_id="test", run_id="r")
         papers, failed = _execute_queries([
             _spec(PaperSource.ARXIV, "q1"),
             _spec(PaperSource.ARXIV, "q2"),
             _spec(PaperSource.SEMANTIC_SCHOLAR, "q1"),
-        ])
+        ], stats=stats)
         assert len(papers) == 3
         assert failed == []
+        assert len(stats.query_stats) == 3
+        assert all(not item["failed"] for item in stats.query_stats)
 
 
 class TestMetadataOnly:
@@ -141,7 +148,7 @@ class TestNoAutoPromotion:
         from conflux.project_registry.models import ProjectDefinition
         from conflux.research_profile import load_profile
 
-        def mock_execute(queries):
+        def mock_execute(queries, stats=None):
             return [PaperRecord(
                 id="2401.00001", title="Test GIS Paper",
                 abstract="A test paper about GIS agents.",

@@ -81,6 +81,24 @@ def test_aggregate():
     assert agg["analysis"]["total_llm_fallback"] == 2
 
 
+
+
+def test_queries_report_groups_by_track_and_failure():
+    run = _run()
+    run["stats"]["query_stats"] = [
+        {"query_id": "q-1", "track_id": "track-a", "source": "arxiv", "candidate_count": 5, "failed": False},
+        {"query_id": "q-2", "track_id": "track-a", "source": "arxiv", "candidate_count": 3, "failed": False},
+        {"query_id": "q-3", "track_id": "track-b", "source": "semantic_scholar", "candidate_count": 0, "failed": True},
+    ]
+    result = evaluate_p2_run(run, _labels())
+    queries = result["queries"]
+    assert queries["query_count"] == 3
+    assert queries["failed_query_count"] == 1
+    assert queries["by_track"]["track-a"]["query_count"] == 2
+    assert queries["by_track"]["track-a"]["candidate_count"] == 8
+    assert queries["by_track"]["track-b"]["failed_count"] == 1
+
+
 def test_repository_labels_loadable():
     labels = load_p2_labels("evaluation/p2_radar/labels.jsonl")
     assert len(labels) >= 3

@@ -89,8 +89,16 @@ def run_paper_radar(
     # Step 3: Resolve query specs
     queries = resolve_query_specs_from_profile(profile, config=config, context=context)
 
+    # Stats are created up-front so query execution and deep analysis can
+    # record telemetry (query-level results, LLM calls, tokens).
+    stats = RadarRunStats(
+        project_id=project.id,
+        run_id=run_id,
+        started_at=__import__("datetime").datetime.utcnow(),
+    )
+
     # Step 4: Execute queries against sources
-    all_papers, failed_sources = _execute_queries(queries)
+    all_papers, failed_sources = _execute_queries(queries, stats=stats)
 
     # Step 5: De-duplicate and filter
     unique_papers = _deduplicate_papers(all_papers)
@@ -115,12 +123,6 @@ def run_paper_radar(
     # Project-scoped seen state: stable rejects are not re-reviewed.
     project_seen = _load_project_seen(out_dir, project.id) if out_dir else {}
     skipped_seen_rejected = 0
-    # Stats are created up-front so deep analysis can record LLM telemetry.
-    stats = RadarRunStats(
-        project_id=project.id,
-        run_id=run_id,
-        started_at=__import__("datetime").datetime.utcnow(),
-    )
     shortlisted_links = [link for link in links if link.status == PaperLinkStatus.SHORTLISTED]
     if config.deep_read_limit > 0 and shortlisted_links:
         deep_pairs = []
@@ -222,11 +224,15 @@ def _parse_sources(raw: list[str] | str | None) -> list[PaperSource]:
     return result or [PaperSource.ARXIV, PaperSource.SEMANTIC_SCHOLAR]
 
 
-def _execute_queries(queries: list) -> tuple[list[PaperRecord], list[str]]:
+def _execute_queries(
+    queries: list,
+    stats: RadarRunStats | None = None,
+) -> tuple[list[PaperRecord], list[str]]:
     """Execute QuerySpec objects against their paper sources.
 
     Returns (all_papers, failed_sources).
-    Falls back gracefully when a source is unavailable.
+    Falls back gracefully when a source is unavailable.  When ``stats`` is
+    provided, per-query results are recorded for query-level reporting.
     """
     import logging
 
@@ -236,8 +242,17 @@ def _execute_queries(queries: list) -> tuple[list[PaperRecord], list[str]]:
     logger = logging.getLogger(__name__)
     all_papers: list[PaperRecord] = []
     failed: set[str] = set()
+    per_query: list[dict[str, Any]] = []
 
     for spec in queries:
+        query_id = str(spec.id or "")
+        entry: dict[str, Any] = {
+            "query_id": query_id,
+            "track_id": str(spec.track_id or ""),
+            "source": str(spec.source.value if hasattr(spec.source, "value") else spec.source),
+            "candidate_count": 0,
+            "failed": False,
+        }
         try:
             if spec.source == PaperSource.ARXIV:
                 papers = search_arxiv(spec.query, max_results=spec.max_results)
@@ -249,12 +264,18 @@ def _execute_queries(queries: list) -> tuple[list[PaperRecord], list[str]]:
             else:
                 logger.warning("Unknown source: %s", spec.source)
                 failed.add(str(spec.source.value))
+                entry["failed"] = True
+                per_query.append(entry)
                 continue
+            entry["candidate_count"] = len(papers)
             all_papers.extend(papers)
         except Exception:
             failed.add(spec.source.value)
-            continue
+            entry["failed"] = True
+        per_query.append(entry)
 
+    if stats is not None:
+        stats.query_stats = per_query
     return all_papers, sorted(failed)
 
 

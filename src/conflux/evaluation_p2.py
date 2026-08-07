@@ -119,9 +119,25 @@ def evaluate_p2_run(run: Any, labels: list[dict[str, Any]]) -> dict[str, Any]:
         round(len(failed_sources) / source_total, 4) if source_total else None
     )
 
+    query_stats = [item for item in stats.get("query_stats") or [] if isinstance(item, dict)]
+    per_track: dict[str, dict[str, Any]] = {}
+    for entry in query_stats:
+        track_id = str(entry.get("track_id") or "")
+        bucket = per_track.setdefault(track_id, {"query_count": 0, "failed_count": 0, "candidate_count": 0})
+        bucket["query_count"] += 1
+        bucket["candidate_count"] += int(entry.get("candidate_count") or 0)
+        if entry.get("failed"):
+            bucket["failed_count"] += 1
+
     return {
         "schema_version": P2_LABELS_SCHEMA_VERSION,
         "retrieval": retrieval,
+        "queries": {
+            "query_count": len(query_stats),
+            "failed_query_count": sum(1 for item in query_stats if item.get("failed")),
+            "by_query": query_stats,
+            "by_track": per_track,
+        },
         "duplicate_handling": {
             "total_candidates": total_candidates,
             "after_dedup": after_dedup,

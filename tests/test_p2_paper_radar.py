@@ -269,7 +269,7 @@ class TestRadarPipeline:
         from conflux.research_profile import load_profile
         from conflux.paper_ingestion.models import PaperRecord
 
-        def mock_execute(queries):
+        def mock_execute(queries, stats=None):
             return [PaperRecord(
                 id="2401.00001",
                 title="Test GIS Paper",
@@ -303,7 +303,7 @@ class TestRadarPipeline:
         from conflux.research_profile import load_profile
         from conflux.paper_ingestion.models import PaperRecord
 
-        def mock_execute(queries):
+        def mock_execute(queries, stats=None):
             return [PaperRecord(
                 id="2401.00001", title="Test",
                 abstract="Test abstract.", source="arxiv",
@@ -369,7 +369,7 @@ class TestRadarPipeline:
 
         monkeypatch.setattr(
             "conflux.paper_radar.radar._execute_queries",
-            lambda queries: ([PaperRecord(
+            lambda queries, stats=None: ([PaperRecord(
                 id="unrelated",
                 title="Marine biology survey",
                 abstract="Protein folding in marine organisms.",
@@ -406,7 +406,7 @@ class TestUnreviewedSemantics:
         from conflux.research_profile import load_profile
         from conflux.paper_ingestion.models import PaperRecord
 
-        def mock_execute(queries):
+        def mock_execute(queries, stats=None):
             return [PaperRecord(
                 id="2401.00001", title="Test GIS Paper",
                 abstract="A test paper about GIS agents.",
@@ -459,7 +459,7 @@ class TestProjectSeenState:
         from conflux.research_profile import load_profile
         from conflux.paper_ingestion.models import PaperRecord
 
-        def mock_execute(queries):
+        def mock_execute(queries, stats=None):
             return [PaperRecord(
                 id="2401.00001", title="Test GIS Paper",
                 abstract="A test paper about GIS agents.",
