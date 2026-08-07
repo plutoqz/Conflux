@@ -446,6 +446,87 @@ class TestUnreviewedSemantics:
         assert result.stats.saved == 0
 
 
+
+class TestProjectSeenState:
+    def _radar_fixture(self, monkeypatch, tmp_path):
+        from conflux.core.p2_contracts import (
+            PaperIdentity,
+            PaperLinkStatus,
+            ProjectPaperLink,
+        )
+        from conflux.paper_radar.radar import run_paper_radar
+        from conflux.project_registry.models import ProjectDefinition
+        from conflux.research_profile import load_profile
+        from conflux.paper_ingestion.models import PaperRecord
+
+        def mock_execute(queries):
+            return [PaperRecord(
+                id="2401.00001", title="Test GIS Paper",
+                abstract="A test paper about GIS agents.",
+                source="arxiv", doi="10.1234/test",
+            )], []
+
+        def fake_links(papers, project_id, intents, context, relevance_scores=None):
+            return [ProjectPaperLink(
+                project_id=project_id,
+                paper_identity=PaperIdentity(source="arxiv", canonical_id="2401.00001"),
+                status=PaperLinkStatus.SHORTLISTED,
+                relevance=0.9,
+            )]
+
+        called = {"deep": 0}
+
+        def fake_deep_analysis(papers, context, intents, *, download_dir=None,
+                               max_papers=5, llm_model=None, stats=None):
+            called["deep"] += 1
+            return []
+
+        monkeypatch.setattr("conflux.paper_radar.radar._execute_queries", mock_execute)
+        monkeypatch.setattr("conflux.paper_radar.radar._create_project_links", fake_links)
+        monkeypatch.setattr("conflux.paper_radar.radar.run_deep_analysis", fake_deep_analysis)
+
+        proj = ProjectDefinition(id="test", name="Test", path=".")
+        proj.plan.overall_goal = "Test goal"
+        proj.research = {"profile": "profiles/example_gis_agent.yaml", "deep_read_limit": 5}
+        profile = load_profile("profiles/example_gis_agent.yaml", validate=False)
+        return run_paper_radar(proj, profile, out_dir=str(tmp_path)), called
+
+    def test_stable_rejected_is_not_re_reviewed(self, monkeypatch, tmp_path):
+        from conflux.paper_radar.radar import _project_seen_path
+        seen_path = _project_seen_path(tmp_path, "test")
+        seen_path.parent.mkdir(parents=True, exist_ok=True)
+        seen_path.write_text(
+            '{"arxiv:2401.00001": {"status": "rejected", "at": "2026-08-08T00:00:00"}}',
+            encoding="utf-8",
+        )
+
+        result, called = self._radar_fixture(monkeypatch, tmp_path)
+
+        assert called["deep"] == 0
+        assert result.stats.skipped_seen_rejected == 1
+        assert result.stats.deep_read == 0
+
+    def test_run_persists_seen_state_and_isolation(self, monkeypatch, tmp_path):
+        from conflux.paper_radar.radar import (
+            _load_project_seen,
+            _project_seen_path,
+            _save_project_seen,
+        )
+
+        result, called = self._radar_fixture(monkeypatch, tmp_path)
+
+        seen_path = _project_seen_path(tmp_path, "test")
+        assert seen_path.exists()
+        seen = _load_project_seen(tmp_path, "test")
+        assert seen["arxiv:2401.00001"]["status"] == "shortlisted"
+        # Another project is isolated from this seen state.
+        assert _load_project_seen(tmp_path, "other-project") == {}
+        # Persist into a different project and confirm it stays separate.
+        _save_project_seen(tmp_path, "other-project", result.links)
+        assert _load_project_seen(tmp_path, "other-project")["arxiv:2401.00001"]["status"] == "shortlisted"
+        assert _load_project_seen(tmp_path, "test")["arxiv:2401.00001"]["status"] == "shortlisted"
+
+
 class TestDomainExtensions:
     def test_research_profile_loads_tracks(self):
         from conflux.research_profile import load_profile

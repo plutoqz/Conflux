@@ -112,6 +112,9 @@ def run_paper_radar(
     # Step 7: Run deep analysis on top-N papers (D: full-text evidence)
     suggestions: list[ProjectImpactSuggestion] = []
     deep_read = 0
+    # Project-scoped seen state: stable rejects are not re-reviewed.
+    project_seen = _load_project_seen(out_dir, project.id) if out_dir else {}
+    skipped_seen_rejected = 0
     # Stats are created up-front so deep analysis can record LLM telemetry.
     stats = RadarRunStats(
         project_id=project.id,
@@ -120,25 +123,31 @@ def run_paper_radar(
     )
     shortlisted_links = [link for link in links if link.status == PaperLinkStatus.SHORTLISTED]
     if config.deep_read_limit > 0 and shortlisted_links:
-        deep_pairs = [
-            (link, paper_map.get(link.paper_identity.canonical_id, {}).to_dict()
-             if paper_map.get(link.paper_identity.canonical_id)
-             else {"id": link.paper_identity.canonical_id})
-            for link in shortlisted_links
-        ]
+        deep_pairs = []
+        for link in shortlisted_links:
+            seen_key = _seen_key(link)
+            if seen_key in project_seen and project_seen[seen_key].get("status") == "rejected":
+                skipped_seen_rejected += 1
+                continue
+            deep_pairs.append(
+                (link, paper_map.get(link.paper_identity.canonical_id, {}).to_dict()
+                 if paper_map.get(link.paper_identity.canonical_id)
+                 else {"id": link.paper_identity.canonical_id})
+            )
         # Semantic LLM deep analysis (Phase P2): review_model is a chat model
         # created by the caller; llm_review gates the LLM path.  Without it,
         # deterministic keyword analysis is used as the safety net.
-        llm_model = review_model if (llm_review and review_model is not None) else None
-        suggestions = run_deep_analysis(
-            deep_pairs,
-            context,
-            intents,
-            download_dir=(Path(out_dir) / "pdf_cache") if out_dir else None,
-            max_papers=config.deep_read_limit,
-            llm_model=llm_model,
-            stats=stats,
-        )
+        if deep_pairs:
+            llm_model = review_model if (llm_review and review_model is not None) else None
+            suggestions = run_deep_analysis(
+                deep_pairs,
+                context,
+                intents,
+                download_dir=(Path(out_dir) / "pdf_cache") if out_dir else None,
+                max_papers=config.deep_read_limit,
+                llm_model=llm_model,
+                stats=stats,
+            )
         deep_read = min(len(deep_pairs), config.deep_read_limit)
         if stats.needs_review_paper_ids:
             needs_review_ids = set(stats.needs_review_paper_ids)
@@ -146,8 +155,11 @@ def run_paper_radar(
                 if link.paper_identity.canonical_id in needs_review_ids:
                     link.status = PaperLinkStatus.NEEDS_REVIEW
             stats.needs_review = len(needs_review_ids)
+        stats.skipped_seen_rejected = skipped_seen_rejected
 
     # Write output if out_dir specified
+    if out_dir:
+        _save_project_seen(out_dir, project.id, links)
     if out_dir:
         _write_radar_output(out_dir, project.id, run_id, context, intents, queries, links)
 
@@ -291,6 +303,49 @@ def _create_project_links(
         )
         links.append(link)
     return links
+
+
+def _seen_key(link: ProjectPaperLink) -> str:
+    """Project-independent paper identity key used in project seen state."""
+    identity = link.paper_identity
+    return f"{identity.source}:{identity.canonical_id}"
+
+
+def _project_seen_path(out_dir: str | Path, project_id: str) -> Path:
+    return Path(out_dir) / project_id / "papers" / "seen.json"
+
+
+def _load_project_seen(out_dir: str | Path, project_id: str) -> dict[str, Any]:
+    """Load project-scoped seen state; missing/corrupt state is treated as empty."""
+    import json as _json
+    path = _project_seen_path(out_dir, project_id)
+    if not path.exists():
+        return {}
+    try:
+        payload = _json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_project_seen(out_dir: str | Path, project_id: str, links: list[ProjectPaperLink]) -> None:
+    """Persist project-scoped seen state (atomic write)."""
+    import json as _json
+    from datetime import datetime as _datetime
+
+    path = _project_seen_path(out_dir, project_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    seen = _load_project_seen(out_dir, project_id)
+    now = _datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+    for link in links:
+        key = _seen_key(link)
+        seen[key] = {
+            "status": str(link.status.value if hasattr(link.status, "value") else link.status),
+            "at": now,
+        }
+    temp_path = path.with_suffix(".tmp")
+    temp_path.write_text(_json.dumps(seen, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(path)
 
 
 def _write_radar_output(
