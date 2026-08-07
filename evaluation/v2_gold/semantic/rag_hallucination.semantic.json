@@ -1,0 +1,176 @@
+{
+  "schema_version": "conflux-v2-gold-semantic-v1",
+  "case_id": "rag-hallucination-verification",
+  "query": "What evidence shows that retrieval-augmented generation reduces hallucination, and what limitations remain for research-report verification?",
+  "annotation_status": "manual_reviewed",
+  "annotation_policy": {
+    "retrieval_grade": {
+      "0": "irrelevant, off-domain, or matches a negative semantic",
+      "2": "partially relevant: matches at least one aspect keyword without a positive semantic",
+      "3": "directly answers the aspect: matches a positive semantic (or keyword set)"
+    },
+    "negative_semantics": "prompt/instruction text, ingestion metadata, boilerplate, or known off-domain content; any evidence matching these is grade 0 and must not support a claim",
+    "verification_verdicts": [
+      "supports",
+      "contradicts",
+      "insufficient",
+      "uncertain"
+    ]
+  },
+  "negative_semantics": [
+    "provide your assessment",
+    "relevance_scores",
+    "you are an expert in",
+    "source_type:",
+    "paper_id:",
+    "ingestion_action:",
+    "chunk_id:",
+    "press enter to search",
+    "advanced search",
+    "learn more",
+    "traceback",
+    "unicodeencodeerror",
+    "gaze anticipation",
+    "behavioral cues",
+    "physiological signals"
+  ],
+  "aspects": [
+    {
+      "aspect_id": "asp-1",
+      "aspect": "实验或基准测试证据表明 RAG 能减少大模型幻觉",
+      "keywords": [
+        "benchmark",
+        "hotpotqa",
+        "halubench",
+        "mega-rag",
+        "empirical",
+        "grounding",
+        "实证",
+        "基准",
+        "实验"
+      ],
+      "positive_semantics": [
+        "grounding generation on retrieved evidence reduces hallucinations",
+        "empirical evidence from benchmarks demonstrates",
+        "reduces hallucination",
+        "reducing hallucination"
+      ],
+      "expected_policy": "verify"
+    },
+    {
+      "aspect_id": "asp-2",
+      "aspect": "RAG 与微调、提示工程在减少幻觉上的对比与适用场景",
+      "keywords": [
+        "fine-tuning",
+        "fine tuning",
+        "prompt engineering",
+        "rag vs",
+        "comparison",
+        "when to use rag",
+        "微调",
+        "提示工程",
+        "对比"
+      ],
+      "positive_semantics": [
+        "use rag when",
+        "use fine-tuning when",
+        "rag vs fine-tuning",
+        "choosing the right method"
+      ],
+      "expected_policy": "verify"
+    },
+    {
+      "aspect_id": "asp-3",
+      "aspect": "RAG 在研究报告验证中的具体挑战与局限（检索质量、长文档、多源矛盾、错误传播）",
+      "keywords": [
+        "retrieval quality",
+        "grounding fidelity",
+        "long document",
+        "contradiction",
+        "error propagation",
+        "robustness",
+        "pipeline efficiency",
+        "检索质量",
+        "长文档",
+        "矛盾",
+        "错误传播"
+      ],
+      "positive_semantics": [
+        "introduces new challenges in retrieval quality",
+        "retrieval pitfalls",
+        "long documents, which can lead to retrieval failures",
+        "multi-source contradictions"
+      ],
+      "expected_policy": "verify"
+    },
+    {
+      "aspect_id": "asp-4",
+      "aspect": "无法被检索纠正的幻觉类型（逻辑/推理错误）",
+      "keywords": [
+        "compositional",
+        "reasoning error",
+        "logical error",
+        "per-item accuracy",
+        "frontier llm",
+        "推理错误",
+        "逻辑错误",
+        "组合"
+      ],
+      "positive_semantics": [
+        "score 0% on compositional items",
+        "errors at both the information retrieval and response generation levels",
+        "still produce hallucinations due to generative model limitations"
+      ],
+      "expected_policy": "verify"
+    },
+    {
+      "aspect_id": "asp-5",
+      "aspect": "克服 RAG 验证局限的改进方法与未来趋势",
+      "keywords": [
+        "iterative retrieval",
+        "multi-source",
+        "semantic search",
+        "future directions",
+        "systematic review",
+        "progress, gaps",
+        "迭代检索",
+        "多源",
+        "未来",
+        "趋势",
+        "改进"
+      ],
+      "positive_semantics": [
+        "evolving from simple retrieve-then-generate to sophisticated iterative processes",
+        "progress, gaps, and future directions",
+        "semantic search enhances rag results"
+      ],
+      "expected_policy": "verify"
+    },
+    {
+      "aspect_id": "asp-6",
+      "aspect": "RAG 减少幻觉的机制（检索质量、上下文融合）",
+      "keywords": [
+        "mechanism",
+        "context integration",
+        "context fusion",
+        "retrieval-augmented generation",
+        "external knowledge",
+        "机制",
+        "上下文",
+        "融合"
+      ],
+      "positive_semantics": [
+        "combining them with external knowledge sources",
+        "retrieves and incorporate new information from external data sources",
+        "efficiency in adapting large language models without training"
+      ],
+      "expected_policy": "abstain"
+    }
+  ],
+  "answer": {
+    "run_status": "completed",
+    "confidence": "medium",
+    "factcheck_status": "passed",
+    "reason": "Query-level expectations reviewed 2026-08-07. confidence=medium because the topic requires synthesis across sources and retrieval noise is expected; factcheck=passed is the target for a completed run."
+  }
+}

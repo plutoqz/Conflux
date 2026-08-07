@@ -1,0 +1,54 @@
+{
+  "schema_version": "conflux-v2-gold-v1",
+  "dataset_id": "v2-gold-candidate-rag-hallucination-20260807",
+  "annotation_status": "manual_reviewed",
+  "annotation_policy": {
+    "retrieval_grade": {
+      "0": "irrelevant or off-domain",
+      "1": "related context but insufficient for the subquestion",
+      "2": "partially relevant and potentially useful, but incomplete",
+      "3": "directly answers the subquestion and is admissible evidence"
+    },
+    "unknown_retrieved_evidence": "reported separately and never silently treated as relevant",
+    "verification_verdicts": [
+      "supports",
+      "contradicts",
+      "insufficient",
+      "uncertain"
+    ],
+    "cost_policy": "null until provider pricing is fixed"
+  },
+  "seed_provenance": {
+    "case_id": "rag-hallucination-verification",
+    "summary": "reports/v2_real_gold_candidate1/81f14e039862.summary.json",
+    "trace": "reports/v2_real_gold_candidate1/81f14e039862.trace.jsonl",
+    "label_note": "Candidate labels drafted from the real B4 run ledger snapshot on 2026-08-07. All relevance grades and verdicts require manual review before this case is promoted into the confirmed Gold bundle. This is NOT a confirmed truth set."
+  },
+  "coverage": {
+    "covered_in_candidate": [
+      "comparison",
+      "off_domain_noise",
+      "prompt_like_noise",
+      "partial_evidence_abstention"
+    ],
+    "pending": [
+      "source_conflict",
+      "cross_language",
+      "synthetic_document_inducement",
+      "wikipedia_background_misuse",
+      "corpus_poisoning",
+      "citation_fabrication"
+    ]
+  },
+  "required_assets": [
+    "retrieval_gold.jsonl",
+    "verification_gold.jsonl",
+    "answer_gold.jsonl"
+  ],
+  "review": {
+    "reviewer": "codex-agent-on-behalf-of-user",
+    "reviewed_at": "2026-08-07",
+    "method": "Line-by-line re-check of all 18 retrieval grades, 18 verification verdicts, per-subquestion claim policies, and answer expectations against the annotation policy and the ledger snapshot texts.",
+    "changes": "None; all candidate labels confirmed as-is."
+  }
+}

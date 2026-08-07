@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -360,4 +361,322 @@ def score_runs(
         "schema_version": GOLD_SCHEMA_VERSION,
         "results": results,
         "aggregate": aggregate_scores(results),
+    }
+
+
+# ============================================================
+# Query-level semantic Gold (conflux-v2-gold-semantic-v1)
+# Reusable across runs: evidence is matched by semantics instead
+# of run-bound evidence ids or subquestion plans.
+# ============================================================
+
+SEMANTIC_SCHEMA_VERSION = "conflux-v2-gold-semantic-v1"
+
+
+def load_semantic_gold(gold_dir: str | Path) -> list[dict[str, Any]]:
+    """Load all semantic gold assets from <gold_dir>/semantic/*.semantic.json."""
+    root = Path(gold_dir)
+    assets: list[dict[str, Any]] = []
+    paths = sorted((root / "semantic").glob("*.semantic.json"))
+    if not paths:
+        raise FileNotFoundError(f"no semantic Gold assets match {root / 'semantic' / '*.semantic.json'}")
+    for path in paths:
+        payload = _read_json(path)
+        if payload.get("schema_version") != SEMANTIC_SCHEMA_VERSION:
+            raise ValueError(f"unsupported semantic Gold schema: {path}")
+        assets.append(payload)
+    return assets
+
+
+def _normalize_for_match(text: Any) -> str:
+    normalized = re.sub(r"[^\w\s\u4e00-\u9fff]", " ", str(text or ""))
+    return re.sub(r"\s+", " ", normalized).strip().casefold()
+
+
+def _evidence_text(record: dict[str, Any]) -> str:
+    return _normalize_for_match(record.get("verbatim_quote") or record.get("claim") or "")
+
+
+def _match_evidence(
+    record: dict[str, Any],
+    aspect: dict[str, Any],
+    negatives: list[str],
+) -> tuple[int, list[str], list[str], list[str]]:
+    """Return (grade, keyword_hits, positive_hits, negative_hits).
+
+    grade 0 = negative/off-domain; 2 = keyword-only partial relevance;
+    3 = positive semantic (or keyword set) direct relevance.
+    """
+    text = _evidence_text(record)
+    neg_hits = [item for item in negatives if item.casefold() in text]
+    if neg_hits:
+        return 0, [], [], neg_hits
+    kw_hits = [item for item in aspect.get("keywords") or [] if item.casefold() in text]
+    pos_hits = [
+        item for item in aspect.get("positive_semantics") or []
+        if _normalize_for_match(item) in text
+    ]
+    if pos_hits:
+        return 3, kw_hits, pos_hits, []
+    if kw_hits:
+        return 2, kw_hits, [], []
+    return 0, [], [], []
+
+
+def _align_subquestion(sub_questions: list[dict[str, Any]], aspect: dict[str, Any]) -> dict[str, Any] | None:
+    """Pick the run subquestion with the most keyword/positive overlap (>=1 hit)."""
+    best: dict[str, Any] | None = None
+    best_score = 0
+    for sq in sub_questions or []:
+        question = _normalize_for_match(sq.get("question") or "")
+        score = sum(1 for key in aspect.get("keywords") or [] if key.casefold() in question)
+        score += sum(
+            1 for item in aspect.get("positive_semantics") or []
+            if _normalize_for_match(item) in question
+        )
+        if score > best_score:
+            best_score = score
+            best = sq
+    return best if best_score >= 1 else None
+
+
+def _claim_records(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    return [item for item in summary.get("claim_records") or [] if isinstance(item, dict)]
+
+
+def _records_by_id(summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(item.get("evidence_id") or ""): item
+        for item in summary.get("ledger_snapshot", {}).get("records") or []
+        if isinstance(item, dict)
+    }
+
+
+def _primary_by_subquestion(summary: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in summary.get("ledger_snapshot", {}).get("records") or []:
+        if not isinstance(item, dict) or str(item.get("visibility") or "primary") != "primary":
+            continue
+        grouped.setdefault(str(item.get("subquestion_id") or ""), []).append(item)
+    return grouped
+
+
+def _query_plan_from_trace(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    trace_path = str(summary.get("trace_path") or "")
+    if not trace_path or not Path(trace_path).exists():
+        return []
+    for line in Path(trace_path).read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if event.get("stage") == "v2_run_summary":
+            return list((event.get("metadata") or {}).get("query_plan") or [])
+    return []
+
+
+def _claim_aspect_hits(claim: dict[str, Any], aspect: dict[str, Any]) -> list[str]:
+    text = _normalize_for_match(claim.get("text") or "")
+    return [
+        item for item in aspect.get("positive_semantics") or []
+        if _normalize_for_match(item) in text
+    ]
+
+
+def score_run_semantic(
+    case_id: str,
+    summary: dict[str, Any],
+    assets: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Score one run summary against a query-level semantic Gold asset.
+
+    ``case_id`` is the run label; the Gold asset is selected by
+    ``summary["gold_case_id"]`` when present, otherwise by ``case_id``.
+    """
+    asset_case_id = str(summary.get("gold_case_id") or case_id)
+    asset = next((item for item in assets if item.get("case_id") == asset_case_id), None)
+    if asset is None:
+        raise KeyError(f"no semantic Gold asset for case: {asset_case_id}")
+
+    negatives = [str(item) for item in asset.get("negative_semantics") or []]
+    aspects = asset.get("aspects") or []
+    sub_questions = _query_plan_from_trace(summary)
+    primary_by_sq = _primary_by_subquestion(summary)
+    records_by_id = _records_by_id(summary)
+    claims = _claim_records(summary)
+
+    retrieval_scores: list[dict[str, Any]] = []
+    aspect_gaps: list[str] = []
+    for aspect in aspects:
+        aspect_id = str(aspect.get("aspect_id") or "")
+        aligned = _align_subquestion(sub_questions, aspect)
+        aligned_id = str(aligned.get("id") or "") if aligned else ""
+        records = sorted(
+            primary_by_sq.get(aligned_id, []),
+            key=lambda item: -float(item.get("claim_fitness") or 0.0),
+        )
+        matched = [_match_evidence(record, aspect, negatives) for record in records]
+        grades = [grade for grade, _, _, _ in matched]
+        cutoff = max(1, int(aspect.get("k") or 5))
+        positive_count = len([g for g in grades[:cutoff] if g >= 2])
+        irrelevant = sum(1 for grade in grades[:cutoff] if grade == 0)
+        positive_total = len(aspect.get("positive_semantics") or [])
+        covered = {
+            item
+            for grade, _, pos_hits, _ in matched
+            for item in pos_hits
+        }
+        retrieval_scores.append({
+            "aspect_id": aspect_id,
+            "aligned_subquestion_id": aligned_id or None,
+            "retrieved_count": len(records),
+            "precision_at_k": round(positive_count / cutoff, 4),
+            "irrelevant_at_k": irrelevant,
+            "semantic_coverage": (
+                round(len(covered) / positive_total, 4) if positive_total else None
+            ),
+            "ndcg_at_k": _ndcg(grades, cutoff=cutoff),
+            "matched_positive_semantics": sorted(covered),
+        })
+        if aligned is None:
+            aspect_gaps.append(aspect_id)
+
+    observations: list[dict[str, Any]] = []
+    for claim in claims:
+        for evidence_id in claim.get("evidence_ids") or []:
+            record = records_by_id.get(str(evidence_id))
+            if record is None:
+                continue
+            text = _evidence_text(record)
+            neg_hits = [item for item in negatives if item.casefold() in text]
+            observed = str((claim.get("verification_result") or {}).get("verdict") or "")
+            expected = "insufficient" if neg_hits else "supports"
+            observations.append({
+                "claim_id": str(claim.get("claim_id") or ""),
+                "evidence_id": str(evidence_id),
+                "expected_verdict": expected,
+                "observed_verdict": observed,
+                "correct": observed == expected,
+                "negative_hits": neg_hits,
+            })
+
+    expected = asset.get("answer") or {}
+    expected_status = str(expected.get("run_status") or "")
+    expected_confidence = str(expected.get("confidence") or "")
+    expected_factcheck = str(expected.get("factcheck_status") or "")
+    claim_aspect_hits = {
+        str(aspect.get("aspect_id") or ""): any(
+            _claim_aspect_hits(claim, aspect) for claim in claims
+        )
+        for aspect in aspects
+    }
+
+    answer = {
+        "expected_run_status": expected_status,
+        "actual_run_status": str(summary.get("run_status") or ""),
+        "run_status_match": (
+            True if not expected_status
+            else str(summary.get("run_status") or "") == expected_status
+        ),
+        "confidence_match": (
+            True if not expected_confidence
+            else str(summary.get("confidence") or "") == expected_confidence
+        ),
+        "factcheck_match": (
+            True if not expected_factcheck
+            else str(summary.get("factcheck_status") or "") == expected_factcheck
+        ),
+        "aspect_coverage": {
+            aspect_id: covered for aspect_id, covered in claim_aspect_hits.items()
+        },
+        "aspect_gaps": aspect_gaps,
+        "generated_claim_count": len(claims),
+        "invalid_citation_count": int(summary.get("invalid_citation_count") or 0),
+    }
+
+    budget = summary.get("budget_consumed") or {}
+    total_tokens = int(budget.get("input_tokens") or 0) + int(budget.get("output_tokens") or 0)
+    return {
+        "case_id": case_id,
+        "query": str(summary.get("query") or asset.get("query") or ""),
+        "retrieval": retrieval_scores,
+        "verification": {
+            "observed_count": len(observations),
+            "verdict_accuracy": (
+                round(sum(1 for item in observations if item["correct"]) / len(observations), 4)
+                if observations else None
+            ),
+            "negative_evidence_cited_as_support": [
+                item for item in observations
+                if item["negative_hits"] and item["observed_verdict"] == "supports"
+            ],
+            "observations": observations,
+        },
+        "answer": answer,
+        "runtime": {
+            "run_status": str(summary.get("run_status") or ""),
+            "confidence": str(summary.get("confidence") or ""),
+            "factcheck_status": str(summary.get("factcheck_status") or ""),
+            "elapsed_ms": summary.get("elapsed_ms"),
+            "input_tokens": int(budget.get("input_tokens") or 0),
+            "output_tokens": int(budget.get("output_tokens") or 0),
+            "total_tokens": total_tokens,
+            "estimated_cost_usd": summary.get("estimated_cost"),
+        },
+    }
+
+
+def score_runs_semantic(
+    run_summaries: dict[str, dict[str, Any]],
+    assets: list[dict[str, Any]],
+) -> dict[str, Any]:
+    results = [
+        score_run_semantic(case_id, summary, assets)
+        for case_id, summary in run_summaries.items()
+    ]
+    retrieval_rows = [row for item in results for row in item.get("retrieval") or []]
+    answer_rows = [item.get("answer") or {} for item in results]
+    runtime_rows = [item.get("runtime") or {} for item in results]
+    return {
+        "schema_version": SEMANTIC_SCHEMA_VERSION,
+        "results": results,
+        "aggregate": {
+            "run_count": len(results),
+            "retrieval": {
+                "mean_precision_at_k": _mean(row.get("precision_at_k") for row in retrieval_rows),
+                "mean_irrelevant_at_k": _mean(row.get("irrelevant_at_k") for row in retrieval_rows),
+                "mean_semantic_coverage": _mean(row.get("semantic_coverage") for row in retrieval_rows),
+                "mean_ndcg_at_k": _mean(row.get("ndcg_at_k") for row in retrieval_rows),
+                "unmatched_aspect_count": sum(
+                    1 for item in results for row in item.get("retrieval") or []
+                    if row.get("aligned_subquestion_id") is None
+                ),
+            },
+            "verification": {
+                "mean_verdict_accuracy": _mean(
+                    item.get("verification", {}).get("verdict_accuracy") for item in results
+                ),
+                "negative_evidence_cited_as_support_count": sum(
+                    len(item.get("verification", {}).get("negative_evidence_cited_as_support") or [])
+                    for item in results
+                ),
+            },
+            "answer": {
+                "run_status_match_count": sum(
+                    1 for row in answer_rows if row.get("run_status_match")
+                ),
+                "confidence_match_count": sum(1 for row in answer_rows if row.get("confidence_match")),
+                "factcheck_match_count": sum(1 for row in answer_rows if row.get("factcheck_match")),
+            },
+            "runtime": {
+                "p95_latency_ms": _p95(row.get("elapsed_ms") for row in runtime_rows),
+                "mean_latency_ms": _mean(row.get("elapsed_ms") for row in runtime_rows),
+                "mean_total_tokens": _mean(row.get("total_tokens") for row in runtime_rows),
+                "cost_available": all(
+                    row.get("estimated_cost_usd") is not None for row in runtime_rows
+                ),
+            },
+        },
     }
