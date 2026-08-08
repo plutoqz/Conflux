@@ -99,11 +99,25 @@ def normalize_arxiv_entry(entry: dict[str, Any]) -> PaperRecord:
     )
 
 
-def search_arxiv(query: str, *, max_results: int = 10, start: int = 0) -> list[PaperRecord]:
-    """Run a real arXiv API search. This is intentionally not used by offline tests."""
+def search_arxiv(
+    query: str,
+    *,
+    max_results: int = 10,
+    start: int = 0,
+    categories: list[str] | None = None,
+) -> list[PaperRecord]:
+    """Run a real arXiv API search. This is intentionally not used by offline tests.
 
+    ``categories`` constrains results with ``cat:`` terms (e.g. cs.AI, cs.CV)
+    to cut cross-domain noise from broad profile queries.
+    """
+
+    search_query = query
+    category_terms = [f"cat:{item}" for item in (categories or []) if item.strip()]
+    if category_terms:
+        search_query = f"({query}) AND ({' OR '.join(category_terms)})"
     params = urllib.parse.urlencode({
-        "search_query": query,
+        "search_query": search_query,
         "start": max(0, start),
         "max_results": max_results,
         "sortBy": "submittedDate",

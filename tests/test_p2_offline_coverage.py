@@ -28,10 +28,10 @@ def _spec(source: PaperSource, query: str, max_results: int = 5) -> QuerySpec:
 
 class TestSourceResilience:
     def test_source_failure_marks_failed_and_other_source_completes(self, monkeypatch):
-        def boom(query, *, max_results=10, start=0):
+        def boom(query, *, max_results=10, start=0, categories=None):
             raise RuntimeError("arxiv down")
 
-        def ok(query, *, max_results=10, offset=0):
+        def ok(query, *, max_results=10, offset=0, categories=None):
             return [PaperRecord(id="s2-1", title="T", abstract="A", source="semantic_scholar")]
 
         monkeypatch.setattr("conflux.paper_ingestion.arxiv_source.search_arxiv", boom)
@@ -50,10 +50,10 @@ class TestSourceResilience:
         assert stats.query_stats[1]["candidate_count"] == 1
 
     def test_multi_source_queries_merge_results(self, monkeypatch):
-        def arxiv(query, *, max_results=10, start=0):
+        def arxiv(query, *, max_results=10, start=0, categories=None):
             return [PaperRecord(id="a-1", title="A", abstract="a", source="arxiv")]
 
-        def s2(query, *, max_results=10, offset=0):
+        def s2(query, *, max_results=10, offset=0, categories=None):
             return [PaperRecord(id="b-1", title="B", abstract="b", source="semantic_scholar")]
 
         monkeypatch.setattr("conflux.paper_ingestion.arxiv_source.search_arxiv", arxiv)

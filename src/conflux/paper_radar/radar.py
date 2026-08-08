@@ -299,7 +299,11 @@ def _execute_queries(
         }
         try:
             if spec.source == PaperSource.ARXIV:
-                papers = search_arxiv(spec.query, max_results=spec.max_results)
+                papers = search_arxiv(
+                    spec.query,
+                    max_results=spec.max_results,
+                    categories=list(getattr(spec, "categories", None) or []),
+                )
             elif spec.source == PaperSource.SEMANTIC_SCHOLAR:
                 papers = search_semantic_scholar(
                     spec.query,
