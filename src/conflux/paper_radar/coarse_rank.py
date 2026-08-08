@@ -28,16 +28,23 @@ def _paper_text(paper: PaperRecord) -> str:
     return "\n".join(part for part in parts if part.strip())
 
 
-def _context_query_text(profile: ResearchProfile, context: Any) -> str:
-    lines: list[str] = []
+def _context_query_texts(profile: ResearchProfile, context: Any) -> list[str]:
+    """Multiple focused query vectors: goal, each RQ, and keyword block.
+
+    A single combined query vector dilutes topical focus; per-aspect queries
+    let a candidate match the aspect it is actually closest to.
+    """
+    texts: list[str] = []
     goal = getattr(context, "overall_goal", None) or ""
-    if goal:
-        lines.append(str(goal))
+    if str(goal).strip():
+        texts.append(str(goal).strip())
     for question in getattr(context, "research_questions", None) or []:
-        lines.append(str(question))
-    for keyword in getattr(profile, "keywords", None) or []:
-        lines.append(str(keyword))
-    return "\n".join(lines)
+        if str(question).strip():
+            texts.append(str(question).strip())
+    keywords = [str(item) for item in getattr(profile, "keywords", None) or [] if str(item).strip()]
+    if keywords:
+        texts.append(" ".join(keywords))
+    return texts
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -69,11 +76,13 @@ def embedding_coarse_rank(
     the dense similarity and lexical score for auditability.
     """
     cache = {} if cache is None else cache
-    query_text = _context_query_text(profile, context)
-    query_key = _embed_key(query_text)
-    if query_key not in cache:
-        cache[query_key] = embedding_model.embed_query(query_text)
-    query_vector = cache[query_key]
+    query_texts = _context_query_texts(profile, context)
+    query_vectors: list[list[float]] = []
+    for query_text in query_texts:
+        query_key = _embed_key(query_text)
+        if query_key not in cache:
+            cache[query_key] = embedding_model.embed_query(query_text)
+        query_vectors.append(cache[query_key])
 
     texts = [_paper_text(paper) for paper in papers]
     text_keys = [_embed_key(text) for text in texts]
@@ -90,7 +99,10 @@ def embedding_coarse_rank(
     ranked: list[tuple[PaperRecord, float, dict[str, float]]] = []
     for paper, text_key in zip(papers, text_keys):
         vector = cache[text_key]
-        dense = _cosine(query_vector, vector)
+        dense = max(
+            (_cosine(query_vector, vector) for query_vector in query_vectors),
+            default=0.0,
+        )
         lexical = score_paper(paper, profile).score
         combined = round(DENSE_WEIGHT * dense + LEXICAL_WEIGHT * lexical, 4)
         ranked.append((paper, combined, {"dense": dense, "lexical": lexical}))

@@ -69,6 +69,36 @@ def test_embedding_cache_avoids_duplicate_requests():
     assert cache
 
 
+
+
+def test_multi_query_vectors_match_different_aspects():
+    from conftest import FakeEmbedding
+    from conflux.paper_radar.coarse_rank import _context_query_texts
+
+    profile = load_profile("profiles/example_gis_agent.yaml", validate=False)
+    context = ProjectResearchContext(
+        project_id="test",
+        overall_goal="GIS agents for geospatial workflows",
+        research_questions=[
+            "How to verify geospatial processing steps?",
+            "How to integrate knowledge graphs with geospatial reasoning?",
+        ],
+    )
+    query_texts = _context_query_texts(profile, context)
+    assert len(query_texts) >= 3  # goal + 2 RQs (+ keywords block)
+
+    papers = [
+        _paper("kg-1", "Knowledge graphs for geospatial reasoning", "geokg integration with agent memory"),
+        _paper("verif-1", "Geospatial processing step verification", "auditing spatial agent steps"),
+        _paper("off-1", "Quantum chemistry of bosons", "pure physics"),
+    ]
+    ranked = embedding_coarse_rank(papers, profile, context, embedding_model=FakeEmbedding())
+    top_ids = [paper.id for paper, _, _ in ranked]
+    assert "off-1" == top_ids[-1]
+    # Both aspect-matching papers should beat the off-domain one; each matches
+    # a different query vector via the max-similarity aggregation.
+    assert top_ids.index("kg-1") < top_ids.index("off-1")
+    assert top_ids.index("verif-1") < top_ids.index("off-1")
 def test_radar_run_fails_when_embedding_unavailable(monkeypatch):
     """No silent lexical fallback: embedding failure fails the run."""
     from conflux.paper_radar.radar import run_paper_radar
