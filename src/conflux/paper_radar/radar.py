@@ -22,8 +22,9 @@ from conflux.core.p2_contracts import (
     RadarRunResult,
     RadarRunStats,
 )
+from conflux.model_factory import create_embedding_model
 from conflux.paper_ingestion.models import PaperRecord
-from conflux.paper_ingestion.scorer import score_papers
+from conflux.paper_ingestion.scorer import score_paper
 from conflux.project_registry.models import ProjectDefinition
 from conflux.research_profile import ResearchProfile, load_profile
 
@@ -62,6 +63,7 @@ def run_paper_radar(
     out_dir: str | Path | None = None,
     llm_review: bool = False,
     review_model: Any = None,
+    embedding_model: Any = None,
 ) -> RadarRunResult:
     """Run the full P2 paper radar pipeline for a project.
 
@@ -103,9 +105,19 @@ def run_paper_radar(
     # Step 5: De-duplicate and filter
     unique_papers = _deduplicate_papers(all_papers)
     filtered_papers = _apply_negative_filters(unique_papers, profile)
-    ranked = score_papers(filtered_papers, profile)[:config.max_candidates]
-    ranked_papers = [paper for paper, _ in ranked]
-    score_by_id = {paper.id: score.score for paper, score in ranked}
+    # Embedding coarse rank (planned P2 stage). No silent lexical fallback:
+    # an unavailable embedding model fails the run so it can be reported.
+    from .coarse_rank import embedding_coarse_rank
+
+    model = embedding_model if embedding_model is not None else create_embedding_model()
+    ranked = embedding_coarse_rank(
+        filtered_papers,
+        profile,
+        context,
+        embedding_model=model,
+    )[:config.max_candidates]
+    ranked_papers = [paper for paper, _, _ in ranked]
+    score_by_id = {paper.id: combined for paper, combined, _ in ranked}
     paper_map: dict[str, PaperRecord] = {p.id: p for p in ranked_papers}
 
     # Step 6: Create project-paper links
