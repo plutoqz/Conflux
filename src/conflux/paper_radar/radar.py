@@ -123,13 +123,25 @@ def run_paper_radar(
     # the LLM relevance re-ranks the links.  Review failures are unreviewed
     # (needs_review) and never auto-promoted.
     if llm_review and review_model is not None and config.semantic_review_limit > 0:
-        from .semantic_review import batch_semantic_review
+        from .semantic_review import (
+            REVIEW_THRESHOLD_HIGH,
+            REVIEW_THRESHOLD_LOW,
+            batch_semantic_review,
+        )
 
-        review_pool = ranked[: config.semantic_review_limit]
+        # Layered review: high-score candidates are accepted directly (no LLM
+        # call, so the LLM cannot down-weight them); low-score candidates are
+        # rejected directly; only the fuzzy band is reviewed by the LLM.
+        review_pool = [
+            (paper, combined)
+            for paper, combined, _ in ranked
+            if REVIEW_THRESHOLD_LOW <= combined < REVIEW_THRESHOLD_HIGH
+        ]
+        review_pool = review_pool[: config.semantic_review_limit]
         reviews = batch_semantic_review(
             [
                 {"id": paper.id, "title": paper.title, "abstract": paper.abstract or ""}
-                for paper, _, _ in review_pool
+                for paper, _ in review_pool
             ],
             context,
             review_model,
@@ -138,7 +150,7 @@ def run_paper_radar(
             stats=stats,
         )
         stats.semantic_review_count = len(reviews)
-        for paper, _, _ in review_pool:
+        for paper, _ in review_pool:
             review = reviews.get(paper.id)
             if review is not None and review.reviewed:
                 score_by_id[paper.id] = review.relevance

@@ -441,12 +441,17 @@ def _chat_openai(
     max_tokens: int | None = None,
     timeout: int | None = None,
     max_retries: int | None = None,
+    temperature_override: float | None = None,
 ) -> BaseChatModel:
     from langchain_openai import ChatOpenAI
 
     kwargs = dict(
         model=cfg["model"],
-        temperature=cfg.get("temperature", 0.3),
+        temperature=(
+            temperature_override
+            if temperature_override is not None
+            else cfg.get("temperature", 0.3)
+        ),
         max_tokens=max_tokens if max_tokens is not None else cfg.get("max_tokens", 4096),
         timeout=timeout if timeout is not None else cfg.get("timeout", 60),
         max_retries=max_retries if max_retries is not None else cfg.get("max_retries", 1),
@@ -621,6 +626,7 @@ def create_chat_model(
     max_tokens: int | None = None,
     timeout: int | None = None,
     max_retries: int | None = None,
+    temperature: float | None = None,
 ) -> BaseChatModel:
     """根据 config 中的 preset 创建 ChatModel
 
@@ -644,6 +650,7 @@ def create_chat_model(
             max_tokens=max_tokens,
             timeout=timeout,
             max_retries=max_retries,
+            temperature_override=temperature,
         )
     elif provider == "openai_compatible":
         if not _resolve(cfg, "base_url"):
@@ -653,6 +660,7 @@ def create_chat_model(
             max_tokens=max_tokens,
             timeout=timeout,
             max_retries=max_retries,
+            temperature_override=temperature,
         )
     elif provider == "anthropic":
         from langchain_anthropic import ChatAnthropic

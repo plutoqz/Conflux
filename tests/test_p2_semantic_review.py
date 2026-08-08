@@ -113,13 +113,13 @@ def test_radar_llm_review_reranks_links(monkeypatch):
     from conflux.research_profile import load_profile
 
     def mock_execute(queries, stats=None):
-        return [PaperRecord(
-            id="2401.00001", title="GIS Agent Verification",
-            abstract="geospatial agent step verification with knowledge graphs.",
-            source="arxiv",
-        )], []
+        return [PaperRecord(id="2401.00001", title="m", abstract="m", source="arxiv")], []
 
     monkeypatch.setattr("conflux.paper_radar.radar._execute_queries", mock_execute)
+    monkeypatch.setattr(
+        "conflux.paper_radar.coarse_rank.embedding_coarse_rank",
+        _fake_coarse_rank({"2401.00001": 0.30}),
+    )
     proj = ProjectDefinition(id="test", name="Test", path=".")
     proj.plan.overall_goal = "Knowledge-graph-augmented GIS agents"
     proj.research = {"profile": "profiles/example_gis_agent.yaml", "deep_read_limit": 0}
@@ -136,19 +136,56 @@ def test_radar_llm_review_reranks_links(monkeypatch):
     assert result.links[0].relevance == 0.93  # LLM review relevance
 
 
+
+
+def test_layered_review_only_reviews_fuzzy_band(monkeypatch):
+    from conflux.paper_radar.radar import run_paper_radar
+    from conflux.project_registry.models import ProjectDefinition
+    from conflux.research_profile import load_profile
+
+    def mock_execute(queries, stats=None):
+        return [
+            PaperRecord(id="high-1", title="h", abstract="h", source="arxiv"),
+            PaperRecord(id="mid-1", title="m", abstract="m", source="arxiv"),
+            PaperRecord(id="low-1", title="l", abstract="l", source="arxiv"),
+        ], []
+
+    captured = {}
+
+    def fake_batch(papers, context, llm_model, *, max_papers, profile_keywords=None, stats=None):
+        captured["ids"] = [p["id"] for p in papers]
+        return {p["id"]: None for p in papers}
+
+    monkeypatch.setattr("conflux.paper_radar.radar._execute_queries", mock_execute)
+    monkeypatch.setattr(
+        "conflux.paper_radar.coarse_rank.embedding_coarse_rank",
+        _fake_coarse_rank({"high-1": 0.45, "mid-1": 0.30, "low-1": 0.15}),
+    )
+    monkeypatch.setattr("conflux.paper_radar.semantic_review.batch_semantic_review", fake_batch)
+    proj = ProjectDefinition(id="test", name="Test", path=".")
+    proj.plan.overall_goal = "Knowledge-graph-augmented GIS agents"
+    proj.research = {"profile": "profiles/example_gis_agent.yaml", "deep_read_limit": 0}
+    profile = load_profile("profiles/example_gis_agent.yaml", validate=False)
+
+    run_paper_radar(proj, profile, llm_review=True, review_model=_ReviewLLM())
+
+    # Only the fuzzy band (0.25-0.35) is reviewed; high/low are accepted/rejected directly.
+    assert captured["ids"] == ["mid-1"]
+
+
 def test_radar_semantic_review_failure_marks_needs_review(monkeypatch):
     from conflux.paper_radar.radar import run_paper_radar
     from conflux.project_registry.models import ProjectDefinition
     from conflux.research_profile import load_profile
 
     def mock_execute(queries, stats=None):
-        return [PaperRecord(
-            id="2401.00001", title="GIS Agent Verification",
-            abstract="geospatial agent step verification.",
-            source="arxiv",
-        )], []
+        return [PaperRecord(id="2401.00001", title="m", abstract="m", source="arxiv")], []
 
     monkeypatch.setattr("conflux.paper_radar.radar._execute_queries", mock_execute)
+    monkeypatch.setattr(
+        "conflux.paper_radar.coarse_rank.embedding_coarse_rank",
+        _fake_coarse_rank({"2401.00001": 0.30}),
+    )
     proj = ProjectDefinition(id="test", name="Test", path=".")
     proj.plan.overall_goal = "Knowledge-graph-augmented GIS agents"
     proj.research = {"profile": "profiles/example_gis_agent.yaml", "deep_read_limit": 0}
@@ -157,3 +194,15 @@ def test_radar_semantic_review_failure_marks_needs_review(monkeypatch):
     result = run_paper_radar(proj, profile, llm_review=True, review_model=_ReviewLLM(raise_error=True))
     assert result.stats.semantic_review_failed == 1
     assert result.links[0].status == PaperLinkStatus.NEEDS_REVIEW
+
+
+def _fake_coarse_rank(combined_by_id):
+    """Deterministic embedding_coarse_rank replacement for layered-review tests."""
+    def fake_rank(papers, profile, context, *, embedding_model, cache=None):
+        ranked = []
+        for paper in papers:
+            combined = combined_by_id.get(paper.id, 0.25)
+            ranked.append((paper, combined, {"dense": combined, "lexical": 0.0}))
+        ranked.sort(key=lambda item: -item[1])
+        return ranked
+    return fake_rank

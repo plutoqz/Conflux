@@ -16,6 +16,14 @@ from typing import Any
 
 from conflux.core.p2_contracts import ProjectResearchContext
 
+# Layered review thresholds (coarse-rank combined score):
+# >= REVIEW_THRESHOLD_HIGH is accepted directly (no LLM call, avoids LLM
+# down-weighting high-confidence candidates); < REVIEW_THRESHOLD_LOW is
+# rejected directly; the fuzzy band in between is sent to the LLM.
+REVIEW_THRESHOLD_HIGH = 0.35
+REVIEW_THRESHOLD_LOW = 0.25
+
+
 SEMANTIC_REVIEW_SYSTEM = (
     "You are a research reviewer.  Given one paper and a project research "
     "context, judge how the paper helps the project.  Output only valid JSON."
