@@ -173,3 +173,26 @@
 first_strong_rank 和 strong_success@1 上均优于或持平分层 + 温度 0；
 分层 + 温度 0 只省约 2k tokens/次，未带来质量收益。因此默认配置回滚为
 无分层 + 温度 0.25，分层逻辑保留为 `layered_review` 可选参数。
+
+## 2026-08-08 降本/强相关实验（listwise 与 few-shot，各 3 次）
+
+在同一 99 候选快照上，继续对比 pointwise 基线、listwise（每 8 篇一次调用）
+和 few-shot pointwise（注入 RTLola / WhenHistoryLies 已校准示例）：
+
+| 指标 | pointwise median | listwise median | few-shot median |
+|---|---|---|---|
+| recall@10 | 0.4286 | 0.4286 | 0.2857 |
+| precision@5 | 0.8 | 0.6 | 0.6 |
+| precision@10 | 0.6 | 0.6 | 0.4 |
+| nDCG@10 | 0.5739 | 0.4902 | 0.4654 |
+| first_strong_rank | 1 | 3 | 1 |
+| strong_recall@20 | 0.5 | 0.5 | 0.5 |
+| success@10 | 3/3 | 3/3 | 3/3 |
+| strong_success@1 | 2/3 | 0/3 | 2/3 |
+| tokens/次 | 43,420 | 29,754 | 60,368 |
+| 调用数/次 | 40 | 5 | 40 |
+
+结论：listwise 将调用数降到 5 次、token 降至约 30k，但 nDCG、precision@5
+和 first_strong_rank 均下降，strong_recall 未提升；few-shot 增加了 token 成本，
+recall/precision/nDCG 下降，strong_recall 仍为 0.5。两者当前均不采纳为默认，
+保留为实验参数（`--review-mode listwise`、`--few-shot`）。

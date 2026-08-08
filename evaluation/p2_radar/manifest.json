@@ -73,5 +73,19 @@
       "reports/evaluation/p2_radar/ab_layered_merged.json"
     ],
     "conclusion": "rollback to non-layered review + temperature 0.25"
+  },
+  "optimization_experiments": {
+    "date": "2026-08-08",
+    "listwise_runs": [
+      "reports/evaluation/p2_radar/ab_listwise_1/radar_run.json",
+      "reports/evaluation/p2_radar/ab_listwise_2/radar_run.json",
+      "reports/evaluation/p2_radar/ab_listwise_3/radar_run.json"
+    ],
+    "few_shot_runs": [
+      "reports/evaluation/p2_radar/ab_fewshot_1/radar_run.json",
+      "reports/evaluation/p2_radar/ab_fewshot_2/radar_run.json",
+      "reports/evaluation/p2_radar/ab_fewshot_3/radar_run.json"
+    ],
+    "conclusion": "pointwise remains default; listwise/few-shot not adopted"
   }
 }

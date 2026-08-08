@@ -23,9 +23,11 @@ class _ReviewLLM:
         self.content = content
         self.raise_error = raise_error
         self.calls = 0
+        self.messages = None
 
     def invoke(self, messages):
         self.calls += 1
+        self.messages = messages
         if self.raise_error:
             raise RuntimeError("review model unavailable")
 
@@ -107,6 +109,52 @@ def test_batch_records_stats_and_failures():
     assert stats.semantic_review_failed == 0
 
 
+def test_listwise_batch_uses_one_call_per_chunk():
+    stats = RadarRunStats(project_id="test", run_id="r")
+    payload = {
+        "reviews": [
+            {
+                "paper_id": "p-1", "relevance": 0.85, "research_value": 0.7,
+                "evidence_quality": 0.7, "reasoning": "x", "confidence": 0.8,
+                "needs_deeper_review": False, "evidence_utility": "method",
+            },
+            {
+                "paper_id": "p-2", "relevance": 0.6, "research_value": 0.6,
+                "evidence_quality": 0.7, "reasoning": "y", "confidence": 0.7,
+                "needs_deeper_review": False, "evidence_utility": "baseline",
+            },
+        ]
+    }
+    model = _ReviewLLM(json.dumps(payload))
+    reviews = batch_semantic_review(
+        [_paper_dict("p-1"), _paper_dict("p-2")],
+        _context(),
+        model,
+        max_papers=2,
+        stats=stats,
+        mode="listwise",
+        chunk_size=8,
+    )
+    assert len(reviews) == 2
+    assert all(review.reviewed for review in reviews.values())
+    assert stats.semantic_review_calls == 1
+    assert stats.semantic_review_tokens == 90
+    assert stats.semantic_review_failed == 0
+
+
+def test_few_shot_injects_calibrated_examples_not_gst_bench():
+    model = _ReviewLLM(json.dumps({
+        "relevance": 0.9, "research_value": 0.8, "evidence_quality": 0.7,
+        "reasoning": "x", "confidence": 0.9, "needs_deeper_review": False,
+        "evidence_utility": "method",
+    }))
+    review_one_paper(_paper_dict(), _context(), model, few_shot=True)
+    prompt = model.messages[1].content
+    assert "RTLola" in prompt
+    assert "When History Lies" in prompt
+    assert "GST-Bench" not in prompt
+
+
 def test_radar_llm_review_reranks_links(monkeypatch):
     from conflux.paper_radar.radar import run_paper_radar
     from conflux.project_registry.models import ProjectDefinition
@@ -152,7 +200,7 @@ def test_layered_review_only_reviews_fuzzy_band(monkeypatch):
 
     captured = {}
 
-    def fake_batch(papers, context, llm_model, *, max_papers, profile_keywords=None, stats=None):
+    def fake_batch(papers, context, llm_model, *, max_papers, profile_keywords=None, stats=None, **kwargs):
         captured["ids"] = [p["id"] for p in papers]
         return {p["id"]: None for p in papers}
 
@@ -193,7 +241,7 @@ def test_non_layered_review_reviews_top_candidates(monkeypatch):
 
     captured = {}
 
-    def fake_batch(papers, context, llm_model, *, max_papers, profile_keywords=None, stats=None):
+    def fake_batch(papers, context, llm_model, *, max_papers, profile_keywords=None, stats=None, **kwargs):
         captured["ids"] = [p["id"] for p in papers]
         return {p["id"]: None for p in papers}
 

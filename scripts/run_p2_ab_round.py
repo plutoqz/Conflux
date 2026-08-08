@@ -93,6 +93,9 @@ def run_round(args: argparse.Namespace) -> int:
         llm_review=True,
         review_model=review_model,
         layered_review=not args.no_layered,
+        review_mode=args.review_mode,
+        review_few_shot=args.few_shot,
+        review_chunk_size=args.review_chunk_size,
     )
     elapsed = time.time() - started
     run_payload = {
@@ -112,6 +115,9 @@ def run_round(args: argparse.Namespace) -> int:
         "label": args.label,
         "temperature": args.temperature,
         "layered": not args.no_layered,
+        "review_mode": args.review_mode,
+        "few_shot": args.few_shot,
+        "review_chunk_size": args.review_chunk_size,
         "candidates": str(candidates_path),
         "semantic_review_calls": result.stats.semantic_review_calls,
         "semantic_review_tokens": result.stats.semantic_review_tokens,
@@ -137,6 +143,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--label", default="round")
     parser.add_argument("--temperature", type=float, default=0.25)
     parser.add_argument("--no-layered", action="store_true")
+    parser.add_argument("--review-mode", choices=["pointwise", "listwise"], default="pointwise")
+    parser.add_argument("--review-chunk-size", type=int, default=8)
+    parser.add_argument("--few-shot", action="store_true")
     parser.add_argument("--out-dir", default="")
     args = parser.parse_args(argv)
 

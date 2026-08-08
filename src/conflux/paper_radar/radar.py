@@ -43,6 +43,9 @@ def run_paper_radar_from_profile(
     llm_review: bool = False,
     review_model: Any = None,
     layered_review: bool = False,
+    review_mode: str = "pointwise",
+    review_few_shot: bool = False,
+    review_chunk_size: int = 8,
 ) -> RadarRunResult:
     """Convenience wrapper that loads a profile and runs the radar."""
     profile = load_profile(profile_path, validate=False)
@@ -54,6 +57,9 @@ def run_paper_radar_from_profile(
         llm_review=llm_review,
         review_model=review_model,
         layered_review=layered_review,
+        review_mode=review_mode,
+        review_few_shot=review_few_shot,
+        review_chunk_size=review_chunk_size,
     )
 
 
@@ -67,6 +73,9 @@ def run_paper_radar(
     review_model: Any = None,
     embedding_model: Any = None,
     layered_review: bool = False,
+    review_mode: str = "pointwise",
+    review_few_shot: bool = False,
+    review_chunk_size: int = 8,
 ) -> RadarRunResult:
     """Run the full P2 paper radar pipeline for a project.
 
@@ -157,6 +166,9 @@ def run_paper_radar(
             max_papers=config.semantic_review_limit,
             profile_keywords=[str(item) for item in (profile.keywords or [])],
             stats=stats,
+            mode=review_mode,
+            few_shot=review_few_shot,
+            chunk_size=review_chunk_size,
         )
         stats.semantic_review_count = len(reviews)
         for paper, _ in review_pool:
