@@ -1,7 +1,7 @@
 {
   "schema_version": "conflux-p2-radar-labels-v1",
   "dataset_id": "p2-radar-real-20260808",
-  "annotation_status": "recalibrated_20260808_r0_r4_rubric",
+  "annotation_status": "spotchecked_20260808_codex_on_behalf_of_user",
   "project": {
     "id": "radar-smoke",
     "profile": "profiles/example_gis_agent.yaml",
@@ -33,5 +33,25 @@
     "date": "2026-08-08",
     "rubric": "evaluation/p2_radar/annotation_rubric.md",
     "note": "R0-R4 rubric applied. Strong (3): When History Lies, XAI evaluation challenges, TRAJDEBUG, RTLola. Downgraded to R1: GST-Bench, Multi-Year Geospatial. Downgraded to R1 from 2: Hardware Keystores. 10 papers kept at R2."
+  },
+  "spotcheck": {
+    "date": "2026-08-08",
+    "reviewer": "codex-on-behalf-of-user",
+    "report": "evaluation/p2_radar/annotation_spotcheck_20260808.md",
+    "scope": "75 labels / 56 unique papers",
+    "grade_changes": 0,
+    "labels_sha256": "5A60A2C33264822FABD1E84AC7B98F473F99CCF12933CD238225B52971C85A07",
+    "candidate_snapshot": {
+      "path": "evaluation/p2_radar/candidates_spotcheck_20260808.jsonl",
+      "sha256": "50A32690A4E844F041B4D7BD3892DD7CDF03DEBF186AB3B3C6D9739FBA16ADA9"
+    },
+    "llm_rerun": {
+      "date": "2026-08-08",
+      "run": "reports/evaluation/p2_radar/spotcheck_run/radar_run.json",
+      "eval": "reports/evaluation/p2_radar/spotcheck_eval.json",
+      "semantic_review_tokens": 40999,
+      "semantic_review_calls": 40,
+      "semantic_review_failed": 0
+    }
   }
 }

@@ -79,6 +79,8 @@
 评估协议升级：`eval_p2_radar.py --merge` 输出多次运行的 median/min/max。
 `--merge` 的输入是单次 `eval_p2_radar.py` 生成的评估 JSON（含 `results`），
 不是原始 `radar_run.json`。
+以下 3 次运行基线来自 RTLola 分类修复前的候选池；
+修复后的单次真实运行见下一节。
 当前配置（分层评审 + 温度0 + arXiv cat 过滤）3 次真实运行中位数：
 
 | 指标 | median | min | max |
@@ -106,8 +108,40 @@
 - RTLola 覆盖：`profiles/example_gis_agent.yaml` 的 agent_verification 查询加入
   `cs.LO`；`build_p2_label_candidates.py` 与真实雷达一致传递 QuerySpec categories，
   避免标注候选和运行候选使用不同检索口径。
-- 未在本轮再次消耗 LLM 预算重跑评审；RTLola 修复后的 strong_recall 上限（3/4）
-  和实际排名待一次真实评审运行确认。
-- 当前 75 篇标注仍为 codex-agent 初标、evidence=abstract-only，待人工 spot-check；
-  未达到计划中“至少 100 篇人工标注集”的 P2 退出标准，本轮按“实现收尾 + 已知限制”关闭。
+- 当前 75 篇标注为 codex-agent 初标、evidence=abstract-only，已代审并冻结；
+  用户终审仍建议保留。未达到计划中“至少 100 篇人工标注集”的 P2 退出标准。
 - 成本：约 41k tokens / 次，波动小。
+
+## 2026-08-08 标注复核 + RTLola 修复后真实运行
+
+### 标注复核
+
+- 复核范围：`labels.jsonl` 全部 75 行 / 56 篇唯一论文，按
+  `annotation_rubric.md` 逐条复核 title + abstract。
+- 结果：无等级调整；相关（R2+）14 篇、强相关（R3）4 篇；evidence_quality 仍为 1。
+- 记录与冻结：`annotation_spotcheck_20260808.md`、`manifest.json`、
+  `candidates_spotcheck_20260808.jsonl`。
+
+### RTLola 修复后单次真实运行（分层 + 温度0 + 含 cs.LO）
+
+用复核后的同一标注集重新运行一次真实 LLM 评审：
+
+| 指标 | 本次单次运行 |
+|---|---|
+| recall@10 | 0.3571 |
+| precision@5 | 0.4 |
+| precision@10 | 0.5 |
+| nDCG@10 | 0.4021 |
+| MRR | 1.0 |
+| first_strong_rank | 8 |
+| strong_recall@20 | 0.5 |
+| success@10 | True |
+| strong_success@1 | False |
+
+- RTLola 已召回并排第 8；TRAJDEBUG 第 19、WhenHistoryLies 第 24、
+  XAIeval 第 48，strong_recall@20=2/4。
+- 14 篇相关论文全部进入本次候选池（linked_relevant_count=14/14），
+  源头覆盖问题已消除。
+- XAIeval 仍被 LLM 评审低分，WhenHistoryLies 也未稳定进入 top-20；
+  strong_recall 短板从“分类过滤排除”转为“LLM 排序仍待优化”。
+- 本次为单次运行，未构成新的中位数基线；成本约 41k tokens / 40 次调用 / 141s。
