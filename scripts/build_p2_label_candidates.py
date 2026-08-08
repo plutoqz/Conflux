@@ -29,6 +29,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Build P2 labeled-set candidates")
     parser.add_argument("--profile", default="profiles/example_gis_agent.yaml")
     parser.add_argument("--max-results", type=int, default=15)
+    parser.add_argument("--delay", type=float, default=8.0, help="seconds between arXiv queries (rate-limit safety)")
     parser.add_argument("--out-dir", default="reports/evaluation/p2_radar/label_run")
     args = parser.parse_args()
 
@@ -50,7 +51,7 @@ def main() -> int:
     print(f"[info] {len(queries)} QuerySpecs from {len(profile.get_tracks())} tracks")
 
     candidates: list[dict] = []
-    for spec in queries:
+    for index, spec in enumerate(queries):
         try:
             papers = search_arxiv(spec.query, max_results=args.max_results)
         except Exception as exc:
@@ -69,6 +70,8 @@ def main() -> int:
                 "retrieval_rank": rank,
             })
         print(f"[info] {spec.track_id} {spec.id}: {len(papers)} candidates")
+        if index < len(queries) - 1:
+            time.sleep(args.delay)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
