@@ -30,6 +30,7 @@ def main() -> int:
     parser.add_argument("--profile", default="profiles/example_gis_agent.yaml")
     parser.add_argument("--max-results", type=int, default=15)
     parser.add_argument("--delay", type=float, default=8.0, help="seconds between arXiv queries (rate-limit safety)")
+    parser.add_argument("--llm-review", action="store_true", help="enable batch LLM semantic review (costs LLM calls)")
     parser.add_argument("--out-dir", default="reports/evaluation/p2_radar/label_run")
     args = parser.parse_args()
 
@@ -91,7 +92,18 @@ def main() -> int:
         "deep_read_limit": 0,
     }
     started = time.time()
-    result = run_paper_radar(proj, profile, out_dir=str(out_dir / "radar"))
+    review_model = None
+    if args.llm_review:
+        from conflux.model_factory import create_chat_model
+        review_model = create_chat_model("balanced")
+        print("[info] batch LLM semantic review enabled (balanced)")
+    result = run_paper_radar(
+        proj,
+        profile,
+        out_dir=str(out_dir / "radar"),
+        llm_review=args.llm_review,
+        review_model=review_model,
+    )
     elapsed = time.time() - started
     run_payload = {
         "run_id": result.stats.run_id,

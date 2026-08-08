@@ -152,6 +152,9 @@ def evaluate_p2_run(run: Any, labels: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "cost": {
             "llm_total_tokens": int(stats.get("llm_total_tokens") or 0),
+            "semantic_review_tokens": int(stats.get("semantic_review_tokens") or 0),
+            "semantic_review_calls": int(stats.get("semantic_review_calls") or 0),
+            "semantic_review_failed": int(stats.get("semantic_review_failed") or 0),
             "llm_elapsed_ms": int(stats.get("llm_elapsed_ms") or 0),
             "elapsed_seconds": stats.get("elapsed_seconds"),
             "cost_available": False,
