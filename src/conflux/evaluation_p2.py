@@ -130,6 +130,13 @@ def evaluate_p2_run(run: Any, labels: list[dict[str, Any]]) -> dict[str, Any]:
         None,
     )
     retrieval["mrr"] = round(1.0 / first_rank, 4) if first_rank else 0.0
+    retrieval["first_strong_rank"] = next(
+        (rank for rank, paper_id in enumerate(link_ids, 1) if paper_id in strong_ids),
+        None,
+    )
+    retrieval["strong_success_at_1"] = any(
+        paper_id in strong_ids for paper_id in link_ids[:1]
+    )
     retrieval["strong_recall_at_20"] = (
         round(sum(1 for paper_id in link_ids[:20] if paper_id in strong_ids) / len(strong_ids), 4)
         if strong_ids else None
@@ -233,6 +240,9 @@ def aggregate_p2_results(results: list[dict[str, Any]]) -> dict[str, Any]:
                 [row.get("strong_recall_at_20") for row in retrieval_rows if row.get("strong_recall_at_20") is not None]
             ),
             "success_at_10_count": sum(1 for row in retrieval_rows if row.get("success_at_10")),
+            "strong_success_at_1_count": sum(
+                1 for row in retrieval_rows if row.get("strong_success_at_1")
+            ),
         },
         "analysis": {
             "mean_ungrounded_analysis_rate": _mean(
@@ -259,7 +269,7 @@ def _median(values: list[float]) -> float:
 _REPEAT_METRICS = (
     "recall_at_1", "recall_at_5", "recall_at_10",
     "precision_at_1", "precision_at_5", "precision_at_10",
-    "ndcg_at_10", "mrr", "strong_recall_at_20",
+    "ndcg_at_10", "mrr", "first_strong_rank", "strong_recall_at_20",
 )
 
 
@@ -292,6 +302,24 @@ def merge_repeated_evaluations(evaluations: list[dict[str, Any]]) -> dict[str, A
             "max": round(max(values), 4),
             "values": values,
         }
+    metrics["success_at_10"] = {
+        "count": sum(1 for item in evaluations if (item.get("retrieval") or {}).get("success_at_10")),
+        "total": len(evaluations),
+        "values": [
+            bool((item.get("retrieval") or {}).get("success_at_10"))
+            for item in evaluations
+        ],
+    }
+    metrics["strong_success_at_1"] = {
+        "count": sum(
+            1 for item in evaluations if (item.get("retrieval") or {}).get("strong_success_at_1")
+        ),
+        "total": len(evaluations),
+        "values": [
+            bool((item.get("retrieval") or {}).get("strong_success_at_1"))
+            for item in evaluations
+        ],
+    }
 
     tokens = [
         int((item.get("cost") or {}).get("semantic_review_tokens") or 0)

@@ -539,6 +539,12 @@ class TestDomainExtensions:
         assert len(tracks[0].queries) == 2
         assert tracks[1].id == "agent_verification"
         assert tracks[2].id == "reproducibility"
+        verification_categories = {
+            category
+            for query in tracks[1].queries
+            for category in (query.categories or [])
+        }
+        assert "cs.LO" in verification_categories
 
     def test_project_definition_roundtrips_research(self):
         from conflux.project_registry.models import ProjectDefinition

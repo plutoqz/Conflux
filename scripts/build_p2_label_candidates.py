@@ -54,7 +54,11 @@ def main() -> int:
     candidates: list[dict] = []
     for index, spec in enumerate(queries):
         try:
-            papers = search_arxiv(spec.query, max_results=args.max_results)
+            papers = search_arxiv(
+                spec.query,
+                max_results=args.max_results,
+                categories=list(getattr(spec, "categories", None) or []),
+            )
         except Exception as exc:
             print(f"[warn] query {spec.id} failed: {exc}")
             continue

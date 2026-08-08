@@ -114,6 +114,8 @@ def test_graded_rank_metrics():
     assert retrieval["mrr"] == 1.0
     # strong (>=3): only p-1; top-20 includes it
     assert retrieval["strong_recall_at_20"] == 1.0
+    assert retrieval["first_strong_rank"] == 1
+    assert retrieval["strong_success_at_1"] is True
     assert retrieval["success_at_10"] is True
     assert retrieval["strong_labeled_count"] == 1
 
@@ -124,16 +126,23 @@ def test_merge_repeated_evaluations_reports_median():
 
     base = evaluate_p2_run(_run(), _labels())
     runs = []
-    for ndcg in (0.5, 0.7, 0.6):
+    for index, ndcg in enumerate((0.5, 0.7, 0.6)):
         item = json.loads(json.dumps(base))
         item["retrieval"]["ndcg_at_10"] = ndcg
         item["cost"]["semantic_review_tokens"] = 100
+        if index == 0:
+            item["retrieval"]["success_at_10"] = False
+            item["retrieval"]["strong_success_at_1"] = False
+            item["retrieval"]["first_strong_rank"] = 2
         runs.append(item)
     merged = merge_repeated_evaluations(runs)
     assert merged["run_count"] == 3
     assert merged["retrieval"]["ndcg_at_10"]["median"] == 0.6
     assert merged["retrieval"]["ndcg_at_10"]["min"] == 0.5
     assert merged["retrieval"]["ndcg_at_10"]["max"] == 0.7
+    assert merged["retrieval"]["first_strong_rank"]["median"] == 1.0
+    assert merged["retrieval"]["success_at_10"]["count"] == 2
+    assert merged["retrieval"]["strong_success_at_1"]["count"] == 2
     assert merged["cost"]["semantic_review_tokens"]["median"] == 100.0
 
 

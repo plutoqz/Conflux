@@ -45,7 +45,8 @@
 
 ### P1 评测指标升级
 - 新增 `ndcg_at_10`（分级标注）、`mrr`（第一推荐位）、`strong_recall_at_20`、
-  `success_at_10`。校准后（LLM 评审）：MRR=1.0、success@10=True、nDCG@10≈0.55-0.61、
+  `success_at_10`。校准后（LLM 评审）：MRR=1.0（首条 R≥2 相关）、success@10 单次有波动、
+  nDCG@10≈0.55-0.61、
   recall@10=0.43（理论上限 0.714，达 60%）。
 
 ### P2 arXiv cat: 分类过滤
@@ -76,6 +77,8 @@
 ## 2026-08-08 追加：3 次运行中位数基线（当前配置）
 
 评估协议升级：`eval_p2_radar.py --merge` 输出多次运行的 median/min/max。
+`--merge` 的输入是单次 `eval_p2_radar.py` 生成的评估 JSON（含 `results`），
+不是原始 `radar_run.json`。
 当前配置（分层评审 + 温度0 + arXiv cat 过滤）3 次真实运行中位数：
 
 | 指标 | median | min | max |
@@ -85,9 +88,26 @@
 | precision@10 | 0.6 | 0.2 | 0.6 |
 | nDCG@10 | 0.4399 | 0.1952 | 0.4481 |
 | MRR | 1.0 | 1.0 | 1.0 |
+| first_strong_rank | 9 | 8 | 16 |
 | strong_recall@20 | 0.25 | 0.25 | 0.5 |
-| success@10 | True（3/3） | — | — |
+| success@10 | True（2/3） | — | — |
+| strong_success@1 | False（0/3） | — | — |
 
-- 稳定结论：MRR=1.0、success@10=True（第一篇推荐稳定命中强相关）——对"论文雷达推荐最值得关注的第一篇"目标可靠。
-- 短板：strong_recall@20 中位数 0.25（4 篇强相关不能稳定全部进入 top-20），RTLola/XAIeval 等"方法相关"论文被 LLM 评审低分。
+- 稳定结论：MRR=1.0 表示第一条相关（R≥2）论文稳定排第一；**不代表第一篇是强相关**。
+  `first_strong_rank` 三次为 16 / 9 / 8，`strong_success@1` 为 0/3，`success@10` 为 2/3。
+- 短板：strong_recall@20 中位数 0.25（4 篇强相关不能稳定全部进入 top-20）。
+  XAIeval 三次 rank 50-61，是 LLM 评审低分问题；RTLola 的 arXiv 分类为 `cs.LO`，
+  当前修复前未被 agent_verification 查询 categories 覆盖，属于源头召回问题而非评审低分。
+
+## 2026-08-08 收尾：高优先级修正
+
+- 评测口径：新增 `first_strong_rank`、`strong_success_at_1`；`--merge` 输出
+  `success_at_10` / `strong_success_at_1` 的 count/total，基线表已改为实际 2/3。
+- RTLola 覆盖：`profiles/example_gis_agent.yaml` 的 agent_verification 查询加入
+  `cs.LO`；`build_p2_label_candidates.py` 与真实雷达一致传递 QuerySpec categories，
+  避免标注候选和运行候选使用不同检索口径。
+- 未在本轮再次消耗 LLM 预算重跑评审；RTLola 修复后的 strong_recall 上限（3/4）
+  和实际排名待一次真实评审运行确认。
+- 当前 75 篇标注仍为 codex-agent 初标、evidence=abstract-only，待人工 spot-check；
+  未达到计划中“至少 100 篇人工标注集”的 P2 退出标准，本轮按“实现收尾 + 已知限制”关闭。
 - 成本：约 41k tokens / 次，波动小。

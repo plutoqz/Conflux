@@ -63,12 +63,12 @@ tracks:
     queries:
       - terms: "agent verification OR audit trail OR provenance"
         suffix: "workflow OR execution OR geospatial"
-        categories: [cs.AI, cs.SE]
+        categories: [cs.AI, cs.SE, cs.LO]
         date_window_days: 365
         priority: 85
       - terms: "agent planning OR task decomposition"
         suffix: "geospatial OR GIS OR spatial"
-        categories: [cs.AI, cs.RO]
+        categories: [cs.AI, cs.RO, cs.LO]
         date_window_days: 365
         priority: 80
     budget_ratio: 0.35
