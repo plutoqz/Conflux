@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from conflux.evaluation_p2 import (
     aggregate_p2_results,
     evaluate_p2_run,
@@ -114,6 +116,26 @@ def test_graded_rank_metrics():
     assert retrieval["strong_recall_at_20"] == 1.0
     assert retrieval["success_at_10"] is True
     assert retrieval["strong_labeled_count"] == 1
+
+
+
+def test_merge_repeated_evaluations_reports_median():
+    from conflux.evaluation_p2 import merge_repeated_evaluations
+
+    base = evaluate_p2_run(_run(), _labels())
+    runs = []
+    for ndcg in (0.5, 0.7, 0.6):
+        item = json.loads(json.dumps(base))
+        item["retrieval"]["ndcg_at_10"] = ndcg
+        item["cost"]["semantic_review_tokens"] = 100
+        runs.append(item)
+    merged = merge_repeated_evaluations(runs)
+    assert merged["run_count"] == 3
+    assert merged["retrieval"]["ndcg_at_10"]["median"] == 0.6
+    assert merged["retrieval"]["ndcg_at_10"]["min"] == 0.5
+    assert merged["retrieval"]["ndcg_at_10"]["max"] == 0.7
+    assert merged["cost"]["semantic_review_tokens"]["median"] == 100.0
+
 
 def test_repository_labels_loadable():
     labels = load_p2_labels("evaluation/p2_radar/labels.jsonl")

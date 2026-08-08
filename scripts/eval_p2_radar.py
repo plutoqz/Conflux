@@ -21,6 +21,7 @@ from conflux.evaluation_p2 import (  # noqa: E402
     aggregate_p2_results,
     evaluate_p2_run,
     load_p2_labels,
+    merge_repeated_evaluations,
 )
 
 
@@ -28,6 +29,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Score P2 Paper Radar runs against labels")
     parser.add_argument("--labels", default=str(PROJECT_ROOT / "evaluation" / "p2_radar" / "labels.jsonl"))
     parser.add_argument("--run", action="append", default=[], metavar="LABEL=RUN_JSON")
+    parser.add_argument("--merge", action="store_true",
+                        help="aggregate repeated evaluations (median/min/max) from --run result JSONs")
     parser.add_argument("--output", default="")
     args = parser.parse_args(argv)
 
@@ -39,6 +42,27 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--run must use LABEL=RUN_JSON")
         run = json.loads(Path(path).read_text(encoding="utf-8"))
         results.append({**evaluate_p2_run(run, labels), "run_label": label})
+
+    if args.merge:
+        if not args.run:
+            parser.error("--merge requires at least one --run")
+        merged_runs = []
+        for value in args.run:
+            _, separator, path = value.partition("=")
+            if not separator:
+                parser.error("--run must use LABEL=RUN_JSON")
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            merged_runs.extend(payload.get("results") or [])
+        merged = merge_repeated_evaluations(merged_runs)
+        output = json.dumps(merged, ensure_ascii=False, indent=2)
+        if args.output:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(output, encoding="utf-8")
+            print(f"Wrote: {output_path}")
+        else:
+            print(output)
+        return 0
 
     if not results:
         parser.error("at least one --run is required")

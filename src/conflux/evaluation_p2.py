@@ -242,3 +242,81 @@ def aggregate_p2_results(results: list[dict[str, Any]]) -> dict[str, Any]:
             "total_llm_fallback": sum(int(row.get("llm_fallback_count") or 0) for row in analysis_rows),
         },
     }
+
+
+# ============================================================
+# Repeated-run aggregation: median/min/max per metric
+# ============================================================
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return round(ordered[middle], 4)
+    return round((ordered[middle - 1] + ordered[middle]) / 2.0, 4)
+
+
+_REPEAT_METRICS = (
+    "recall_at_1", "recall_at_5", "recall_at_10",
+    "precision_at_1", "precision_at_5", "precision_at_10",
+    "ndcg_at_10", "mrr", "strong_recall_at_20",
+)
+
+
+def merge_repeated_evaluations(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate several single-run evaluations of the same configuration.
+
+    Returns per-metric median/min/max plus the raw value list, so comparisons
+    between configurations are not driven by a single run's noise.
+    """
+    if not evaluations:
+        raise ValueError("at least one evaluation is required")
+
+    def _gather(retrieval_key: str) -> list[float]:
+        values = []
+        for item in evaluations:
+            value = (item.get("retrieval") or {}).get(retrieval_key)
+            if value is not None:
+                values.append(float(value))
+        return values
+
+    metrics: dict[str, Any] = {}
+    for key in _REPEAT_METRICS:
+        values = _gather(key)
+        if not values:
+            metrics[key] = None
+            continue
+        metrics[key] = {
+            "median": _median(values),
+            "min": round(min(values), 4),
+            "max": round(max(values), 4),
+            "values": values,
+        }
+
+    tokens = [
+        int((item.get("cost") or {}).get("semantic_review_tokens") or 0)
+        for item in evaluations
+    ]
+    calls = [
+        int((item.get("cost") or {}).get("semantic_review_calls") or 0)
+        for item in evaluations
+    ]
+    return {
+        "schema_version": P2_LABELS_SCHEMA_VERSION,
+        "run_count": len(evaluations),
+        "retrieval": metrics,
+        "cost": {
+            "semantic_review_tokens": {
+                "median": _median([float(value) for value in tokens]),
+                "min": min(tokens),
+                "max": max(tokens),
+                "values": tokens,
+            },
+            "semantic_review_calls": {
+                "median": _median([float(value) for value in calls]),
+                "min": min(calls),
+                "max": max(calls),
+                "values": calls,
+            },
+        },
+    }
