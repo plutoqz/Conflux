@@ -99,6 +99,22 @@ def test_queries_report_groups_by_track_and_failure():
     assert queries["by_track"]["track-b"]["failed_count"] == 1
 
 
+
+
+def test_graded_rank_metrics():
+    # labels: p-1=3, p-2=2, p-3=1, p-4=0; links order p-1, p-3, p-2, p-5, p-6
+    run = _run()
+    result = evaluate_p2_run(run, _labels())
+    retrieval = result["retrieval"]
+    # nDCG@10: observed grades [3,1,2,0,0], ideal [3,2,1]
+    assert retrieval["ndcg_at_10"] is not None and 0 < retrieval["ndcg_at_10"] <= 1.0
+    # MRR: first relevant (>=2) is p-1 at rank 1
+    assert retrieval["mrr"] == 1.0
+    # strong (>=3): only p-1; top-20 includes it
+    assert retrieval["strong_recall_at_20"] == 1.0
+    assert retrieval["success_at_10"] is True
+    assert retrieval["strong_labeled_count"] == 1
+
 def test_repository_labels_loadable():
     labels = load_p2_labels("evaluation/p2_radar/labels.jsonl")
     assert len(labels) >= 3

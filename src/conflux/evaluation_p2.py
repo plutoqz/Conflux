@@ -8,6 +8,7 @@ source error rate.  Labels follow the conflux-p2-radar-labels-v1 schema.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,18 @@ def _paper_id(link: dict[str, Any]) -> str:
     return str(identity.get("canonical_id") or link.get("paper_id") or "")
 
 
+def _dcg(grades: list[int]) -> float:
+    return sum((2**grade - 1) / math.log2(index + 2) for index, grade in enumerate(grades))
+
+
+def _ndcg(grades: list[int], *, cutoff: int, ideal: list[int]) -> float | None:
+    if not ideal:
+        return None
+    observed = _dcg(grades[:cutoff])
+    best = _dcg(ideal[:cutoff])
+    return round(observed / best, 4) if best else None
+
+
 def _mean(values: list[float]) -> float | None:
     return round(sum(values) / len(values), 4) if values else None
 
@@ -78,6 +91,12 @@ def evaluate_p2_run(run: Any, labels: list[dict[str, Any]]) -> dict[str, Any]:
     }
     relevant_ids.discard("")
 
+    label_relevance = {
+        str(label.get("paper_id") or ""): int(label.get("relevance") or 0)
+        for label in labels
+    }
+    strong_ids = {paper_id for paper_id, grade in label_relevance.items() if grade >= 3}
+
     cutoffs = [1, 5, 10]
     retrieval: dict[str, Any] = {}
     for k in cutoffs:
@@ -96,6 +115,29 @@ def evaluate_p2_run(run: Any, labels: list[dict[str, Any]]) -> dict[str, Any]:
     retrieval["linked_relevant_count"] = sum(
         1 for paper_id in link_ids if paper_id in relevant_ids
     )
+
+    # Rank-quality metrics for graded labels (literature-discovery task).
+    observed_grades = [
+        label_relevance.get(paper_id, 0) for paper_id in link_ids
+    ]
+    ideal_grades = sorted(
+        (grade for grade in label_relevance.values() if grade > 0), reverse=True
+    )
+    retrieval["ndcg_at_10"] = _ndcg(observed_grades, cutoff=10, ideal=ideal_grades)
+    first_rank = next(
+        (rank for rank, paper_id in enumerate(link_ids, 1)
+         if label_relevance.get(paper_id, 0) >= 2),
+        None,
+    )
+    retrieval["mrr"] = round(1.0 / first_rank, 4) if first_rank else 0.0
+    retrieval["strong_recall_at_20"] = (
+        round(sum(1 for paper_id in link_ids[:20] if paper_id in strong_ids) / len(strong_ids), 4)
+        if strong_ids else None
+    )
+    retrieval["success_at_10"] = any(
+        paper_id in strong_ids for paper_id in link_ids[:10]
+    )
+    retrieval["strong_labeled_count"] = len(strong_ids)
 
     total_candidates = int(stats.get("total_candidates") or 0)
     after_dedup = int(stats.get("after_dedup") or 0)
@@ -182,6 +224,15 @@ def aggregate_p2_results(results: list[dict[str, Any]]) -> dict[str, Any]:
                 [row.get(f"precision_at_{k}") for row in retrieval_rows if row.get(f"precision_at_{k}") is not None]
             )
             for k in (1, 5, 10)
+        } | {
+            "mean_ndcg_at_10": _mean(
+                [row.get("ndcg_at_10") for row in retrieval_rows if row.get("ndcg_at_10") is not None]
+            ),
+            "mean_mrr": _mean([row.get("mrr") for row in retrieval_rows]),
+            "mean_strong_recall_at_20": _mean(
+                [row.get("strong_recall_at_20") for row in retrieval_rows if row.get("strong_recall_at_20") is not None]
+            ),
+            "success_at_10_count": sum(1 for row in retrieval_rows if row.get("success_at_10")),
         },
         "analysis": {
             "mean_ungrounded_analysis_rate": _mean(
