@@ -1,7 +1,7 @@
 {
   "schema_version": "conflux-p2-radar-labels-v1",
   "dataset_id": "p2-radar-real-20260808",
-  "annotation_status": "agent_labeled_20260808_pending_spotcheck",
+  "annotation_status": "recalibrated_20260808_r0_r4_rubric",
   "project": {
     "id": "radar-smoke",
     "profile": "profiles/example_gis_agent.yaml",
@@ -28,5 +28,10 @@
       "3": "full-text grounded"
     }
   },
-  "label_note": "75 candidates labeled by codex-agent on behalf of the user on 2026-08-08 from a real arXiv multi-Track retrieval (5 QuerySpecs, 3 tracks). Labels are based on title+abstract against the project goal (knowledge-graph-augmented GIS agent verification/reproducibility). Evidence quality is abstract-only (1). Spot-check recommended before treating as final."
+  "label_note": "75 candidates labeled by codex-agent on behalf of the user on 2026-08-08 from a real arXiv multi-Track retrieval (5 QuerySpecs, 3 tracks). Labels are based on title+abstract against the project goal (knowledge-graph-augmented GIS agent verification/reproducibility). Evidence quality is abstract-only (1). Spot-check recommended before treating as final.",
+  "calibration": {
+    "date": "2026-08-08",
+    "rubric": "evaluation/p2_radar/annotation_rubric.md",
+    "note": "R0-R4 rubric applied. Strong (3): When History Lies, XAI evaluation challenges, TRAJDEBUG, RTLola. Downgraded to R1: GST-Bench, Multi-Year Geospatial. Downgraded to R1 from 2: Hardware Keystores. 10 papers kept at R2."
+  }
 }
