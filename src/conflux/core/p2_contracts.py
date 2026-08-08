@@ -43,6 +43,7 @@ class ProjectResearchConfig(BaseModel):
     cadence: Cadence = Field(default=Cadence.MANUAL)
     max_candidates: int = Field(default=100, ge=10, le=500)
     deep_read_limit: int = Field(default=5, ge=0, le=20)
+    semantic_review_limit: int = Field(default=40, ge=0, le=500)
     auto_generate_queries: bool = Field(default=True)
     require_query_review: bool = Field(default=True)
     require_plan_writeback_approval: bool = Field(default=True)
@@ -291,8 +292,12 @@ class RadarRunStats(BaseModel):
     skipped_seen_rejected: int = 0
     # P2 query-level reporting: one entry per executed QuerySpec.
     query_stats: list[dict[str, Any]] = Field(default_factory=list)
-    # P2 query-level reporting: one entry per executed QuerySpec.
-    query_stats: list[dict[str, Any]] = Field(default_factory=list)
+    # P2 batch LLM semantic review telemetry (planned P2.8 stage).
+    semantic_review_calls: int = 0
+    semantic_review_tokens: int = 0
+    semantic_review_elapsed_ms: int = 0
+    semantic_review_failed: int = 0
+    semantic_review_count: int = 0
     started_at: datetime = Field(default_factory=datetime.utcnow)
     finished_at: datetime | None = None
     elapsed_seconds: float = 0.0

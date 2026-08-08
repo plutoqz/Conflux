@@ -115,9 +115,37 @@ def run_paper_radar(
         profile,
         context,
         embedding_model=model,
-    )[:config.max_candidates]
-    ranked_papers = [paper for paper, _, _ in ranked]
+    )
+    ranked = ranked[:config.max_candidates]
     score_by_id = {paper.id: combined for paper, combined, _ in ranked}
+
+    # Batch LLM semantic review (planned P2.8): a bounded pool is reviewed and
+    # the LLM relevance re-ranks the links.  Review failures are unreviewed
+    # (needs_review) and never auto-promoted.
+    if llm_review and review_model is not None and config.semantic_review_limit > 0:
+        from .semantic_review import batch_semantic_review
+
+        review_pool = ranked[: config.semantic_review_limit]
+        reviews = batch_semantic_review(
+            [
+                {"id": paper.id, "title": paper.title, "abstract": paper.abstract or ""}
+                for paper, _, _ in review_pool
+            ],
+            context,
+            review_model,
+            max_papers=config.semantic_review_limit,
+            profile_keywords=[str(item) for item in (profile.keywords or [])],
+            stats=stats,
+        )
+        stats.semantic_review_count = len(reviews)
+        for paper, _, _ in review_pool:
+            review = reviews.get(paper.id)
+            if review is not None and review.reviewed:
+                score_by_id[paper.id] = review.relevance
+            elif review is not None and paper.id not in stats.needs_review_paper_ids:
+                stats.needs_review_paper_ids.append(paper.id)
+
+    ranked_papers = [paper for paper, _, _ in ranked]
     paper_map: dict[str, PaperRecord] = {p.id: p for p in ranked_papers}
 
     # Step 6: Create project-paper links
@@ -163,13 +191,16 @@ def run_paper_radar(
                 stats=stats,
             )
         deep_read = min(len(deep_pairs), config.deep_read_limit)
-        if stats.needs_review_paper_ids:
-            needs_review_ids = set(stats.needs_review_paper_ids)
-            for link in links:
-                if link.paper_identity.canonical_id in needs_review_ids:
-                    link.status = PaperLinkStatus.NEEDS_REVIEW
-            stats.needs_review = len(needs_review_ids)
         stats.skipped_seen_rejected = skipped_seen_rejected
+
+    # Unreviewed links (semantic review or deep-analysis failures) are marked
+    # needs_review regardless of deep-read configuration.
+    if stats.needs_review_paper_ids:
+        needs_review_ids = set(stats.needs_review_paper_ids)
+        for link in links:
+            if link.paper_identity.canonical_id in needs_review_ids:
+                link.status = PaperLinkStatus.NEEDS_REVIEW
+        stats.needs_review = len(needs_review_ids)
 
     # Write output if out_dir specified
     if out_dir:
@@ -213,6 +244,7 @@ def _parse_config(raw: dict[str, Any], profile: ResearchProfile) -> ProjectResea
         cadence=raw.get("cadence", "manual"),
         max_candidates=int(raw.get("max_candidates", 100)),
         deep_read_limit=int(raw.get("deep_read_limit", 5)),
+        semantic_review_limit=int(raw.get("semantic_review_limit", 40)),
         auto_generate_queries=bool(raw.get("auto_generate_queries", True)),
         require_query_review=bool(raw.get("require_query_review", True)),
         require_plan_writeback_approval=bool(raw.get("require_plan_writeback_approval", True)),
