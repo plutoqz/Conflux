@@ -53,5 +53,25 @@
       "semantic_review_calls": 40,
       "semantic_review_failed": 0
     }
+  },
+  "ab_experiment": {
+    "date": "2026-08-08",
+    "candidate_snapshot": "evaluation/p2_radar/candidates_ab_20260808.jsonl",
+    "candidate_snapshot_sha256": "C4375F795F21836D0FDF0EFF17C7CB64AF75349ABFA9FB5FDA1BE92F8C5A8155",
+    "old_runs": [
+      "reports/evaluation/p2_radar/ab_old_1/radar_run.json",
+      "reports/evaluation/p2_radar/ab_old_2/radar_run.json",
+      "reports/evaluation/p2_radar/ab_old_3/radar_run.json"
+    ],
+    "layered_runs": [
+      "reports/evaluation/p2_radar/ab_layered_1/radar_run.json",
+      "reports/evaluation/p2_radar/ab_layered_2/radar_run.json",
+      "reports/evaluation/p2_radar/ab_layered_3/radar_run.json"
+    ],
+    "merged_results": [
+      "reports/evaluation/p2_radar/ab_old_merged.json",
+      "reports/evaluation/p2_radar/ab_layered_merged.json"
+    ],
+    "conclusion": "rollback to non-layered review + temperature 0.25"
   }
 }

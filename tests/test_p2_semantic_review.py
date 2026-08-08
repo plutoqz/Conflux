@@ -167,10 +167,57 @@ def test_layered_review_only_reviews_fuzzy_band(monkeypatch):
     proj.research = {"profile": "profiles/example_gis_agent.yaml", "deep_read_limit": 0}
     profile = load_profile("profiles/example_gis_agent.yaml", validate=False)
 
-    run_paper_radar(proj, profile, llm_review=True, review_model=_ReviewLLM())
+    run_paper_radar(
+        proj,
+        profile,
+        llm_review=True,
+        review_model=_ReviewLLM(),
+        layered_review=True,
+    )
 
     # Only the fuzzy band (0.25-0.35) is reviewed; high/low are accepted/rejected directly.
     assert captured["ids"] == ["mid-1"]
+
+
+def test_non_layered_review_reviews_top_candidates(monkeypatch):
+    from conflux.paper_radar.radar import run_paper_radar
+    from conflux.project_registry.models import ProjectDefinition
+    from conflux.research_profile import load_profile
+
+    def mock_execute(queries, stats=None):
+        return [
+            PaperRecord(id="high-1", title="h", abstract="h", source="arxiv"),
+            PaperRecord(id="mid-1", title="m", abstract="m", source="arxiv"),
+            PaperRecord(id="low-1", title="l", abstract="l", source="arxiv"),
+        ], []
+
+    captured = {}
+
+    def fake_batch(papers, context, llm_model, *, max_papers, profile_keywords=None, stats=None):
+        captured["ids"] = [p["id"] for p in papers]
+        return {p["id"]: None for p in papers}
+
+    monkeypatch.setattr("conflux.paper_radar.radar._execute_queries", mock_execute)
+    monkeypatch.setattr(
+        "conflux.paper_radar.coarse_rank.embedding_coarse_rank",
+        _fake_coarse_rank({"high-1": 0.45, "mid-1": 0.30, "low-1": 0.15}),
+    )
+    monkeypatch.setattr("conflux.paper_radar.semantic_review.batch_semantic_review", fake_batch)
+    proj = ProjectDefinition(id="test", name="Test", path=".")
+    proj.plan.overall_goal = "Knowledge-graph-augmented GIS agents"
+    proj.research = {"profile": "profiles/example_gis_agent.yaml", "deep_read_limit": 0}
+    profile = load_profile("profiles/example_gis_agent.yaml", validate=False)
+
+    run_paper_radar(
+        proj,
+        profile,
+        llm_review=True,
+        review_model=_ReviewLLM(),
+        layered_review=False,
+    )
+
+    # Non-layered mode reviews the top candidates by coarse score.
+    assert captured["ids"] == ["high-1", "mid-1", "low-1"]
 
 
 def test_radar_semantic_review_failure_marks_needs_review(monkeypatch):

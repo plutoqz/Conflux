@@ -42,6 +42,7 @@ def run_paper_radar_from_profile(
     out_dir: str | Path | None = None,
     llm_review: bool = False,
     review_model: Any = None,
+    layered_review: bool = False,
 ) -> RadarRunResult:
     """Convenience wrapper that loads a profile and runs the radar."""
     profile = load_profile(profile_path, validate=False)
@@ -52,6 +53,7 @@ def run_paper_radar_from_profile(
         out_dir=out_dir,
         llm_review=llm_review,
         review_model=review_model,
+        layered_review=layered_review,
     )
 
 
@@ -64,6 +66,7 @@ def run_paper_radar(
     llm_review: bool = False,
     review_model: Any = None,
     embedding_model: Any = None,
+    layered_review: bool = False,
 ) -> RadarRunResult:
     """Run the full P2 paper radar pipeline for a project.
 
@@ -129,14 +132,20 @@ def run_paper_radar(
             batch_semantic_review,
         )
 
-        # Layered review: high-score candidates are accepted directly (no LLM
-        # call, so the LLM cannot down-weight them); low-score candidates are
-        # rejected directly; only the fuzzy band is reviewed by the LLM.
-        review_pool = [
-            (paper, combined)
-            for paper, combined, _ in ranked
-            if REVIEW_THRESHOLD_LOW <= combined < REVIEW_THRESHOLD_HIGH
-        ]
+        if layered_review:
+            # Layered review: high-score candidates are accepted directly (no
+            # LLM call, so the LLM cannot down-weight them); low-score
+            # candidates are rejected directly; only the fuzzy band is
+            # reviewed by the LLM.
+            review_pool = [
+                (paper, combined)
+                for paper, combined, _ in ranked
+                if REVIEW_THRESHOLD_LOW <= combined < REVIEW_THRESHOLD_HIGH
+            ]
+        else:
+            review_pool = [
+                (paper, combined) for paper, combined, _ in ranked
+            ]
         review_pool = review_pool[: config.semantic_review_limit]
         reviews = batch_semantic_review(
             [

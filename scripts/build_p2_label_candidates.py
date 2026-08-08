@@ -99,7 +99,7 @@ def main() -> int:
     review_model = None
     if args.llm_review:
         from conflux.model_factory import create_chat_model
-        review_model = create_chat_model("balanced", temperature=0.0)
+        review_model = create_chat_model("balanced")
         print("[info] batch LLM semantic review enabled (balanced)")
     result = run_paper_radar(
         proj,
