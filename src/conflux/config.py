@@ -1,8 +1,11 @@
 """配置加载 — 从 YAML + 本地 .env + 环境变量读取，提供统一访问接口"""
 
+import copy
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar, copy_context
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 from dotenv import load_dotenv
@@ -66,8 +69,26 @@ def _cast_env_val(val: str) -> Any:
         return val
 
 
+def _apply_context_overrides(raw: dict, values: Mapping[str, str]) -> dict:
+    for key, val in values.items():
+        if not key.startswith("CONFLUX_"):
+            continue
+        parts = key[len("CONFLUX_") :].lower().split("__")
+        target = raw
+        for part in parts[:-1]:
+            if part not in target:
+                target[part] = {}
+            target = target[part]
+        target[parts[-1]] = _cast_env_val(val)
+    return raw
+
+
 # 模块级加载（惰性）
 _config: dict | None = None
+_config_overrides: ContextVar[tuple[dict[str, str], ...]] = ContextVar(
+    "conflux_config_overrides",
+    default=(),
+)
 
 
 def load() -> dict:
@@ -75,7 +96,43 @@ def load() -> dict:
     if _config is None:
         _load_local_env()
         _config = _env_override(_load_raw())
-    return _config
+    overlays = _config_overrides.get()
+    if not overlays:
+        return _config
+    resolved = copy.deepcopy(_config)
+    for values in overlays:
+        _apply_context_overrides(resolved, values)
+    return resolved
+
+
+@contextmanager
+def override(values: Mapping[str, Any] | None):
+    """Apply CONFLUX_* values only within the current execution context."""
+
+    normalized = {
+        str(key): str(value)
+        for key, value in (values or {}).items()
+        if str(key).startswith("CONFLUX_") and value not in (None, "")
+    }
+    token = _config_overrides.set((*_config_overrides.get(), normalized))
+    try:
+        yield
+    finally:
+        _config_overrides.reset(token)
+
+
+def _context_override_value(key: str, default: Any = None) -> Any:
+    for values in reversed(_config_overrides.get()):
+        if key in values:
+            return values[key]
+    return default
+
+
+def submit_with_context(executor, func, /, *args, **kwargs):
+    """Submit work while preserving the caller's context-local configuration."""
+
+    context = copy_context()
+    return executor.submit(context.run, func, *args, **kwargs)
 
 
 def get(*path: str, default: Any = None) -> Any:

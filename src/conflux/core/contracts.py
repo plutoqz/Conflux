@@ -123,6 +123,7 @@ class RunContext(BaseModel):
     workspace: str = Field(default=".", description="Workspace root path")
     budget_token_limit: int | None = Field(default=None)
     cancel_requested: bool = False
+    config_overrides: dict[str, str] = Field(default_factory=dict, repr=False)
 
 
 class PluginContext(BaseModel):

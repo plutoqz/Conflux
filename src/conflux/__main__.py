@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
 from langchain_core.documents import Document
 
@@ -14,7 +16,9 @@ from .agent import create_sub_agent
 from .checkpointing import create_checkpointer, graph_config
 from .config import get as config_get
 from .config import load as load_config
+from .config import override as config_override
 from .core.storage_cli import doctor_command, import_legacy_command, init_command, migrate_command
+from .core.contracts import RunContext
 from .graph_v2 import create_v2_research_graph
 from .model_factory import (
     create_research_models,
@@ -140,6 +144,18 @@ def _new_v2_state(
     )
 
 
+def _with_run_context_config(func):
+    @functools.wraps(func)
+    def wrapped(*args, **kwargs):
+        run_context = kwargs.get("run_context")
+        values = run_context.config_overrides if run_context is not None else None
+        with config_override(values):
+            return func(*args, **kwargs)
+
+    return wrapped
+
+
+@_with_run_context_config
 def query_command(
     query: str,
     mode: str = "phase2",
@@ -157,6 +173,9 @@ def query_command(
     commit_reserve_seconds: float | None = None,
     replay: str | None = None,
     baseline_variant: str = "B4",
+    run_context: RunContext | None = None,
+    on_graph_state: Callable[[dict, list], None] | None = None,
+    should_stop: Callable[[], None] | None = None,
 ) -> dict:
     """Run one research query."""
 
@@ -169,6 +188,9 @@ def query_command(
         if commit_reserve_seconds is None
         else max(0.0, commit_reserve_seconds)
     )
+    if run_context is not None:
+        run_id = run_context.run_id
+        thread_id = run_context.thread_id or thread_id
     run_id = run_id or new_run_id()
     research_config = loaded_config.get("research", {}) or {}
     pipeline = str(research_config.get("pipeline") or "answer_first").casefold()
@@ -296,6 +318,8 @@ def query_command(
         query,
         stream_events=stream_events,
         thread_id=effective_thread_id,
+        on_state=on_graph_state,
+        should_stop=should_stop,
     )
 
     # V2: 报告已在管道内完成组装
@@ -383,6 +407,8 @@ def _run_phase2_graph(
     *,
     stream_events: bool = False,
     thread_id: str | None = None,
+    on_state: Callable[[dict, list], None] | None = None,
+    should_stop: Callable[[], None] | None = None,
 ) -> tuple[dict, list]:
     print(f"-> Starting three-source multi-agent research: {query}\n")
     print("=" * 60)
@@ -393,6 +419,8 @@ def _run_phase2_graph(
     started_at = time.time()
     run_id = initial_state.get("_run_id")
     config = graph_config(thread_id)
+    if should_stop:
+        should_stop()
     for event in graph.stream(initial_state, config=config, stream_mode="values"):
         for key, label in [
             ("source_results", "Dynamic sources"),
@@ -438,6 +466,10 @@ def _run_phase2_graph(
                         print(json.dumps(trace_event.to_dict(), ensure_ascii=False))
                     else:
                         print(f"[done] {label} ({len(str(value))} chars)")
+        if on_state:
+            on_state(event, events)
+        if should_stop:
+            should_stop()
 
     budget = event.get("_budget_state") or {}
     observability_event = TraceEvent(
@@ -470,6 +502,8 @@ def _run_phase2_graph(
         },
     )
     events.append(observability_event)
+    if on_state:
+        on_state(event, events)
     if stream_events:
         print(json.dumps(observability_event.to_dict(), ensure_ascii=False))
 

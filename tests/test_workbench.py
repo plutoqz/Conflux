@@ -492,12 +492,12 @@ def test_access_token_empty_allows_all(monkeypatch):
     assert handler._authorize() is True
 
 
-def test_job_manager_submit_and_list(monkeypatch):
-    from conflux.workbench.jobs import JobManager, get_job_manager
+def test_job_manager_submit_and_list(tmp_path, monkeypatch):
+    from conflux.workbench.jobs import JobManager
 
     # Mock _execute to avoid starting a real research query
     monkeypatch.setattr(JobManager, "_execute", lambda self, run_id, query, payload: None)
-    mgr = get_job_manager()
+    mgr = JobManager(db_path=tmp_path / "conflux.db")
     result = mgr.submit("test query", {"depth": "quick"})
     assert "run_id" in result
     assert result["status"] == "pending"
@@ -1537,7 +1537,10 @@ def test_vector_index_rebuild_preserves_old_collection_until_user_deletes(tmp_pa
         if path == ("vector_store", "persist_dir"):
             return str(chroma_dir)
         if path == ("vector_store", "collection_name"):
-            return server.os.environ.get("CONFLUX_VECTOR_STORE__COLLECTION_NAME") or active["name"]
+            return (
+                server.config._context_override_value("CONFLUX_VECTOR_STORE__COLLECTION_NAME")
+                or active["name"]
+            )
         if path == ("embedding", "model"):
             return "test-embedding"
         return default

@@ -401,6 +401,26 @@ class RunStore:
         self.db.connection.commit()
         return cursor.rowcount > 0
 
+    def update_metadata(
+        self,
+        run_id: str,
+        metadata: dict[str, Any],
+        *,
+        status: str | None = None,
+    ) -> bool:
+        current = self.get(run_id)
+        if current is None:
+            return False
+        merged = dict(current.get("metadata") or {})
+        merged.update(metadata)
+        next_status = str(status or current.get("status") or "running")
+        cursor = self.db.connection.execute(
+            "UPDATE runs SET status = ?, metadata_json = ?, updated_at = ? WHERE run_id = ?",
+            (next_status, _json_dumps(merged), time.time(), run_id),
+        )
+        self.db.connection.commit()
+        return cursor.rowcount > 0
+
     def get(self, run_id: str) -> dict[str, Any] | None:
         row = self.db.connection.execute(
             "SELECT * FROM runs WHERE run_id = ?", (run_id,)
@@ -1307,6 +1327,7 @@ class JobQueue:
         error: str,
         *,
         retry_delay: float = 5.0,
+        retryable: bool = True,
     ) -> bool:
         now = time.time()
         connection = self.db.connection
@@ -1321,7 +1342,7 @@ class JobQueue:
                 return False
             attempts = int(row["attempts"])
             max_attempts = int(row["max_attempts"])
-            if attempts >= max_attempts:
+            if not retryable or attempts >= max_attempts:
                 status = "failed"
                 scheduled_at = now
             else:

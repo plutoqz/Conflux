@@ -1,33 +1,37 @@
-"""Async job manager for Conflux research queries.
-
-Provides background execution with SSE-streamable trace events, status
-polling, and best-effort cancellation.  Designed to replace the blocking
-``POST /api/query/run`` with an async lifecycle:
-
-    POST /api/query/jobs           -> 202 { run_id, events_url }
-    GET  /api/query/jobs/{id}      -> current status + final result
-    GET  /api/query/jobs/{id}/events -> SSE stream of TraceEvent dicts
-    POST /api/query/jobs/{id}/cancel -> best-effort cancel
-"""
+"""Durable Workbench research-query jobs backed by the M3 SQLite stores."""
 
 from __future__ import annotations
 
-import contextlib
-import io
-import json
-import os
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from conflux import config
-from conflux.trace import new_run_id
+from conflux.adapters.sqlite_store import (
+    CheckpointStore,
+    EventStore,
+    JobQueue,
+    RunStore,
+    SQLiteDatabase,
+)
+from conflux.core.contracts import RunContext
+from conflux.core.runtime_home import database_path
+from conflux.trace import TraceEvent, new_run_id
 
-# Serialize graph execution to prevent concurrent monkey-patching
-# and global env/stdout corruption between jobs.
-_EXECUTION_LOCK = threading.RLock()
+
+RESEARCH_JOB_KIND = "research_query"
+_SECRET_FIELDS = {
+    "api_key",
+    "embedding_api_key",
+    "serpapi_api_key",
+    "bing_api_key",
+    "google_api_key",
+    "password",
+    "token",
+}
 
 
 class _JobCancelled(RuntimeError):
@@ -38,20 +42,16 @@ class _JobTimedOut(RuntimeError):
     pass
 
 
-# ── Append-only event log (multi-consumer safe) ────────────
-
-
 class _EventLog:
-    """Thread-safe append-only event log with per-consumer cursors."""
+    """Legacy in-memory event log retained only for narrow helper tests."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._events: list[dict | None] = []  # None = sentinel
+        self._events: list[dict | None] = []
         self._closed = False
         self._notify = threading.Condition(self._lock)
 
     def append(self, event: dict | None) -> int:
-        """Append an event, return its 0-based index."""
         with self._lock:
             if self._closed:
                 return -1
@@ -62,10 +62,6 @@ class _EventLog:
             return len(self._events) - 1
 
     def read_from(self, cursor: int, timeout: float = 30.0) -> tuple[list[dict | None], int, bool]:
-        """Block up to *timeout* seconds for new events after *cursor*.
-
-        Returns (events_since_cursor, next_cursor, closed).
-        """
         with self._lock:
             while cursor >= len(self._events) and not self._closed:
                 if not self._notify.wait(timeout):
@@ -74,9 +70,6 @@ class _EventLog:
                 return [], cursor, self._closed
             batch = self._events[cursor:]
             return batch, len(self._events), self._closed
-
-
-# ── Job model ──────────────────────────────────────────────
 
 
 @dataclass
@@ -143,10 +136,8 @@ def _finish_job(
     preserve_report: bool = True,
 ) -> None:
     job.ended_at = time.time()
-    formal_delivery = True
     has_report = bool(
         preserve_report
-        and formal_delivery
         and (job.has_report or job.final_answer or job.artifacts.get("markdown_path"))
     )
     job.has_report = has_report
@@ -164,8 +155,6 @@ def _finish_job(
 
 
 def _finish_without_report(job: ResearchJob, status: str, error: str) -> None:
-    """Compatibility wrapper; completed report data is intentionally preserved."""
-
     _finish_job(job, status, error, preserve_report=True)
 
 
@@ -241,25 +230,147 @@ def _state_warnings(state: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(warnings))
 
 
-# ── JobManager ─────────────────────────────────────────────
+def _sanitize_payload(value: Any, *, key: str = "") -> Any:
+    normalized_key = key.casefold()
+    if normalized_key in _SECRET_FIELDS or normalized_key.endswith("_api_key"):
+        return None
+    if isinstance(value, dict):
+        return {
+            str(item_key): sanitized
+            for item_key, item_value in value.items()
+            if (sanitized := _sanitize_payload(item_value, key=str(item_key))) is not None
+        }
+    if isinstance(value, list):
+        return [_sanitize_payload(item) for item in value]
+    return value
+
+
+def _job_metadata(job: ResearchJob) -> dict[str, Any]:
+    return {
+        "kind": RESEARCH_JOB_KIND,
+        "query": job.query,
+        "public_status": job.status,
+        "started_at": job.started_at,
+        "ended_at": job.ended_at,
+        "timeout_seconds": job.timeout_seconds,
+        "deadline_at": job.deadline_at,
+        "commit_reserve_seconds": job.commit_reserve_seconds,
+        "final_answer": job.final_answer,
+        "source_statuses": job.source_statuses,
+        "factcheck_status": job.factcheck_status,
+        "pipeline": job.pipeline,
+        "delivery_status": job.delivery_status,
+        "quality": job.quality,
+        "artifacts": job.artifacts,
+        "error": job.error,
+        "current_stage": job.current_stage,
+        "progress": job.progress,
+        "cancel_reason": job.cancel_reason,
+        "has_report": job.has_report,
+        "warnings": job.warnings,
+    }
+
+
+def _job_from_metadata(run_id: str, metadata: dict[str, Any]) -> ResearchJob:
+    return ResearchJob(
+        run_id=run_id,
+        query=str(metadata.get("query") or ""),
+        started_at=float(metadata.get("started_at") or time.time()),
+        ended_at=metadata.get("ended_at"),
+        status=str(metadata.get("public_status") or "pending"),
+        timeout_seconds=max(1, int(metadata.get("timeout_seconds") or 300)),
+        deadline_at=float(metadata.get("deadline_at") or 0.0),
+        commit_reserve_seconds=float(metadata.get("commit_reserve_seconds") or 20.0),
+        final_answer=str(metadata.get("final_answer") or ""),
+        has_report=bool(metadata.get("has_report")),
+        source_statuses=dict(metadata.get("source_statuses") or {}),
+        factcheck_status=str(metadata.get("factcheck_status") or ""),
+        pipeline=str(metadata.get("pipeline") or ""),
+        delivery_status=str(metadata.get("delivery_status") or ""),
+        quality=dict(metadata.get("quality") or {}),
+        artifacts={str(k): str(v) for k, v in (metadata.get("artifacts") or {}).items()},
+        error=str(metadata.get("error") or ""),
+        current_stage=str(metadata.get("current_stage") or ""),
+        progress={str(k): str(v) for k, v in (metadata.get("progress") or {}).items()},
+        cancel_reason=str(metadata.get("cancel_reason") or ""),
+        warnings=[str(item) for item in (metadata.get("warnings") or [])],
+    )
+
+
+def _public_status(job: ResearchJob) -> dict[str, Any]:
+    full_answer = job.final_answer or ""
+    answer_len = len(full_answer)
+    return {
+        "run_id": job.run_id,
+        "query": job.query,
+        "status": job.status,
+        "started_at": job.started_at,
+        "ended_at": job.ended_at,
+        "timeout_seconds": job.timeout_seconds,
+        "deadline_at": job.deadline_at,
+        "commit_reserve_seconds": job.commit_reserve_seconds,
+        "final_answer": full_answer[:4000],
+        "final_answer_truncated": answer_len > 4000,
+        "final_answer_total_length": answer_len,
+        "source_statuses": job.source_statuses,
+        "factcheck_status": job.factcheck_status,
+        "pipeline": job.pipeline,
+        "delivery_status": job.delivery_status,
+        "quality": dict(job.quality),
+        "artifacts": dict(job.artifacts),
+        "report_md_path": str(job.artifacts.get("markdown_path") or ""),
+        "error": job.error,
+        "current_stage": job.current_stage,
+        "progress": dict(job.progress),
+        "cancel_reason": job.cancel_reason,
+        "has_report": job.has_report,
+        "warning": " ".join(job.warnings),
+        "warnings": list(job.warnings),
+    }
 
 
 class JobManager:
-    """Singleton registry of in-flight and recent research jobs.
-
-    Expires terminal jobs after *ttl_seconds*.
-    """
+    """Persistent adapter for Workbench research-query jobs."""
 
     MAX_JOBS = 100
 
-    def __init__(self, ttl_seconds: float = 3600.0) -> None:
+    def __init__(
+        self,
+        ttl_seconds: float = 3600.0,
+        *,
+        db_path: str | Path | None = None,
+        start_worker: bool = True,
+        poll_interval: float = 0.25,
+        lease_seconds: float = 30.0,
+    ) -> None:
         self._lock = threading.Lock()
         self._jobs: dict[str, ResearchJob] = {}
         self._ttl = ttl_seconds
-        self._cleaner_started = False
+        self._db_path = Path(db_path or database_path()).resolve()
+        self._poll_interval = max(0.05, poll_interval)
+        self._lease_seconds = max(3.0, lease_seconds)
+        self._worker_id = f"workbench-query-{uuid.uuid4().hex[:12]}"
+        self._last_worker_error = ""
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._secrets: dict[str, dict[str, Any]] = {}
+        db = self._database()
+        db.close()
+        self._worker_thread: threading.Thread | None = None
+        if start_worker:
+            self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+            self._worker_thread.start()
+
+    @property
+    def db_path(self) -> Path:
+        return self._db_path
+
+    def _database(self) -> SQLiteDatabase:
+        db = SQLiteDatabase(self._db_path).connect()
+        db.bootstrap_schema()
+        return db
 
     def submit(self, query: str, payload: dict[str, Any], *, run_id: str | None = None) -> dict[str, Any]:
-        """Create a new job and start it in a background thread."""
         run_id = run_id or new_run_id()
         depth = str(payload.get("depth") or "standard")
         try:
@@ -281,17 +392,48 @@ class JobManager:
             deadline_at=started_at + timeout_seconds,
             commit_reserve_seconds=commit_reserve_seconds,
         )
-        with self._lock:
-            if len(self._jobs) >= self.MAX_JOBS:
-                raise RuntimeError(f"Job limit reached ({self.MAX_JOBS}). Wait for older jobs to expire.")
-            self._jobs[run_id] = job
-            self._maybe_start_cleaner()
-
-        job.thread = threading.Thread(
-            target=self._execute, args=(run_id, query, payload), daemon=True
-        )
-        job.thread.start()
-
+        persisted_payload = _sanitize_payload(dict(payload))
+        secrets = {
+            key: value
+            for key, value in payload.items()
+            if key.casefold() in _SECRET_FIELDS or key.casefold().endswith("_api_key")
+        }
+        db = self._database()
+        try:
+            queue = JobQueue(db, lease_seconds=self._lease_seconds)
+            active = sum(
+                1 for item in queue.list(kind=RESEARCH_JOB_KIND, limit=self.MAX_JOBS + 1)
+                if item["status"] in {"pending", "running"}
+            )
+            if active >= self.MAX_JOBS:
+                raise RuntimeError(f"Job limit reached ({self.MAX_JOBS}). Wait for active jobs to finish.")
+            RunStore(db).create_run(
+                run_id=run_id,
+                workspace=str(config.PROJECT_ROOT),
+                status="pending",
+                thread_id=run_id,
+                metadata=_job_metadata(job),
+            )
+            queue.enqueue(
+                RESEARCH_JOB_KIND,
+                {
+                    "query": query,
+                    "payload": persisted_payload,
+                    "started_at": started_at,
+                    "timeout_seconds": timeout_seconds,
+                    "deadline_at": job.deadline_at,
+                    "commit_reserve_seconds": commit_reserve_seconds,
+                },
+                job_id=run_id,
+                run_id=run_id,
+                max_attempts=2,
+            )
+        finally:
+            db.close()
+        if secrets:
+            with self._lock:
+                self._secrets[run_id] = secrets
+        self._wake.set()
         return {
             "run_id": run_id,
             "status": "pending",
@@ -303,256 +445,372 @@ class JobManager:
         }
 
     def get(self, run_id: str) -> dict[str, Any] | None:
-        """Return the current status dict for a job, or None."""
-        job = self._jobs.get(run_id)
-        if job is None:
-            return None
-        full_answer = job.final_answer or ""
-        answer_len = len(full_answer)
-        return {
-            "run_id": job.run_id,
-            "query": job.query,
-            "status": job.status,
-            "started_at": job.started_at,
-            "ended_at": job.ended_at,
-            "timeout_seconds": job.timeout_seconds,
-            "deadline_at": job.deadline_at,
-            "commit_reserve_seconds": job.commit_reserve_seconds,
-            "final_answer": full_answer[:4000],
-            "final_answer_truncated": answer_len > 4000,
-            "final_answer_total_length": answer_len,
-            "source_statuses": job.source_statuses,
-            "factcheck_status": job.factcheck_status,
-            "pipeline": job.pipeline,
-            "delivery_status": job.delivery_status,
-            "quality": dict(job.quality),
-            "artifacts": dict(job.artifacts),
-            "report_md_path": str(job.artifacts.get("markdown_path") or ""),
-            "error": job.error,
-            "current_stage": job.current_stage,
-            "progress": dict(job.progress),
-            "cancel_reason": job.cancel_reason,
-            "has_report": job.has_report,
-            "warning": " ".join(job.warnings),
-            "warnings": list(job.warnings),
-        }
-
-    def event_log(self, run_id: str) -> _EventLog | None:
-        """Return the append-only event log for SSE streaming."""
-        job = self._jobs.get(run_id)
-        return job._event_log if job else None
+        db = self._database()
+        try:
+            queued = JobQueue(db, lease_seconds=self._lease_seconds).get(run_id)
+            run = RunStore(db).get(run_id)
+        finally:
+            db.close()
+        if queued is None or run is None:
+            legacy = self._jobs.get(run_id)
+            return _public_status(legacy) if legacy else None
+        metadata = dict(run.get("metadata") or {})
+        metadata.update(queued.get("result") or {})
+        job = _job_from_metadata(run_id, metadata)
+        if job.status in {"pending", "running"}:
+            job.status = str(queued.get("status") or job.status)
+        if queued.get("error") and not job.error:
+            job.error = str(queued["error"])
+        return _public_status(job)
 
     def cancel(self, run_id: str, *, reason: str = "user") -> bool:
-        """Signal a best-effort cancel for an active job."""
+        db = self._database()
+        try:
+            queue = JobQueue(db, lease_seconds=self._lease_seconds)
+            cancelled = queue.cancel(run_id)
+            if cancelled:
+                run_store = RunStore(db)
+                run = run_store.get(run_id) or {}
+                metadata = dict(run.get("metadata") or {})
+                metadata.update(
+                    public_status="cancelled",
+                    cancel_reason="timeout" if reason == "timeout" else "user",
+                    ended_at=time.time(),
+                )
+                run_store.update_metadata(run_id, metadata, status="cancelled")
+                EventStore(db).append(
+                    TraceEvent(
+                        stage="job_cancelled",
+                        status="cancelled",
+                        elapsed_ms=0.0,
+                        summary="Research job cancellation persisted",
+                        run_id=run_id,
+                        thread_id=run_id,
+                        metadata={"reason": metadata["cancel_reason"]},
+                    )
+                )
+        finally:
+            db.close()
+        if cancelled:
+            with self._lock:
+                self._secrets.pop(run_id, None)
+            self._wake.set()
+            return True
         with self._lock:
-            job = self._jobs.get(run_id)
-            if job is None or not job.active:
+            legacy = self._jobs.get(run_id)
+            if legacy is None or not legacy.active:
                 return False
-            job.cancel_reason = "timeout" if reason == "timeout" else "user"
-            job._cancel_flag.set()
+            legacy.cancel_reason = "timeout" if reason == "timeout" else "user"
+            legacy._cancel_flag.set()
             return True
 
     def list(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Return recent jobs, newest first."""
-        with self._lock:
-            sorted_jobs = sorted(
-                self._jobs.values(), key=lambda j: j.started_at, reverse=True
+        db = self._database()
+        try:
+            queued = JobQueue(db, lease_seconds=self._lease_seconds).list(
+                kind=RESEARCH_JOB_KIND,
+                limit=self.MAX_JOBS,
             )
-        return [
-            {
-                "run_id": j.run_id,
-                "query": j.query[:200],
-                "status": j.status,
-                "started_at": j.started_at,
-                "ended_at": j.ended_at,
-            }
-            for j in sorted_jobs[:limit]
-        ]
+            runs = {item["run_id"]: item for item in RunStore(db).list(limit=self.MAX_JOBS)}
+        finally:
+            db.close()
+        result = []
+        for item in sorted(queued, key=lambda value: float(value["created_at"]), reverse=True)[:limit]:
+            run = runs.get(item["run_id"], {})
+            metadata = dict(run.get("metadata") or {})
+            metadata.update(item.get("result") or {})
+            result.append(
+                {
+                    "run_id": item["run_id"],
+                    "query": str(metadata.get("query") or "")[:200],
+                    "status": str(metadata.get("public_status") or item["status"]),
+                    "started_at": metadata.get("started_at", item["created_at"]),
+                    "ended_at": metadata.get("ended_at"),
+                }
+            )
+        return result
 
-    # ── Internal ───────────────────────────────────────────
+    def events(self, run_id: str, *, after_id: int = 0, limit: int = 200) -> list[dict[str, Any]]:
+        db = self._database()
+        try:
+            return EventStore(db).list(run_id=run_id, after_id=after_id, limit=limit)
+        finally:
+            db.close()
+
+    def event_log(self, run_id: str) -> None:
+        return None
+
+    def close(self) -> None:
+        self._stop.set()
+        self._wake.set()
+
+    def _worker_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                claimed = self._claim_next()
+                if claimed:
+                    payload = dict(claimed.get("payload") or {})
+                    if int(claimed.get("attempts") or 0) > 1:
+                        self._record_resume(claimed)
+                    self._execute(
+                        str(claimed["run_id"]),
+                        str(payload.get("query") or ""),
+                        dict(payload.get("payload") or {}),
+                    )
+                    continue
+                self._last_worker_error = ""
+            except Exception as exc:
+                self._last_worker_error = f"{type(exc).__name__}: {exc}"
+            self._wake.wait(self._poll_interval)
+            self._wake.clear()
+
+    def _claim_next(self) -> dict[str, Any] | None:
+        db = self._database()
+        try:
+            queue = JobQueue(db, lease_seconds=self._lease_seconds)
+            exhausted = queue.expire_exhausted(kind=RESEARCH_JOB_KIND)
+            for item in exhausted:
+                RunStore(db).update_metadata(
+                    item["run_id"],
+                    {
+                        "public_status": "failed",
+                        "error": str(item.get("error") or "lease expired after max attempts"),
+                        "ended_at": time.time(),
+                    },
+                    status="failed",
+                )
+            claimed = queue.claim(self._worker_id, kind=RESEARCH_JOB_KIND)
+            if claimed and self._restore_terminal_checkpoint(db, claimed):
+                return None
+            return claimed
+        finally:
+            db.close()
+
+    def _restore_terminal_checkpoint(self, db: SQLiteDatabase, claimed: dict[str, Any]) -> bool:
+        checkpoint = CheckpointStore(db).load(str(claimed["run_id"]))
+        terminal = dict((checkpoint or {}).get("terminal_result") or {})
+        if not terminal:
+            return False
+        queue = JobQueue(db, lease_seconds=self._lease_seconds)
+        completed = queue.complete(str(claimed["job_id"]), self._worker_id, result=terminal)
+        if completed:
+            RunStore(db).update_metadata(
+                str(claimed["run_id"]),
+                terminal,
+                status=str(terminal.get("public_status") or "completed"),
+            )
+        return completed
+
+    def _record_resume(self, claimed: dict[str, Any]) -> None:
+        db = self._database()
+        try:
+            checkpoint = CheckpointStore(db).load(str(claimed["run_id"])) or {}
+            step = str(checkpoint.get("step_id") or checkpoint.get("stage") or "unknown")
+            EventStore(db).append(
+                TraceEvent(
+                    stage="job_resume",
+                    status="running",
+                    elapsed_ms=0.0,
+                    summary="Restarting durable research job from the last persisted checkpoint",
+                    run_id=str(claimed["run_id"]),
+                    thread_id=str(claimed["run_id"]),
+                    metadata={"restarted_from_step": step, "attempt": claimed.get("attempts")},
+                )
+            )
+        finally:
+            db.close()
 
     def _execute(self, run_id: str, query: str, payload: dict[str, Any]) -> None:
-        """Background execution of the Conflux query pipeline."""
-        job = self._jobs.get(run_id)
-        if job is None:
+        db = self._database()
+        queue = JobQueue(db, lease_seconds=self._lease_seconds)
+        claimed = queue.get(run_id)
+        if claimed is None or claimed.get("status") != "running":
+            db.close()
             return
+        run_store = RunStore(db)
+        event_store = EventStore(db)
+        checkpoints = CheckpointStore(db)
+        run = run_store.get(run_id) or {}
+        job = _job_from_metadata(run_id, dict(run.get("metadata") or {}))
+        job.status = "running"
+        with self._lock:
+            payload.update(self._secrets.get(run_id) or {})
         updates = _model_env_updates(payload)
         output_dir = _path_value(payload.get("output_dir"), "reports/workbench/query")
         mode = str(payload.get("mode") or "phase2")
         depth = str(payload.get("depth") or "standard")
+        last_step = run_store.last_step(run_id)
+        step_seq = int((last_step or {}).get("seq") or 0)
+        trace_count = 0
+        last_draft = ""
+        last_verified = ""
+        heartbeat_stop = threading.Event()
 
-        stream = io.StringIO()
-        live_events: list[Any] = []
+        def heartbeat() -> None:
+            while not heartbeat_stop.wait(max(1.0, self._lease_seconds / 3.0)):
+                heartbeat_db = self._database()
+                try:
+                    if not JobQueue(heartbeat_db, lease_seconds=self._lease_seconds).heartbeat(
+                        run_id, self._worker_id
+                    ):
+                        return
+                finally:
+                    heartbeat_db.close()
+
+        heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+        heartbeat_thread.start()
+
+        def persist_job(*, run_status: str | None = None) -> None:
+            run_store.update_metadata(
+                run_id,
+                _job_metadata(job),
+                status=run_status or job.status,
+            )
+
+        def emit_stage(
+            events: list[Any],
+            stage: str,
+            status: str,
+            summary: str,
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
+            if job.progress.get(stage) == status:
+                return
+            trace_event = TraceEvent(
+                stage=stage,
+                status=status,
+                elapsed_ms=round((time.time() - job.started_at) * 1000, 2),
+                summary=summary,
+                run_id=run_id,
+                thread_id=run_id,
+                metadata=metadata or {},
+            )
+            events.append(trace_event)
+            job.current_stage = stage
+            job.progress[stage] = status
+
+        def should_stop() -> None:
+            fresh = queue.get(run_id)
+            if fresh is None or fresh.get("status") == "cancelled":
+                job.cancel_reason = str(
+                    ((run_store.get(run_id) or {}).get("metadata") or {}).get("cancel_reason")
+                    or "user"
+                )
+                job._cancel_flag.set()
+            _enforce_job_stop(job, job.started_at)
+
+        def on_state(state: dict[str, Any], events: list[Any]) -> None:
+            nonlocal trace_count, last_draft, last_verified, step_seq
+            final_answer = str(state.get("final_answer") or "")
+            verified_answer = str(state.get("_verified_answer") or "")
+            if final_answer and final_answer != last_draft:
+                snapshot_stage = "verified" if verified_answer and final_answer == verified_answer else "draft"
+                _capture_report_snapshot(job, state, output_dir, stage=snapshot_stage)
+                last_draft = final_answer
+                if snapshot_stage == "verified":
+                    last_verified = verified_answer
+            if verified_answer and verified_answer != last_verified:
+                _capture_report_snapshot(
+                    job,
+                    {**state, "final_answer": verified_answer},
+                    output_dir,
+                    stage="verified",
+                )
+                last_verified = verified_answer
+
+            pipeline_stage = str(state.get("_pipeline_stage") or "")
+            event_mode = str((state.get("_run_summary") or {}).get("mode") or "")
+            if event_mode:
+                job.pipeline = event_mode
+            gap_round = max(
+                int(state.get("_gap_iteration") or 0),
+                int(state.get("_coverage_iteration") or 0),
+            )
+            if pipeline_stage in {"synthesized", "dynamically_synthesized"}:
+                emit_stage(events, "report_draft", "completed", "报告初稿已生成")
+                emit_stage(events, "verification_round", "running", "第一轮核验")
+            elif pipeline_stage == "verified_revised":
+                emit_stage(events, "verification_round", "completed", "第一轮核验完成")
+                emit_stage(events, "final_commit", "running", "最终提交")
+            elif pipeline_stage in {"gap_researched", "targeted_gap_researched"}:
+                emit_stage(
+                    events,
+                    "targeted_gap_research",
+                    "completed",
+                    f"针对性补证第 {max(1, gap_round)} 轮完成",
+                    {"round": max(1, gap_round)},
+                )
+                emit_stage(events, "reanalysis", "running", "重新分析")
+            elif pipeline_stage in {"model_analyzed", "generalized_model_analyzed"} and gap_round:
+                emit_stage(events, "reanalysis", "completed", "重新分析完成")
+            elif pipeline_stage == "completed":
+                emit_stage(events, "final_commit", "running", "最终提交")
+
+            for trace_event in events[trace_count:]:
+                event_store.append(trace_event)
+                job.current_stage = str(getattr(trace_event, "stage", job.current_stage))
+                job.progress[job.current_stage] = str(getattr(trace_event, "status", "completed"))
+            trace_count = len(events)
+            _persist_trace_snapshot(job, events, output_dir)
+            job.source_statuses = {
+                source: value.get("status") if isinstance(value, dict) else str(value)
+                for source, value in (state.get("_source_statuses") or {}).items()
+            }
+            job.factcheck_status = str(state.get("_factcheck_status") or job.factcheck_status)
+            job.delivery_status = str(state.get("_delivery_status") or job.delivery_status)
+            job.quality = dict(state.get("_audit_metrics") or job.quality)
+            job.artifacts.update(
+                {
+                    str(key): str(value)
+                    for key, value in (state.get("_report_artifacts") or {}).items()
+                    if value
+                }
+            )
+            step_seq += 1
+            checkpoint = _checkpoint_payload(state, job, step_seq)
+            checkpoints.save(run_id, f"{step_seq:06d}", checkpoint)
+            run_store.add_step(
+                run_id,
+                {
+                    "status": "completed",
+                    "capability_id": "research.query.state",
+                    "output": {
+                        "stage": checkpoint["stage"],
+                        "progress": checkpoint["progress"],
+                    },
+                },
+                step_id=f"{run_id}:{step_seq:06d}",
+                seq=step_seq,
+            )
+            persist_job(run_status="running")
+            queue.heartbeat(run_id, self._worker_id)
+
         try:
-            with _EXECUTION_LOCK:
-                # Include time spent waiting for the execution lock in the tier deadline.
-                _enforce_job_stop(job, job.started_at)
-                job.status = "running"
+            persist_job(run_status="running")
+            should_stop()
+            context = RunContext(
+                run_id=run_id,
+                thread_id=run_id,
+                workspace=str(config.PROJECT_ROOT),
+                config_overrides=updates,
+            )
+            from conflux.__main__ import query_command
 
-                with _temporary_env(updates), contextlib.redirect_stdout(stream):
-                    from conflux.__main__ import query_command
-                    from conflux.trace import TraceEvent, event_from_state_key
-
-                    # ── Patch _run_phase2_graph for real-time events ──
-                    import conflux.__main__ as main_mod
-                    _original_run_phase2 = main_mod._run_phase2_graph
-
-                    def emit_stage(
-                        events: list[Any],
-                        stage: str,
-                        status: str,
-                        summary: str,
-                        metadata: dict[str, Any] | None = None,
-                    ) -> None:
-                        if job.progress.get(stage) == status:
-                            return
-                        trace_event = TraceEvent(
-                            stage=stage,
-                            status=status,
-                            elapsed_ms=round((time.time() - job.started_at) * 1000, 2),
-                            summary=summary,
-                            run_id=run_id,
-                            thread_id=run_id,
-                            metadata=metadata or {},
-                        )
-                        events.append(trace_event)
-                        job.current_stage = stage
-                        job.progress[stage] = status
-                        job._event_log.append(trace_event.to_dict())
-
-                    def _instrumented_run_phase2(graph, initial_state, query2, *, stream_events=False, thread_id=None):
-                        started_at_ts = job.started_at
-                        event = initial_state
-                        seen = set()
-                        events = live_events
-                        last_draft = ""
-                        last_verified = ""
-                        config_graph = main_mod.graph_config(thread_id)
-                        for event in graph.stream(initial_state, config=config_graph, stream_mode="values"):
-                            final_answer = str(event.get("final_answer") or "")
-                            verified_answer = str(event.get("_verified_answer") or "")
-                            if final_answer and final_answer != last_draft:
-                                snapshot_stage = (
-                                    "verified"
-                                    if verified_answer and final_answer == verified_answer
-                                    else "draft"
-                                )
-                                _capture_report_snapshot(
-                                    job, event, output_dir, stage=snapshot_stage
-                                )
-                                last_draft = final_answer
-                                if snapshot_stage == "verified":
-                                    last_verified = verified_answer
-                            if verified_answer and verified_answer != last_verified:
-                                _capture_report_snapshot(
-                                    job,
-                                    {**event, "final_answer": verified_answer},
-                                    output_dir,
-                                    stage="verified",
-                                )
-                                last_verified = verified_answer
-
-                            pipeline_stage = str(event.get("_pipeline_stage") or "")
-                            event_mode = str((event.get("_run_summary") or {}).get("mode") or "")
-                            if event_mode:
-                                job.pipeline = event_mode
-                            gap_round = max(
-                                int(event.get("_gap_iteration") or 0),
-                                int(event.get("_coverage_iteration") or 0),
-                            )
-                            if pipeline_stage in {"synthesized", "dynamically_synthesized"}:
-                                emit_stage(events, "report_draft", "completed", "报告初稿已生成")
-                                emit_stage(events, "verification_round", "running", "第一轮核验")
-                            elif pipeline_stage == "verified_revised":
-                                emit_stage(events, "verification_round", "completed", "第一轮核验完成")
-                                statuses = event.get("_source_statuses") or {}
-                                external_available = any(
-                                    str((statuses.get(source) or {}).get("status") or "")
-                                    in {"success", "low_relevance"}
-                                    for source in ("RAG", "Web")
-                                )
-                                if (
-                                    event.get("_gap_questions")
-                                    and external_available
-                                    and job.deadline_at - time.time() >= 90
-                                ):
-                                    emit_stage(
-                                        events,
-                                        "targeted_gap_research",
-                                        "running",
-                                        f"针对性补证 · 第 {gap_round + 1} 轮",
-                                        {"round": gap_round + 1},
-                                    )
-                                else:
-                                    emit_stage(events, "final_commit", "running", "最终提交")
-                            elif pipeline_stage in {"gap_researched", "targeted_gap_researched"}:
-                                emit_stage(
-                                    events,
-                                    "targeted_gap_research",
-                                    "completed",
-                                    f"针对性补证 · 第 {max(1, gap_round)} 轮完成",
-                                    {"round": max(1, gap_round)},
-                                )
-                                emit_stage(events, "reanalysis", "running", "重新分析")
-                            elif pipeline_stage in {"model_analyzed", "generalized_model_analyzed"} and gap_round:
-                                emit_stage(events, "reanalysis", "completed", "重新分析完成")
-                            elif pipeline_stage == "completed":
-                                emit_stage(events, "final_commit", "running", "最终提交")
-
-                            for key, label in [
-                                ("_research_plan", "Research Plan"),
-                                ("_domain_map", "Domain Map"),
-                                ("rag_result", "RAG Agent"),
-                                ("web_result", "Web Agent"),
-                                ("model_result", "Model Agent"),
-                                ("_merged", "Evidence Merge"),
-                                ("_coverage_matrix", "Coverage Review"),
-                                ("_section_contracts", "Section Contracts"),
-                                ("_section_drafts", "Section Synthesis"),
-                                ("_arbitration", "Arbitration"),
-                                ("final_answer", "Synthesis"),
-                                ("_verified_answer", "FactCheck"),
-                                ("_factcheck_report", "Verify & Revise"),
-                                ("_verification_issues", "Verify & Revise"),
-                                ("_deep_queries", "Gap Research"),
-                                ("_deep_research", "L4 Deep Research"),
-                            ]:
-                                value = event.get(key)
-                                if value and key not in seen:
-                                    seen.add(key)
-                                    trace_event = event_from_state_key(
-                                        key, value,
-                                        run_id=run_id, thread_id=thread_id,
-                                        started_at=started_at_ts,
-                                    )
-                                    if trace_event:
-                                        if key == "final_answer" and event.get("_synthesis_status"):
-                                            trace_event.status = str(event["_synthesis_status"])
-                                            trace_event.metadata["synthesis_error"] = str(
-                                                event.get("_synthesis_error") or ""
-                                            )
-                                        events.append(trace_event)
-                                        job.current_stage = trace_event.stage
-                                        job.progress[trace_event.stage] = trace_event.status
-                                        job._event_log.append(trace_event.to_dict())
-                            _persist_trace_snapshot(job, events, output_dir)
-                            _enforce_job_stop(job, started_at_ts)
-                        return event, events
-
-                    main_mod._run_phase2_graph = _instrumented_run_phase2
-                    try:
-                        state = query_command(
-                            query, mode=mode, output_dir=output_dir,
-                            stream_events=False, trace_dir=output_dir,
-                            run_id=run_id,
-                            depth=depth,
-                            started_at=job.started_at,
-                            deadline_at=job.deadline_at,
-                            commit_reserve_seconds=job.commit_reserve_seconds,
-                        )
-                    finally:
-                        main_mod._run_phase2_graph = _original_run_phase2
-
+            state = query_command(
+                query,
+                mode=mode,
+                output_dir=output_dir,
+                stream_events=False,
+                trace_dir=output_dir,
+                run_id=run_id,
+                depth=depth,
+                started_at=job.started_at,
+                deadline_at=job.deadline_at,
+                commit_reserve_seconds=job.commit_reserve_seconds,
+                run_context=context,
+                on_graph_state=on_state,
+                should_stop=should_stop,
+            )
             _capture_report_snapshot(
                 job,
                 state,
@@ -560,21 +818,24 @@ class JobManager:
                 stage="verified" if state.get("_verified_answer") else "draft",
             )
             job.source_statuses = {
-                source: p.get("status") if isinstance(p, dict) else str(p)
-                for source, p in (state.get("_source_statuses") or {}).items()
+                source: value.get("status") if isinstance(value, dict) else str(value)
+                for source, value in (state.get("_source_statuses") or {}).items()
             }
             job.factcheck_status = str(state.get("_factcheck_status") or "")
             job.pipeline = str((state.get("_run_summary") or {}).get("mode") or "")
             job.delivery_status = str(state.get("_delivery_status") or "")
             job.quality = dict(state.get("_audit_metrics") or {})
-            job.artifacts.update({
-                str(key): str(value)
-                for key, value in (state.get("_report_artifacts") or {}).items()
-                if value
-            })
-
-            emit_stage(live_events, "final_commit", "completed", "最终提交完成")
-            _persist_trace_snapshot(job, live_events, output_dir)
+            job.artifacts.update(
+                {
+                    str(key): str(value)
+                    for key, value in (state.get("_report_artifacts") or {}).items()
+                    if value
+                }
+            )
+            final_events: list[Any] = []
+            emit_stage(final_events, "final_commit", "completed", "最终提交完成")
+            for trace_event in final_events:
+                event_store.append(trace_event)
             job.warnings.extend(
                 warning for warning in _state_warnings(state) if warning not in job.warnings
             )
@@ -592,50 +853,72 @@ class JobManager:
                     job.status = "completed_diagnostic"
                 else:
                     job.status = "completed_with_warnings" if job.warnings else "completed"
+            result = _job_metadata(job)
+            checkpoints.save(
+                run_id,
+                "final",
+                {
+                    **_checkpoint_payload(state, job, step_seq + 1),
+                    "complete": True,
+                    "terminal_result": result,
+                },
+            )
+            if queue.complete(run_id, self._worker_id, result=result):
+                persist_job(run_status=job.status)
         except _JobCancelled as exc:
             _finish_job(job, "cancelled", str(exc), preserve_report=True)
+            queue.cancel(run_id)
+            persist_job(run_status="cancelled")
         except _JobTimedOut as exc:
             _finish_job(job, "timed_out", str(exc), preserve_report=True)
+            result = _job_metadata(job)
+            queue.complete(run_id, self._worker_id, result=result)
+            persist_job(run_status=job.status)
         except SystemExit as exc:
-            error = f"SystemExit code={exc.code}: {stream.getvalue()[-500:]}"
-            if job.cancel_reason == "timeout" or _deadline_exceeded(job):
-                job.cancel_reason = "timeout"
-                _finish_job(job, "timed_out", error, preserve_report=True)
-            else:
-                _finish_job(job, "failed", error, preserve_report=True)
+            _finish_job(job, "failed", f"SystemExit code={exc.code}", preserve_report=True)
+            queue.fail(run_id, self._worker_id, job.error, retryable=False)
+            persist_job(run_status="failed")
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
-            if job.cancel_reason == "timeout" or _deadline_exceeded(job):
+            fresh = queue.get(run_id)
+            if fresh and fresh.get("status") == "cancelled":
+                job.cancel_reason = "user"
+            if job.cancel_reason == "user":
+                _finish_job(job, "cancelled", error, preserve_report=True)
+                queue.cancel(run_id)
+                persist_job(run_status="cancelled")
+            elif job.cancel_reason == "timeout" or _deadline_exceeded(job):
                 job.cancel_reason = "timeout"
                 _finish_job(job, "timed_out", error, preserve_report=True)
-            elif job.cancel_reason == "user":
-                _finish_job(job, "cancelled", error, preserve_report=True)
+                result = _job_metadata(job)
+                queue.complete(run_id, self._worker_id, result=result)
+                persist_job(run_status=job.status)
             else:
                 _finish_job(job, "failed", error, preserve_report=True)
-
-        job._event_log.append(None)  # sentinel
-
-    def _maybe_start_cleaner(self) -> None:
-        if self._cleaner_started:
-            return
-        self._cleaner_started = True
-
-        def _clean():
-            while True:
-                time.sleep(600)
-                with self._lock:
-                    now = time.time()
-                    stale = [
-                        rid for rid, j in self._jobs.items()
-                        if not j.active and j.ended_at and (now - j.ended_at) > self._ttl
-                    ]
-                    for rid in stale:
-                        del self._jobs[rid]
-
-        threading.Thread(target=_clean, daemon=True).start()
+                queue.fail(run_id, self._worker_id, job.error, retryable=False)
+                persist_job(run_status="failed")
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1.0)
+            with self._lock:
+                self._secrets.pop(run_id, None)
+            db.close()
 
 
-# ── Helpers ────────────────────────────────────────────────
+def _checkpoint_payload(state: dict[str, Any], job: ResearchJob, step_id: int) -> dict[str, Any]:
+    return {
+        "step_id": step_id,
+        "stage": str(state.get("_pipeline_stage") or job.current_stage or "running"),
+        "progress": dict(job.progress),
+        "final_answer": str(state.get("final_answer") or ""),
+        "verified_answer": str(state.get("_verified_answer") or ""),
+        "source_statuses": state.get("_source_statuses") or {},
+        "run_summary": state.get("_run_summary") or {},
+        "report_artifacts": state.get("_report_artifacts") or {},
+        "delivery_status": str(state.get("_delivery_status") or ""),
+        "audit_metrics": state.get("_audit_metrics") or {},
+        "complete": False,
+    }
 
 
 def _path_value(value: Any, default: str) -> str:
@@ -691,25 +974,6 @@ def _model_env_updates(payload: dict[str, Any]) -> dict[str, str]:
     return updates
 
 
-@contextlib.contextmanager
-def _temporary_env(updates: dict[str, str]):
-    old_values = {key: os.environ.get(key) for key in updates}
-    try:
-        for key, value in updates.items():
-            if value:
-                os.environ[key] = value
-        config._config = None
-        yield
-    finally:
-        for key, value in old_values.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        config._config = None
-
-
-# Singleton
 _job_manager: JobManager | None = None
 
 

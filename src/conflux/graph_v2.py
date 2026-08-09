@@ -89,6 +89,7 @@ from ._graph_utils import (
     factcheck_node,  # noqa: F401 — re-export
     model_agent_node,  # noqa: F401 — re-export
 )
+from .config import submit_with_context
 from .rag.reranker import SemanticReranker
 from .research_modes import ResearchModeProfile
 from .research_protocol import (
@@ -1749,9 +1750,15 @@ def _retrieve_round0_node(
                     ),
                 ))
     with ThreadPoolExecutor(max_workers=max(1, len(jobs) + bool(independent_model))) as executor:
-        futures = [executor.submit(retrieve_one, *job) for job in jobs]
+        futures = [submit_with_context(executor, retrieve_one, *job) for job in jobs]
         independent_future = (
-            executor.submit(_run_independent_analysis, state, independent_model, budget_state)
+            submit_with_context(
+                executor,
+                _run_independent_analysis,
+                state,
+                independent_model,
+                budget_state,
+            )
             if independent_model is not None
             else None
         )
@@ -1919,7 +1926,10 @@ def correction_node(state: dict[str, Any], rag_tool: Any, web_tool: Any) -> dict
                 ),
             ))
     with ThreadPoolExecutor(max_workers=max(1, len(actions))) as executor:
-        futures = [executor.submit(correct_one, proposal) for proposal in runnable_actions]
+        futures = [
+            submit_with_context(executor, correct_one, proposal)
+            for proposal in runnable_actions
+        ]
         for proposal, result in skipped:
             action_id = proposal.action_id
             result = _bind_result(
@@ -2448,17 +2458,25 @@ def generate_node(
                     section_index=section_index,
                     section_total=len(sub_questions),
                 )
-                futures.append(executor.submit(
-                    _generate_section,
-                    sq, core_question, rag_results, web_results, citation_map, model,
-                    status=status,
-                    evidence_records=_section_evidence_records(
-                        state,
-                        str(sq.get("id") or ""),
+                futures.append(
+                    submit_with_context(
+                        executor,
+                        _generate_section,
+                        sq,
+                        core_question,
+                        rag_results,
+                        web_results,
                         citation_map,
-                    ),
-                    budget_state=budget_state,
-                ))
+                        model,
+                        status=status,
+                        evidence_records=_section_evidence_records(
+                            state,
+                            str(sq.get("id") or ""),
+                            citation_map,
+                        ),
+                        budget_state=budget_state,
+                    )
+                )
         for future in futures:
             try:
                 sr = future.result(timeout=section_timeout)

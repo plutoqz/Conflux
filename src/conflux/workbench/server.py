@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import argparse
 import calendar
-import contextlib
 import email.utils
 import html
 import hashlib
 import hmac
-import io
 import json
 import mimetypes
 import os
@@ -74,7 +72,7 @@ from conflux.workbench.config_store import (
     save_config_field,
     save_workbench_env,
 )
-from conflux.workbench.jobs import get_job_manager, _EXECUTION_LOCK
+from conflux.workbench.jobs import get_job_manager
 from conflux.workbench.sessions import build_session_index, get_session_detail
 
 
@@ -884,7 +882,7 @@ def rebuild_knowledge_index(payload: dict[str, Any]) -> dict[str, Any]:
     from conflux.rag.indexer import create_vector_store, index_documents
 
     try:
-        with _temporary_env(embedding_updates):
+        with config.override(embedding_updates):
             indexed = index_documents(create_vector_store(), documents)
     except Exception as exc:
         _delete_vector_collection(new_name)
@@ -1160,7 +1158,7 @@ def run_paper_inbox(payload: dict[str, Any]) -> dict[str, Any]:
                 "CONFLUX_MODELS__PAPER_REVIEW__API_KEY": settings["api_key"],
                 "CONFLUX_MODELS__PAPER_REVIEW__TEMPERATURE": str(settings["temperature"]),
             }
-            with _temporary_env(model_updates):
+            with config.override(model_updates):
                 ctx = make_plugin_context(config={"model_preset": "paper_review"})
                 review_result = paper_review(
                     ctx,
@@ -1367,7 +1365,7 @@ def run_paper_promotion(payload: dict[str, Any]) -> dict[str, Any]:
             emb_updates["CONFLUX_EMBEDDING__MODEL"] = emb_model
 
     try:
-        with _temporary_env(emb_updates):
+        with config.override(emb_updates):
             result = promote_inbox(
                 inbox,
                 out_dir=out_dir,
@@ -1655,31 +1653,36 @@ def run_query(payload: dict[str, Any]) -> dict[str, Any]:
     mode = str(payload.get("mode") or "phase2")
     from conflux.trace import new_run_id
     run_id = new_run_id()
-    stream = io.StringIO()
     started = time.perf_counter()
-    with _EXECUTION_LOCK, _temporary_env(updates), contextlib.redirect_stdout(stream):
-        try:
-            from conflux.__main__ import query_command
+    try:
+        from conflux.__main__ import query_command
+        from conflux.core.contracts import RunContext
 
-            state = query_command(
-                query,
-                mode=mode,
-                output_dir=output_dir,
-                stream_events=False,
-                trace_dir=output_dir,
+        state = query_command(
+            query,
+            mode=mode,
+            output_dir=output_dir,
+            stream_events=False,
+            trace_dir=output_dir,
+            run_id=run_id,
+            run_context=RunContext(
                 run_id=run_id,
-            )
-        except SystemExit as exc:
-            return {"ok": False, "run_id": run_id, "exit_code": exc.code, "stdout": stream.getvalue()}
-        except Exception as exc:
-            return {"ok": False, "run_id": run_id, "error": str(exc), "stdout": stream.getvalue()}
+                thread_id=run_id,
+                workspace=str(PROJECT_ROOT),
+                config_overrides=updates,
+            ),
+        )
+    except SystemExit as exc:
+        return {"ok": False, "run_id": run_id, "exit_code": exc.code, "stdout": ""}
+    except Exception as exc:
+        return {"ok": False, "run_id": run_id, "error": str(exc), "stdout": ""}
 
     elapsed_ms = round((time.perf_counter() - started) * 1000)
     return {
         "ok": True,
         "run_id": run_id,
         "elapsed_ms": elapsed_ms,
-        "stdout": stream.getvalue()[-6000:],
+        "stdout": "",
         "final_answer": str(state.get("final_answer") or "")[:4000],
         "artifacts": state.get("_report_artifacts") or {},
     }
@@ -2379,23 +2382,22 @@ def _execute_project_research_radar(payload: dict[str, Any], *, job_id: str = ""
             seen_state = ProjectPaperStore(db).seen_statuses(project_id)
         finally:
             db.close()
-        with _EXECUTION_LOCK:
-            with _temporary_env(model_updates):
-                review_model = create_chat_model(
-                    "research_radar",
-                    max_tokens=4096,
-                    timeout=120,
-                    max_retries=0,
-                )
-                result = run_paper_radar_from_profile(
-                    project=project,
-                    profile_path=str(resolved),
-                    out_dir=str(PROJECT_ROOT / DEFAULT_PROGRESS_DIR / "workbench" / "projects"),
-                    llm_review=True,
-                    review_model=review_model,
-                    seen_state=seen_state,
-                    persist_seen_file=False,
-                )
+        with config.override(model_updates):
+            review_model = create_chat_model(
+                "research_radar",
+                max_tokens=4096,
+                timeout=120,
+                max_retries=0,
+            )
+            result = run_paper_radar_from_profile(
+                project=project,
+                profile_path=str(resolved),
+                out_dir=str(PROJECT_ROOT / DEFAULT_PROGRESS_DIR / "workbench" / "projects"),
+                llm_review=True,
+                review_model=review_model,
+                seen_state=seen_state,
+                persist_seen_file=False,
+            )
 
         all_sources_failed = bool(result.stats.sources_used) and set(result.stats.failed_sources) >= set(
             result.stats.sources_used
@@ -3578,13 +3580,12 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_sse(self, run_id: str) -> None:
-        """Stream SSE events from a job's append-only event log.
+        """Stream persisted SSE events using the database event id as cursor.
 
         Supports Last-Event-ID for reconnection.
         """
         mgr = get_job_manager()
-        log = mgr.event_log(run_id)
-        if log is None:
+        if mgr.get(run_id) is None:
             self.send_error(404)
             return
         # Parse Last-Event-ID for reconnection cursor
@@ -3597,27 +3598,36 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self.send_header("Content-Security-Policy", CSP_HEADER)
         self.end_headers()
+        terminal_statuses = {
+            "completed",
+            "completed_with_warnings",
+            "completed_diagnostic",
+            "timed_out_with_report",
+            "timed_out",
+            "cancelled",
+            "failed",
+        }
+        last_keepalive = time.monotonic()
         try:
             while True:
-                batch, next_cursor, closed = log.read_from(cursor, timeout=25.0)
-                start_cursor = cursor
-                for offset, event in enumerate(batch):
-                    if event is None:
-                        self.wfile.write(b"event: done\ndata: {}\n\n")
-                        self.wfile.flush()
-                        return
-                    event_id = start_cursor + offset + 1
+                batch = mgr.events(run_id, after_id=cursor)
+                for event in batch:
+                    event_id = int(event["event_id"])
                     data = json.dumps(event, ensure_ascii=False)
                     self.wfile.write(f"id: {event_id}\ndata: {data}\n\n".encode("utf-8"))
                     self.wfile.flush()
-                cursor = next_cursor
-                if closed and not batch:
+                    cursor = event_id
+                job = mgr.get(run_id)
+                if not batch and job and job.get("status") in terminal_statuses:
                     self.wfile.write(b"event: done\ndata: {}\n\n")
                     self.wfile.flush()
                     return
-                if not batch:
+                if not batch and time.monotonic() - last_keepalive >= 25.0:
                     self.wfile.write(b": keepalive\n\n")
                     self.wfile.flush()
+                    last_keepalive = time.monotonic()
+                if not batch:
+                    time.sleep(0.25)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
@@ -4001,24 +4011,6 @@ def _model_env_updates(payload: dict[str, Any]) -> dict[str, str]:
         updates["CONFLUX_RETRIEVAL__TOP_K"] = "15"
         updates["CONFLUX_RETRIEVAL__FINAL_K"] = "10"
     return updates
-
-
-@contextlib.contextmanager
-def _temporary_env(updates: dict[str, str]):
-    old_values = {key: os.environ.get(key) for key in updates}
-    try:
-        for key, value in updates.items():
-            if value:
-                os.environ[key] = value
-        config._config = None  # type: ignore[attr-defined]
-        yield
-    finally:
-        for key, value in old_values.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        config._config = None  # type: ignore[attr-defined]
 
 
 def render_markdown_preview(requested_path: str) -> str | None:
