@@ -196,3 +196,9 @@ first_strong_rank 和 strong_success@1 上均优于或持平分层 + 温度 0；
 和 first_strong_rank 均下降，strong_recall 未提升；few-shot 增加了 token 成本，
 recall/precision/nDCG 下降，strong_recall 仍为 0.5。两者当前均不采纳为默认，
 保留为实验参数（`--review-mode listwise`、`--few-shot`）。
+
+## 2026-08-09 Cap 网格
+
+GIS Cap 网格结果见 `evaluation/recall_cap_grid_20260809.md`：
+cap80 listwise 提升 strong_recall@20 中位数至 0.75，但 nDCG/precision 下降；
+cap100 恶化。默认仍为 pointwise cap40。

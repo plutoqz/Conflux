@@ -88,8 +88,9 @@ def run_round(args: argparse.Namespace) -> int:
     proj.research = {
         "profile": args.profile,
         "sources": ["arxiv"],
-        "max_candidates": 100,
+        "max_candidates": args.max_candidates,
         "deep_read_limit": 0,
+        "semantic_review_limit": args.review_limit,
     }
     review_model = create_chat_model("balanced", temperature=args.temperature)
 
@@ -126,6 +127,8 @@ def run_round(args: argparse.Namespace) -> int:
         "review_mode": args.review_mode,
         "few_shot": args.few_shot,
         "review_chunk_size": args.review_chunk_size,
+        "review_limit": args.review_limit,
+        "max_candidates": args.max_candidates,
         "candidates": str(candidates_path),
         "semantic_review_calls": result.stats.semantic_review_calls,
         "semantic_review_tokens": result.stats.semantic_review_tokens,
@@ -156,6 +159,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-layered", action="store_true")
     parser.add_argument("--review-mode", choices=["pointwise", "listwise"], default="pointwise")
     parser.add_argument("--review-chunk-size", type=int, default=8)
+    parser.add_argument("--review-limit", type=int, default=40)
+    parser.add_argument("--max-candidates", type=int, default=100)
     parser.add_argument("--few-shot", action="store_true")
     parser.add_argument("--out-dir", default="")
     args = parser.parse_args(argv)

@@ -26,5 +26,15 @@
       "strong_recall_at_20": 0.3333,
       "success_at_10": true
     }
+  },
+  "cap_grid": {
+    "report": "evaluation/recall_cap_grid_20260809.md",
+    "runs": {
+      "listwise_cap60": "reports/evaluation/kg_llm_radar/cap_60/radar_run.json",
+      "listwise_cap80": "reports/evaluation/kg_llm_radar/cap_80/radar_run.json",
+      "listwise_cap100": "reports/evaluation/kg_llm_radar/cap_100/radar_run.json",
+      "listwise_cap120": "reports/evaluation/kg_llm_radar/cap_120/radar_run.json",
+      "pointwise_cap100": "reports/evaluation/kg_llm_radar/cap_100_pointwise/radar_run.json"
+    }
   }
 }

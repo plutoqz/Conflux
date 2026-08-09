@@ -45,6 +45,13 @@
 随机按论文 ID 划分 hold-out 对检索排序不成立，本轮不做 paper-level hold-out；
 跨领域验证采用“GIS 调参域 / KG 独立测试域”的方式。
 
+## 2026-08-09 Cap 网格
+
+KG Cap 网格结果见 `evaluation/recall_cap_grid_20260809.md`：
+listwise 扩池未提升 strong_recall@20；pointwise cap100 单次运行质量最高但成本
+约 2.4 倍。当前建议：成本敏感用 listwise cap60，质量优先用 pointwise cap100
+并补多次运行确认。
+
 ## 限制
 
 - 本测试仍是跨领域冒烟，初标待用户终审。
