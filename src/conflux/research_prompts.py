@@ -92,6 +92,15 @@ Allowed evidence records:
 {evidence_json}
 
 Rules:
+- Cover at least three distinct aspects of the subquestion across the claim set:
+  mechanism/evidence, limitation/boundary, comparison/trade-off, or
+  recommendation/next step. A single-angle claim set is incomplete.
+- Include at least one recommendation or trade-off claim (claim_type
+  derived_analysis or model_analysis, importance high or critical) that states
+  what should be done, under what condition, or what the trade-off is.
+- When the subquestion concerns limitations, explicitly include the failure
+  modes that retrieval or more external evidence cannot fix (for example
+  logical, compositional, or reasoning errors).
 - Use claim_type direct_fact for one-source factual claims.
 - Use claim_type multi_source_fact only when the claim needs at least two independent source identities.
 - Use claim_type derived_analysis when the claim is derived from listed evidence or claims.

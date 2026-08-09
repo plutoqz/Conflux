@@ -1,8 +1,9 @@
 """重建全量本地 RAG 索引。
 
 覆盖 data/documents 下的全部可检索内容：
-- papers/paper_promotion_manifest.json 中的论文 summary/fulltext chunks（保留原 chunk
-  metadata，不再二次切分）；
+- papers/papers/paper-{id}#{scope}.md 全部论文 summary/fulltext chunks（按文件名
+  生成 paper_id/content_scope 元数据，不依赖 promotion manifest，避免漏掉
+  未入库论文）；
 - data/documents 根目录的 .md/.txt 普通资料（ESRI/NIST/wiki/AI 治理等），整篇截断索引，
   避免 wiki 长文档产生数万子块和过高 embedding 成本；
 - 跳过 papers/pdfs 原始 PDF：对应论文文本已在 papers/papers/*.md 抽取并纳入 manifest。
@@ -15,7 +16,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -28,33 +28,36 @@ from conflux.config import get  # noqa: E402
 from conflux.rag import clear_index, create_vector_store, index_documents  # noqa: E402
 
 
-def _load_paper_manifest_documents(manifest_path: Path) -> tuple[list[Document], int]:
-    """Load paper chunks from the promotion manifest without re-chunking."""
+def _load_paper_documents(papers_dir: Path) -> tuple[list[Document], int]:
+    """Load all paper summary/fulltext chunks from papers/papers/.
 
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    entries: list[dict] = manifest.get("documents", [])
+    ``paper-{arxiv_id}#{scope}.md`` files are already extraction-level chunks;
+    they are indexed whole, not re-chunked.
+    """
+
     docs: list[Document] = []
     skipped = 0
-    for entry in entries:
-        path = Path(entry.get("path") or "")
-        if not path.exists():
+    for path in sorted(papers_dir.glob("paper-*.md")):
+        name = path.name
+        body = name[len("paper-"):]
+        if "#" not in body:
             skipped += 1
             continue
-        metadata = {
-            key: entry.get(key)
-            for key in (
-                "chunk_id", "citation_ref", "paper_section", "full_text_requested",
-                "full_text_downloaded", "full_text_extracted", "full_text_indexed",
-                "content_hash", "paper_id", "paper_title", "paper_url",
-            )
-            if entry.get(key) not in (None, "")
-        }
-        metadata["source"] = str(path)
-        metadata["source_type"] = "LocalPaper"
+        paper_id, scope = body.split("#", 1)
+        scope = scope.removesuffix(".md")
+        chunk_id = f"paper:{paper_id}#{scope}"
         docs.append(
             Document(
                 page_content=path.read_text(encoding="utf-8", errors="replace"),
-                metadata=metadata,
+                metadata={
+                    "source": str(path),
+                    "source_type": "LocalPaper",
+                    "paper_id": paper_id,
+                    "chunk_id": chunk_id,
+                    "citation_ref": f"LocalPaper:{paper_id}:{chunk_id}",
+                    "content_scope": "summary" if scope == "summary" else "full_text",
+                    "paper_section": scope,
+                },
             )
         )
     return docs, skipped
@@ -92,12 +95,8 @@ def main() -> int:
     args = parser.parse_args()
 
     root = PROJECT_ROOT / "data" / "documents"
-    manifest_path = root / "papers" / "paper_promotion_manifest.json"
-    if not manifest_path.exists():
-        print(f"[ERROR] manifest missing: {manifest_path}")
-        return 1
-
-    paper_docs, skipped_papers = _load_paper_manifest_documents(manifest_path)
+    papers_dir = root / "papers" / "papers"
+    paper_docs, skipped_papers = _load_paper_documents(papers_dir)
     plain_docs = _load_plain_documents(root)
 
     all_docs = [*paper_docs, *plain_docs]

@@ -477,12 +477,28 @@ def _query_plan_from_trace(summary: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def _claim_aspect_hits(claim: dict[str, Any], aspect: dict[str, Any]) -> list[str]:
+def _claim_aspect_hits(
+    claim: dict[str, Any],
+    aspect: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Return (exact_positive_hits, keyword_hits) for one claim against an aspect.
+
+    Exact positive semantics are the strongest evidence of coverage, but
+    generated claims often express the same meaning with different wording
+    (especially cross-language).  Keyword hits are therefore counted as
+    coverage too, while both lists remain available for audit.
+    """
+
     text = _normalize_for_match(claim.get("text") or "")
-    return [
+    exact = [
         item for item in aspect.get("positive_semantics") or []
         if _normalize_for_match(item) in text
     ]
+    keywords = [
+        item for item in aspect.get("keywords") or []
+        if _normalize_for_match(item) in text
+    ]
+    return exact, keywords
 
 
 def score_run_semantic(
@@ -566,12 +582,21 @@ def score_run_semantic(
     expected_status = str(expected.get("run_status") or "")
     expected_confidence = str(expected.get("confidence") or "")
     expected_factcheck = str(expected.get("factcheck_status") or "")
-    claim_aspect_hits = {
-        str(aspect.get("aspect_id") or ""): any(
-            _claim_aspect_hits(claim, aspect) for claim in claims
-        )
-        for aspect in aspects
-    }
+    claim_aspect_hits: dict[str, bool] = {}
+    claim_aspect_detail: dict[str, dict[str, list[str]]] = {}
+    for aspect in aspects:
+        aspect_id = str(aspect.get("aspect_id") or "")
+        exact_hits: set[str] = set()
+        keyword_hits: set[str] = set()
+        for claim in claims:
+            exact, keywords = _claim_aspect_hits(claim, aspect)
+            exact_hits.update(exact)
+            keyword_hits.update(keywords)
+        claim_aspect_hits[aspect_id] = bool(exact_hits or keyword_hits)
+        claim_aspect_detail[aspect_id] = {
+            "exact_positive_semantics": sorted(exact_hits),
+            "keywords": sorted(keyword_hits),
+        }
 
     answer = {
         "expected_run_status": expected_status,
@@ -591,6 +616,7 @@ def score_run_semantic(
         "aspect_coverage": {
             aspect_id: covered for aspect_id, covered in claim_aspect_hits.items()
         },
+        "aspect_coverage_detail": claim_aspect_detail,
         "aspect_gaps": aspect_gaps,
         "generated_claim_count": len(claims),
         "invalid_citation_count": int(summary.get("invalid_citation_count") or 0),

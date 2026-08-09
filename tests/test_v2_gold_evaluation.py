@@ -188,3 +188,38 @@ def test_semantic_retrieval_grades_negative_as_zero(tmp_path):
     assert row["aspect_id"] == "asp-1"
     assert row["aligned_subquestion_id"] == "sq-1"
     assert row["irrelevant_at_k"] == 1  # ev-1 is negative; ev-2 is positive
+
+
+def test_semantic_aspect_coverage_counts_keyword_hits(tmp_path):
+    from conflux.evaluation_gold import score_run_semantic
+
+    summary = _semantic_summary(tmp_path)
+    summary["claim_records"][1]["text"] = "基准测试表明 RAG 能减少幻觉"
+    result = score_run_semantic("run-label", summary, [_semantic_asset()])
+    coverage = result["answer"]["aspect_coverage"]
+    detail = result["answer"]["aspect_coverage_detail"]["asp-1"]
+    assert coverage["asp-1"] is True
+    assert "基准" in detail["keywords"]
+    assert detail["exact_positive_semantics"] == []
+    assert coverage["asp-2"] is False
+
+
+def test_semantic_aspect_coverage_detail_lists_exact_hits(tmp_path):
+    from conflux.evaluation_gold import score_run_semantic
+
+    summary = _semantic_summary(tmp_path)
+    result = score_run_semantic("run-label", summary, [_semantic_asset()])
+    detail = result["answer"]["aspect_coverage_detail"]["asp-1"]
+    assert detail["exact_positive_semantics"] == [
+        "grounding generation on retrieved evidence reduces hallucinations"
+    ]
+
+
+def test_generation_prompts_require_coverage_and_recommendations():
+    from conflux.graph_v2 import DECOMPOSE_PROMPT
+    from conflux.research_prompts import CLAIM_GENERATION_PROMPT
+
+    assert "Cover at least three distinct aspects" in CLAIM_GENERATION_PROMPT
+    assert "recommendation or trade-off" in CLAIM_GENERATION_PROMPT
+    assert "无法通过增加检索或外部证据解决" in DECOMPOSE_PROMPT
+    assert "比较与权衡" in DECOMPOSE_PROMPT
