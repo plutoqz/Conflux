@@ -1,7 +1,7 @@
 {
   "schema_version": "conflux-p2-radar-labels-v1",
   "dataset_id": "kg-llm-local-20260809",
-  "status": "cross_domain_smoke",
+  "status": "codex_reviewed_pending_user",
   "profile": "profiles/kg_llm_integration.yaml",
   "candidate_snapshot": "evaluation/kg_llm_radar/candidates_local_20260809.jsonl",
   "candidate_snapshot_sha256": "447D6B4655F0EF749A58E5F39C344F036C3A663A337B877DA0E46B3B5E92B6B1",
@@ -13,17 +13,17 @@
     "note": "both queries return relevant paper chunks from conflux_docs"
   },
   "labels": {
-    "path": "evaluation/kg_llm_radar/labels_provisional_20260809.jsonl",
-    "status": "provisional_codex",
-    "distribution": {"R3": 45, "R2": 22, "R1": 44, "R0": 25},
+    "path": "evaluation/kg_llm_radar/labels_reviewed_20260809.jsonl",
+    "status": "codex_reviewed_pending_user",
+    "distribution": {"R3": 43, "R2": 24, "R1": 44, "R0": 25},
     "metrics": {
       "recall_at_10": 0.1493,
       "precision_at_10": 1.0,
-      "nDCG_at_10": 0.7838,
+      "nDCG_at_10": 0.9581,
       "mrr": 1.0,
       "first_strong_rank": 1,
       "strong_success_at_1": true,
-      "strong_recall_at_20": 0.3333,
+      "strong_recall_at_20": 0.3256,
       "success_at_10": true
     }
   },
@@ -36,5 +36,40 @@
       "listwise_cap120": "reports/evaluation/kg_llm_radar/cap_120/radar_run.json",
       "pointwise_cap100": "reports/evaluation/kg_llm_radar/cap_100_pointwise/radar_run.json"
     }
+  },
+  "review": {
+    "date": "2026-08-09",
+    "reviewer": "codex-on-behalf-of-user",
+    "report": "evaluation/kg_llm_radar/annotation_review_20260809.md",
+    "scope": "136 labels / 136 unique papers",
+    "grade_changes": 2,
+    "grade_changes_detail": [
+      {"paper_id": "2310.11555v1", "from": 3, "to": 2, "reason": "CityGML-KG mapping without LLM; method transferable only"},
+      {"paper_id": "2601.03587v1", "from": 3, "to": 2, "reason": "deontic KG compliance without LLM; provenance method transferable only"}
+    ],
+    "labels_sha256": "213DD5FE7D07978B2E3D753FE83D6D8F04371CD94FD2F8808A8E5F1F2D2DB185",
+    "candidate_snapshot_sha256": "447D6B4655F0EF749A58E5F39C344F036C3A663A337B877DA0E46B3B5E92B6B1"
+  },
+  "multi_run_median": {
+    "date": "2026-08-09",
+    "labels": "evaluation/kg_llm_radar/labels_reviewed_20260809.jsonl",
+    "candidate_snapshot": "evaluation/kg_llm_radar/candidates_local_20260809.jsonl",
+    "runs": {
+      "pointwise_cap40": [
+        "reports/evaluation/kg_llm_radar/multi_pp_cap40_1/radar_run.json",
+        "reports/evaluation/kg_llm_radar/multi_pp_cap40_2/radar_run.json",
+        "reports/evaluation/kg_llm_radar/multi_pp_cap40_3/radar_run.json"
+      ],
+      "listwise_cap60": [
+        "reports/evaluation/kg_llm_radar/multi_lw_cap60_1/radar_run.json",
+        "reports/evaluation/kg_llm_radar/multi_lw_cap60_2/radar_run.json",
+        "reports/evaluation/kg_llm_radar/multi_lw_cap60_3/radar_run.json"
+      ]
+    },
+    "merged_results": [
+      "reports/evaluation/kg_llm_radar/merge_pp_cap40_3runs_reviewed.json",
+      "reports/evaluation/kg_llm_radar/merge_lw_cap60_3runs_reviewed.json"
+    ],
+    "conclusion": "listwise cap60 strong_recall@20 median not worse (0.3488 vs 0.3256) at 1/5 calls and ~15% fewer tokens; pointwise cap40 nDCG higher (0.9581 vs 0.9217)"
   }
 }

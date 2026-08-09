@@ -40,3 +40,19 @@ pointwise cap100 单次运行质量最高（nDCG 0.9184、strong_recall@20 0.377
   - GIS：默认保持 pointwise cap40；若优先 strong recall，可切 listwise cap80。
   - KG：成本敏感用 listwise cap60；质量优先用 pointwise cap100，并需 3 次运行确认。
 - 所有 KG 指标基于 provisional 初标和单次运行，正式结论前需补多次运行与人工复核。
+
+## 2026-08-09 多次运行修正（reviewed labels）
+
+KG 领域补做标注复核与多次运行：136 篇初标经 Codex 复核（2 处 R3→R2），
+`pointwise cap40` 与 `listwise cap60` 各 3 次真实评审中位数：
+
+| 配置 | recall@10 | precision@10 | nDCG@10 | strong_recall@20 | strong_success@1 | tokens | calls |
+|---|---|---|---|---|---|---|---|
+| pointwise cap40（median） | 0.1493 | 1.0 | 0.9581 | 0.3256 | 3/3 | 48,228 | 40 |
+| listwise cap60（median） | 0.1493 | 1.0 | 0.9217 | 0.3488 | 3/3 | 40,664 | 8 |
+
+修正后结论：多次运行下 `listwise cap60` 的 strong_recall@20 中位数不劣于
+`pointwise cap40`（0.3488 vs 0.3256），调用数降至 1/5、token 省约 15%；
+`pointwise cap40` 的 nDCG 更高。KG 领域成本敏感默认可考虑 listwise cap60，
+质量优先保持 pointwise cap40/100 并做多次确认。正式结论仍需用户终审标注与
+hold-out 验证。
