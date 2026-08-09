@@ -48,6 +48,7 @@ KG 领域补做标注复核与多次运行：136 篇初标经 Codex 复核（2 �
 
 | 配置 | recall@10 | precision@10 | nDCG@10 | strong_recall@20 | strong_success@1 | tokens | calls |
 |---|---|---|---|---|---|---|---|
+| 无 LLM 粗排（确定性） | 0.1493 | 1.0 | 0.9621 | 0.3488 | 3/3* | 0 | 0 |
 | pointwise cap40（median） | 0.1493 | 1.0 | 0.9581 | 0.3256 | 3/3 | 48,228 | 40 |
 | listwise cap60（median） | 0.1493 | 1.0 | 0.9217 | 0.3488 | 3/3 | 40,664 | 8 |
 
@@ -56,3 +57,10 @@ KG 领域补做标注复核与多次运行：136 篇初标经 Codex 复核（2 �
 `pointwise cap40` 的 nDCG 更高。KG 领域成本敏感默认可考虑 listwise cap60，
 质量优先保持 pointwise cap40/100 并做多次确认。正式结论仍需用户终审标注与
 hold-out 验证。
+
+*无 LLM 粗排为确定性运行，strong_success@1=3/3 按该次排序等价于 3 次中位数口径。
+
+补充：无 LLM 粗排在 KG 高密度本地池上 nDCG 与 strong_recall 均不低于 LLM 评审，
+说明 LLM 评审收益是 GIS/arXiv 稀疏场景结论。另做了分领域向量库模拟（136 KG 论文
++ 29 跨域文档），Top-25 无跨域文档、跨域文档最早第 100 名，按领域拆库在当前
+embedding 粗排下收益很小；更优先的是“论文 vs 通用资料”来源分层与索引覆盖补全。

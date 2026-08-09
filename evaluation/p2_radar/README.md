@@ -202,3 +202,48 @@ recall/precision/nDCG 下降，strong_recall 仍为 0.5。两者当前均不采�
 GIS Cap 网格结果见 `evaluation/recall_cap_grid_20260809.md`：
 cap80 listwise 提升 strong_recall@20 中位数至 0.75，但 nDCG/precision 下降；
 cap100 恶化。默认仍为 pointwise cap40。
+
+## 2026-08-09 追加：无 LLM 评审对照与分领域库模拟
+
+### 无 LLM 评审基线
+
+- GIS（`no_llm_result.json`，73 候选 / 14 相关，校准后标签）：
+  recall@10=0.1429、precision@5=0.4、precision@10=0.2、nDCG@10=0.1952、
+  strong_recall@20=0.25，0 tokens。
+- GIS（17 相关口径，`embedding_result.json` / `multi_query_result.json`）：
+  embedding 粗排 recall@10=0.2353、precision@5=0.4；多点查询同值。
+- LLM 评审后（校准后口径）：recall@10=0.43、precision@5=0.8。
+- 结论：**LLM 评审收益是 GIS/arXiv 稀疏检索场景的真实结论**。
+
+- KG（本地 136 候选 / 67 相关，reviewed 标签，纯 embedding 粗排单次确定性运行）：
+  recall@10=0.1493、precision@10=1.0、nDCG@10=0.9621、strong_recall@20=0.3488、
+  0 tokens、66/67 相关论文进入 top-100。
+- KG LLM 评审 3 次中位数：pointwise cap40 nDCG@10=0.9581、strong_recall@20=0.3256、
+  48,228 tokens；listwise cap60 nDCG@10=0.9217、strong_recall@20=0.3488、40,664 tokens。
+- 结论：**KG 高密度本地池上，无 LLM 粗排已接近全相关，LLM 评审未带来质量收益，
+  仅增加约 40k tokens 成本**。默认全开 LLM 评审可按领域细分：高密度本地池
+  可考虑粗排直出或降低评审预算。
+
+### 分领域向量库模拟（2026-08-09）
+
+混合池 = 136 篇 KG 论文 + 29 个明显跨域文档（GIS/ESRI、NIST/密码学、AI 治理、
+RAG/LLM wiki），对 KG 画像查询做无 LLM embedding 粗排：
+
+- 混合池 Top-25 全部为 KG 论文，0 个跨域文档进入。
+- 跨域文档最早出现在第 100 名（RAG 相关长文档）；GIS、密码学、AI 治理文档全部更靠后。
+- 纯 KG 池 Top-20 与混合池 Top-20 排序完全一致。
+
+结论：无 LLM 评审场景下，当前 embedding 粗排的抗跨域噪声能力足够，
+**按领域拆库的边际收益很小，且引入路由错误丢召回与跨领域查询变弱的成本**。
+更值得做的是“论文 vs 通用资料”来源分层与 metadata 过滤；当前
+`conflux_docs` 仅 97 条论文分块，ESRI/NIST/wiki 等资料尚未完整索引，
+索引覆盖不足是分库讨论之前更优先的问题。
+
+### listwise 评审失败缺口（KG 第 1 轮）
+
+- `multi_lw_cap60_1` 的 8 个 listwise 批次中有 2 个批次解析失败（fell_back），
+  2 篇 top-60 论文未完成语义评审。
+- 实现上 `review is None` 时既不更新分数也不标记 `needs_review`，论文直接保留
+  粗排分进入 links，违反“评审失败必须 unreviewed”合同。
+- 两篇分别落在 rank 8（R3）与 rank 37（R2），对当轮指标影响很小，但 listwise
+  结论需在修复该语义缺口后重新确认。

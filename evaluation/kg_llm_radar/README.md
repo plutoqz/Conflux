@@ -94,6 +94,42 @@ LLM 评审，用 `eval_p2_radar.py --merge` 合并：
 - `reports/evaluation/kg_llm_radar/merge_pp_cap40_3runs_reviewed.json`
 - `reports/evaluation/kg_llm_radar/merge_lw_cap60_3runs_reviewed.json`
 
+### 无 LLM 评审基线（2026-08-09）
+
+同一候选快照、reviewed 标签下补算纯 embedding 粗排（确定性、单次代表）：
+
+| 指标 | 无 LLM 粗排 | pointwise cap40 median | listwise cap60 median |
+|---|---|---|---|
+| recall@10 | 0.1493 | 0.1493 | 0.1493 |
+| precision@10 | 1.0 | 1.0 | 1.0 |
+| nDCG@10 | 0.9621 | 0.9581 | 0.9217 |
+| strong_recall@20 | 0.3488 | 0.3256 | 0.3488 |
+| semantic_review_tokens | 0 | 48,228 | 40,664 |
+| semantic_review_calls | 0 | 40 | 8 |
+
+结论：KG 高密度本地池上，无 LLM 粗排已接近全相关（top-10 全相关、66/67 相关
+论文进入 top-100），LLM 评审未带来质量收益，仅增加约 40k tokens 成本。
+“LLM 评审有效”目前是 GIS/arXiv 稀疏检索场景的结论，不能推广到所有领域。
+
+### 分领域向量库模拟（2026-08-09）
+
+将 136 篇 KG 论文与 29 个跨域文档（GIS/ESRI、NIST/密码学、AI 治理、RAG/LLM wiki）
+混入同一池做无 LLM 粗排：
+
+- Top-25 全部为 KG 论文，跨域文档最早出现在第 100 名；
+- 纯 KG 池 Top-20 与混合池 Top-20 排序完全一致。
+
+结论：无 LLM 评审下粗排抗跨域噪声能力足够，按领域拆库收益小且增加路由风险；
+更优先的方向是“论文 vs 通用资料”来源分层、metadata 过滤，以及补全当前
+`conflux_docs`（仅 97 条论文分块）的索引覆盖。
+
+### listwise 评审失败缺口
+
+`multi_lw_cap60_1` 有 2 篇 top-60 论文因批次解析失败（fell_back）未完成语义
+评审，但实现未标记 `needs_review`，论文直接保留粗排分进入 links，违反
+`unreviewed` 合同；两篇分别落在 rank 8（R3）与 rank 37（R2），对当轮指标影响
+很小，listwise 结论需在修复后重新确认。
+
 ## 限制
 
 - 本测试仍是跨领域冒烟；标注已由 Codex 复核冻结，但仍待用户终审。
