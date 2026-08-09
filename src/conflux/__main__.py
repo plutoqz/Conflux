@@ -14,6 +14,7 @@ from .agent import create_sub_agent
 from .checkpointing import create_checkpointer, graph_config
 from .config import get as config_get
 from .config import load as load_config
+from .core.storage_cli import doctor_command, import_legacy_command, init_command, migrate_command
 from .graph_v2 import create_v2_research_graph
 from .model_factory import (
     create_research_models,
@@ -652,6 +653,23 @@ def main() -> None:
     wf_run_parser.add_argument("--plugin-dir", action="append", default=[], dest="wf_plugin_dirs",
                                help="Extra plugin directory for resolving capabilities")
 
+    # ── M3 runtime storage subcommands ─────────────────────────
+    init_parser = sub.add_parser("init", help="Initialize the Conflux runtime home")
+    init_parser.add_argument("--home", help="Runtime home path (default: CONFLUX_HOME or platform default)")
+    init_parser.add_argument("--mode", choices=["local"], default="local")
+
+    migrate_parser = sub.add_parser("migrate", help="Apply runtime schema migrations")
+    migrate_parser.add_argument("--home", help="Runtime home path")
+    migrate_parser.add_argument("--dry-run", action="store_true", help="Preview pending migrations")
+
+    doctor_parser = sub.add_parser("doctor", help="Diagnose runtime home and configuration")
+    doctor_parser.add_argument("--home", help="Runtime home path")
+
+    import_legacy_parser = sub.add_parser("import-legacy", help="Import legacy P2 JSON state")
+    import_legacy_parser.add_argument("--home", help="Runtime home path")
+    import_legacy_parser.add_argument("--source", required=True, help="Legacy reports/workbench/projects path")
+    import_legacy_parser.add_argument("--dry-run", action="store_true", help="Count candidate JSON files only")
+
     # ── legacy research CLI (preserved) ─────────────────────────
     research_parser = sub.add_parser("research", help="Run a research query (default)")
     research_parser.add_argument("query_positional", nargs="?", help="Research question")
@@ -689,6 +707,14 @@ def main() -> None:
         _plugin_command(args)
     elif args.command == "workflow":
         _workflow_command(args)
+    elif args.command == "init":
+        raise SystemExit(init_command(args.home, args.mode))
+    elif args.command == "migrate":
+        raise SystemExit(migrate_command(args.home, args.dry_run))
+    elif args.command == "doctor":
+        raise SystemExit(doctor_command(args.home))
+    elif args.command == "import-legacy":
+        raise SystemExit(import_legacy_command(args.home, args.source, args.dry_run))
     elif args.command == "research" or (not args.command and (args.query or args.query_opt or args.index)):
         actual_query = getattr(args, "query_positional", None) or args.query or args.query_opt
         if args.index:

@@ -1,7 +1,7 @@
 {
   "schema_version": "conflux-p2-radar-labels-v1",
   "dataset_id": "p2-radar-real-20260808",
-  "annotation_status": "spotchecked_20260808_codex_on_behalf_of_user",
+  "annotation_status": "final_reviewed_20260809_user_delegated_codex",
   "project": {
     "id": "radar-smoke",
     "profile": "profiles/example_gis_agent.yaml",
@@ -29,6 +29,16 @@
     }
   },
   "label_note": "75 candidates labeled by codex-agent on behalf of the user on 2026-08-08 from a real arXiv multi-Track retrieval (5 QuerySpecs, 3 tracks). Labels are based on title+abstract against the project goal (knowledge-graph-augmented GIS agent verification/reproducibility). Evidence quality is abstract-only (1). Spot-check recommended before treating as final.",
+  "final_review": {
+    "date": "2026-08-09",
+    "reviewer": "codex-on-behalf-of-user (user-delegated final review)",
+    "report": "evaluation/p2_radar/annotation_final_review_20260809.md",
+    "scope": "75 labels / 56 unique papers",
+    "grade_changes": 0,
+    "labels_final": "evaluation/p2_radar/labels_final_20260809.jsonl",
+    "labels_final_sha256": "367CA91C1A6EBCB008C2000ED3F26C330355B4E08680BD08A6DF483AF4DE8663",
+    "merged_metrics": "reports/evaluation/p2_radar/merge_pp_cap40_3runs_final.json"
+  },
   "calibration": {
     "date": "2026-08-08",
     "rubric": "evaluation/p2_radar/annotation_rubric.md",

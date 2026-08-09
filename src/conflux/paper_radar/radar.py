@@ -46,6 +46,8 @@ def run_paper_radar_from_profile(
     review_mode: str = "pointwise",
     review_few_shot: bool = False,
     review_chunk_size: int = 8,
+    seen_state: dict[str, Any] | None = None,
+    persist_seen_file: bool = True,
 ) -> RadarRunResult:
     """Convenience wrapper that loads a profile and runs the radar."""
     profile = load_profile(profile_path, validate=False)
@@ -60,6 +62,8 @@ def run_paper_radar_from_profile(
         review_mode=review_mode,
         review_few_shot=review_few_shot,
         review_chunk_size=review_chunk_size,
+        seen_state=seen_state,
+        persist_seen_file=persist_seen_file,
     )
 
 
@@ -76,6 +80,8 @@ def run_paper_radar(
     review_mode: str = "pointwise",
     review_few_shot: bool = False,
     review_chunk_size: int = 8,
+    seen_state: dict[str, Any] | None = None,
+    persist_seen_file: bool = True,
 ) -> RadarRunResult:
     """Run the full P2 paper radar pipeline for a project.
 
@@ -194,7 +200,9 @@ def run_paper_radar(
     suggestions: list[ProjectImpactSuggestion] = []
     deep_read = 0
     # Project-scoped seen state: stable rejects are not re-reviewed.
-    project_seen = _load_project_seen(out_dir, project.id) if out_dir else {}
+    project_seen = seen_state if seen_state is not None else (
+        _load_project_seen(out_dir, project.id) if out_dir else {}
+    )
     skipped_seen_rejected = 0
     shortlisted_links = [link for link in links if link.status == PaperLinkStatus.SHORTLISTED]
     if config.deep_read_limit > 0 and shortlisted_links:
@@ -236,7 +244,7 @@ def run_paper_radar(
         stats.needs_review = len(needs_review_ids)
 
     # Write output if out_dir specified
-    if out_dir:
+    if out_dir and persist_seen_file:
         _save_project_seen(out_dir, project.id, links)
     if out_dir:
         _write_radar_output(out_dir, project.id, run_id, context, intents, queries, links)

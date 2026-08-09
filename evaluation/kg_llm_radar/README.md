@@ -130,8 +130,47 @@ LLM 评审，用 `eval_p2_radar.py --merge` 合并：
 `unreviewed` 合同；两篇分别落在 rank 8（R3）与 rank 37（R2），对当轮指标影响
 很小，listwise 结论需在修复后重新确认。
 
+### 修复后重跑（2026-08-09）
+
+已修复 `review is None` 时静默保留粗排分的缺口：`semantic_review.py` 现在会为
+listwise 缺失/失败批次的每篇论文生成 `reviewed=False` 记录，雷达层据此标记
+`needs_review`，并新增部分/整批失败的回归测试。
+
+修复后 `listwise cap60` 另跑 3 次真实评审中位数：
+
+| 指标 | pointwise cap40 median | listwise cap60 median（修复后） |
+|---|---|---|
+| recall@10 | 0.1493 | 0.1493 |
+| precision@10 | 1.0 | 1.0 |
+| nDCG@10 | 0.9581 | **0.8196**（0.7418 / 0.838） |
+| strong_recall@20 | 0.3256 | **0.3256**（0.2558 / 0.3488） |
+| strong_success@1 | 3/3 | **2/3** |
+| semantic_review_tokens | 48,228 | 41,975 |
+| semantic_review_calls | 40 | 8 |
+
+产物：`reports/evaluation/kg_llm_radar/multi_lw_cap60_fixed_{1,2,3}/`
+与 `merge_lw_cap60_3runs_fixed.json`。
+
+结论变化：修复后 `listwise cap60` 的 strong_recall@20 中位数不再优于
+`pointwise cap40`（0.3256 vs 0.3256），nDCG 明显下降（0.8196 vs 0.9581），
+strong_success@1 降为 2/3；三轮仍有 1-2 个批次解析失败（1-9 篇论文被正确标记
+`needs_review`）。原“listwise cap60 成本更优且不劣于 pointwise”的结论不再成立，
+默认应保持 `pointwise cap40`，若继续使用 listwise 需先提升批次解析稳定性。
+
+## 2026-08-09 标注终审
+
+用户委托 Codex 对 136 行 KG/LLM 标注做正式终审，5 处 R0/R1 上调为 R2
+（FamilyTool、MAKA、MicroWorld、POLAR、供应链 KG 构建），冻结为
+`evaluation/kg_llm_radar/labels_final_20260809.jsonl`，详见
+`evaluation/kg_llm_radar/annotation_final_review_20260809.md`。
+
+final labels 分布：R3=43、R2=29、R1=43、R0=21，相关（R2+）=72。
+final labels 下 `pointwise cap40` 仍优于 `listwise cap60`
+（nDCG@10 0.9581 vs 0.8196，strong_success@1 3/3 vs 2/3，
+strong_recall@20 均为 0.3256）。
+
 ## 限制
 
-- 本测试仍是跨领域冒烟；标注已由 Codex 复核冻结，但仍待用户终审。
+- 本测试仍是跨领域冒烟；标注已由用户委托 Codex 完成终审并冻结。
 - 候选池来自本地知识库而非实时 arXiv，arXiv 当前网络不可达。
 - 下一步应在该领域建立标注集并划分 hold-out 后，再比较跨领域指标。 

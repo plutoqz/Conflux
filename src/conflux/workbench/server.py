@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import contextlib
 import email.utils
 import html
@@ -31,6 +32,14 @@ import yaml
 import markdown
 
 from conflux import config
+from conflux.adapters.sqlite_store import (
+    JobQueue,
+    ProjectPaperStore,
+    SearchIntentStore,
+    SearchRunStore,
+    SQLiteDatabase,
+)
+from conflux.core.runtime_home import database_path
 from conflux.knowledge.paper_indexer import promote_inbox
 from conflux.knowledge.stats import gather_knowledge_stats
 from conflux.paper_ingestion.filters import paper_matches_negative_filter
@@ -141,7 +150,8 @@ _FEATURE_MODEL_FALLBACKS = {
     "paper_review": "cheap",
     "plan_analysis": "reasoning",
     "project_charter": "reasoning",
-    "research_radar": "reasoning",
+    # P2 默认配置结论基于 balanced（deepseek-v4-flash-guan、温度 0.25）。
+    "research_radar": "balanced",
     "plan_translation": "cheap",
 }
 
@@ -2260,29 +2270,93 @@ def apply_project_charter(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "path": str(target), "config_path": str(config_path), "project": overview}
 
 
+_persistent_worker_started = False
+_persistent_worker_lock = threading.Lock()
+_persistent_worker_thread: threading.Thread | None = None
+
+
+def _research_database() -> SQLiteDatabase:
+    db = SQLiteDatabase(database_path()).connect()
+    db.bootstrap_schema()
+    return db
+
+
+def _project_research_context_version(project: ProjectDefinition, profile_path: Path) -> str:
+    digest = hashlib.sha256()
+    payload = project.to_dict(include_source=False)
+    research = dict(payload.get("research") or {})
+    for key in (
+        "schedule_enabled", "interval_minutes", "schedule_timezone",
+        "last_run_at", "next_run_at",
+    ):
+        research.pop(key, None)
+    if research:
+        payload["research"] = research
+    else:
+        payload.pop("research", None)
+    digest.update(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    if profile_path.is_file():
+        digest.update(profile_path.read_bytes())
+    return digest.hexdigest()[:20]
+
+
+def _resolve_project_profile(project: ProjectDefinition) -> tuple[Path | None, str]:
+    if not project.research:
+        return None, "项目尚未配置研究画像 (research 段)。请先在项目设置中添加。"
+    profile_path = str(project.research.get("profile") or "")
+    if not profile_path:
+        return None, "未指定研究画像路径。"
+    resolved = Path(profile_path)
+    if not resolved.is_absolute():
+        resolved = Path(project.path).expanduser().resolve() / resolved
+    resolved = resolved.resolve()
+    if not resolved.exists():
+        return None, f"研究画像文件不存在：{resolved}"
+    return resolved, ""
+
+
 def run_project_research_radar(payload: dict[str, Any]) -> dict[str, Any]:
-    """Run the P2 paper radar for a project and return results."""
+    """Enqueue a durable P2 paper-radar job for the Workbench."""
     project_id = str(payload.get("project_id") or "").strip()
     if not project_id:
         return {"ok": False, "error": "project_id required"}
-
     project = _project_registry().get(project_id)
     if project is None:
         return {"ok": False, "error": f"项目未找到：{project_id}"}
-    if not project.research:
-        return {"ok": False, "error": "项目尚未配置研究画像 (research 段)。请先在项目设置中添加。"}
+    resolved, error = _resolve_project_profile(project)
+    if resolved is None:
+        return {"ok": False, "error": error}
+    context_version = _project_research_context_version(project, resolved)
+    db = _research_database()
+    try:
+        queue = JobQueue(db)
+        job = queue.enqueue(
+            "paper_radar",
+            {"project_id": project_id, "periodic": False, "context_version": context_version},
+            idempotency_key=f"paper-radar:{project_id}:manual:{time.time_ns()}",
+            max_attempts=2,
+        )
+    finally:
+        db.close()
+    _start_persistent_worker()
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "status_url": f"/api/projects/research/jobs/{job['job_id']}",
+    }
 
-    profile_path = str(project.research.get("profile") or "")
-    if not profile_path:
-        return {"ok": False, "error": "未指定研究画像路径。"}
 
-    from pathlib import Path as _Path
-    resolved = _Path(profile_path)
-    if not resolved.is_absolute():
-        resolved = _Path(project.path).expanduser().resolve() / resolved
-    resolved = resolved.resolve()
-    if not resolved.exists():
-        return {"ok": False, "error": f"研究画像文件不存在：{resolved}"}
+def _execute_project_research_radar(payload: dict[str, Any], *, job_id: str = "") -> dict[str, Any]:
+    """Execute one claimed paper-radar job and persist its canonical state."""
+    project_id = str(payload.get("project_id") or "").strip()
+    project = _project_registry().get(project_id)
+    if project is None:
+        return {"ok": False, "error": f"项目未找到：{project_id}"}
+    resolved, error = _resolve_project_profile(project)
+    if resolved is None:
+        return {"ok": False, "error": error}
 
     try:
         from conflux.model_factory import create_chat_model
@@ -2300,20 +2374,28 @@ def run_project_research_radar(payload: dict[str, Any]) -> dict[str, Any]:
             "CONFLUX_MODELS__RESEARCH_RADAR__TEMPERATURE": str(settings["temperature"]),
         }
         profile = load_profile(str(resolved), validate=False)
-        with _temporary_env(model_updates):
-            review_model = create_chat_model(
-                "research_radar",
-                max_tokens=4096,
-                timeout=120,
-                max_retries=0,
-            )
-            result = run_paper_radar_from_profile(
-                project=project,
-                profile_path=str(resolved),
-                out_dir=str(PROJECT_ROOT / DEFAULT_PROGRESS_DIR / "workbench" / "projects"),
-                llm_review=True,
-                review_model=review_model,
-            )
+        db = _research_database()
+        try:
+            seen_state = ProjectPaperStore(db).seen_statuses(project_id)
+        finally:
+            db.close()
+        with _EXECUTION_LOCK:
+            with _temporary_env(model_updates):
+                review_model = create_chat_model(
+                    "research_radar",
+                    max_tokens=4096,
+                    timeout=120,
+                    max_retries=0,
+                )
+                result = run_paper_radar_from_profile(
+                    project=project,
+                    profile_path=str(resolved),
+                    out_dir=str(PROJECT_ROOT / DEFAULT_PROGRESS_DIR / "workbench" / "projects"),
+                    llm_review=True,
+                    review_model=review_model,
+                    seen_state=seen_state,
+                    persist_seen_file=False,
+                )
 
         all_sources_failed = bool(result.stats.sources_used) and set(result.stats.failed_sources) >= set(
             result.stats.sources_used
@@ -2338,7 +2420,6 @@ def run_project_research_radar(payload: dict[str, Any]) -> dict[str, Any]:
             else "本轮候选均未达到精读阈值，已保留供人工审查。"
         )
 
-        # Cache result
         cache = {
             "project_id": result.project_id,
             "usable": usable,
@@ -2351,7 +2432,10 @@ def run_project_research_radar(payload: dict[str, Any]) -> dict[str, Any]:
             "suggestions": [s.model_dump() for s in result.suggestions],
             "stats": result.stats.model_dump(),
         }
-        _write_research_cache(project_id, cache)
+        cache["stats"]["workbench_status"] = radar_status
+        cache["stats"]["workbench_usable"] = usable
+        cache["stats"]["workbench_reason"] = radar_reason
+        _write_research_cache(project_id, cache, job_id=job_id)
 
         return {
             "ok": not all_sources_failed,
@@ -2376,36 +2460,98 @@ def run_project_research_radar(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_project_research_status(project_id: str) -> dict[str, Any]:
-    """Return cached research radar results for a project."""
+    """Return persisted research radar results and durable schedule state."""
     cache = _load_research_cache(project_id)
+    schedule = _project_research_schedule(project_id)
+    active_job = _latest_project_radar_job(project_id, active_only=True)
     if cache is None:
-        return {"ok": False, "error": "尚无雷达运行记录。"}
-    return {"ok": True, "project_id": project_id, **cache}
+        if active_job:
+            return {
+                "ok": True,
+                "project_id": project_id,
+                "status": active_job["status"],
+                "job": active_job,
+                "schedule": schedule,
+            }
+        return {"ok": False, "error": "尚无雷达运行记录。", "schedule": schedule}
+    return {"ok": True, "project_id": project_id, **cache, "job": active_job, "schedule": schedule}
 
 
 _research_cache: dict[str, dict[str, Any]] = {}
 
 
-def _write_research_cache(project_id: str, cache: dict[str, Any]) -> None:
+def _write_research_cache(project_id: str, cache: dict[str, Any], *, job_id: str = "") -> None:
+    """Compatibility adapter that imports a result-shaped payload into SQLite."""
     _research_cache[project_id] = cache
-    # Also write to file
-    cache_dir = PROJECT_ROOT / DEFAULT_PROGRESS_DIR / "workbench" / "projects" / project_id / "papers"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    import json as _json
-    (cache_dir / "latest.json").write_text(_json.dumps(cache, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    db = _research_database()
+    try:
+        db.connection.execute("BEGIN IMMEDIATE")
+        intent_store = SearchIntentStore(db)
+        link_store = ProjectPaperStore(db)
+        for intent in cache.get("intents") or []:
+            item = dict(intent)
+            item["project_id"] = project_id
+            intent_store.upsert(item, commit=False)
+        links = []
+        for link in cache.get("links") or []:
+            item = dict(link)
+            item["project_id"] = project_id
+            persisted = link_store.upsert(item, preserve_status=True, commit=False)
+            item["status"] = persisted["status"]
+            links.append(item)
+        payload = dict(cache)
+        payload["project_id"] = project_id
+        payload["links"] = links
+        stats = dict(payload.get("stats") or {})
+        stats["run_id"] = str(stats.get("run_id") or cache.get("run_id") or f"workbench-{time.time_ns()}")
+        stats["project_id"] = project_id
+        payload["stats"] = stats
+        SearchRunStore(db).save_result(payload, job_id=job_id, commit=False)
+        db.connection.commit()
+    except Exception:
+        db.connection.rollback()
+        raise
+    finally:
+        db.close()
 
 
 def _load_research_cache(project_id: str) -> dict[str, Any] | None:
-    if project_id in _research_cache:
-        return _research_cache[project_id]
-    cache_file = PROJECT_ROOT / DEFAULT_PROGRESS_DIR / "workbench" / "projects" / project_id / "papers" / "latest.json"
-    if cache_file.exists():
-        import json as _json
-        try:
-            return _json.loads(cache_file.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return None
+    db = _research_database()
+    try:
+        run_store = SearchRunStore(db)
+        run = run_store.latest(project_id)
+        if run is None:
+            return None
+        persisted_links = {
+            item["paper_key"]: item for item in ProjectPaperStore(db).list(project_id)
+        }
+        links = []
+        for link in run_store.candidates(run["run_id"]):
+            identity = link.get("paper_identity") or {}
+            canonical_id = str(identity.get("canonical_id") or "").strip()
+            if not canonical_id:
+                continue
+            doi = str(identity.get("doi") or "").strip().casefold()
+            key = f"doi:{doi}" if doi else f"{str(identity.get('source') or 'unknown').casefold()}:{canonical_id}"
+            if key in persisted_links:
+                link["status"] = persisted_links[key]["status"]
+            links.append(link)
+        stats = run.get("stats") or {}
+        return {
+            "project_id": project_id,
+            "run_id": run["run_id"],
+            "usable": bool(stats.get("workbench_usable", bool(links))),
+            "status": str(stats.get("workbench_status") or run["status"]),
+            "reason": str(stats.get("workbench_reason") or run.get("error") or ""),
+            "context": run.get("context") or {},
+            "intents": run_store.intents(run["run_id"]),
+            "queries": run.get("queries") or [],
+            "links": links,
+            "suggestions": run.get("suggestions") or [],
+            "stats": stats,
+        }
+    finally:
+        db.close()
 
 
 # ── Phase E: Paper list, actions, and coverage ─────────────────────
@@ -2420,6 +2566,7 @@ def get_project_research_papers(project_id: str) -> dict[str, Any]:
     papers: list[dict[str, Any]] = []
     for link in links:
         papers.append({
+            "paper_key": link.get("paper_key", ""),
             "paper_id": (link.get("paper_identity") or {}).get("canonical_id", ""),
             "doi": (link.get("paper_identity") or {}).get("doi", ""),
             "source": (link.get("paper_identity") or {}).get("source", ""),
@@ -2441,41 +2588,341 @@ def get_project_research_papers(project_id: str) -> dict[str, Any]:
 def apply_paper_action(payload: dict[str, Any]) -> dict[str, Any]:
     """Apply a user action: save, ignore, shortlist, or promote."""
     project_id = str(payload.get("project_id") or "").strip()
-    paper_id = str(payload.get("paper_id") or "").strip()
+    paper_key = str(payload.get("paper_key") or payload.get("paper_id") or "").strip()
     action = str(payload.get("action") or "").strip().lower()
 
     valid_actions = {"save", "ignore", "shortlist", "promote", "reject"}
     if action not in valid_actions:
         return {"ok": False, "error": f"无效操作：{action}。支持：{', '.join(sorted(valid_actions))}"}
 
-    cache = _load_research_cache(project_id)
-    if cache is None:
-        return {"ok": False, "error": "尚无雷达运行记录。"}
-
-    links = cache.get("links") or []
-    updated_count = 0
     status_map = {
         "save": "saved", "ignore": "rejected", "shortlist": "shortlisted",
         "promote": "promoted", "reject": "rejected",
     }
-
-    for link in links:
-        link_paper_id = (link.get("paper_identity") or {}).get("canonical_id", "")
-        if link_paper_id == paper_id:
-            link["status"] = status_map.get(action, "needs_review")
-            updated_count += 1
-
-    if updated_count == 0:
-        return {"ok": False, "error": f"未找到论文：{paper_id}"}
-
-    _write_research_cache(project_id, cache)
+    db = _research_database()
+    try:
+        updated = ProjectPaperStore(db).update_status(
+            project_id, paper_key, status_map.get(action, "needs_review")
+        )
+    finally:
+        db.close()
+    if not updated:
+        return {"ok": False, "error": f"论文身份不存在或不唯一：{paper_key}"}
+    _research_cache.pop(project_id, None)
     return {
         "ok": True,
         "project_id": project_id,
-        "paper_id": paper_id,
+        "paper_key": paper_key,
         "action": action,
         "new_status": status_map.get(action),
     }
+
+
+def get_project_research_job(job_id: str) -> dict[str, Any] | None:
+    db = _research_database()
+    try:
+        return JobQueue(db).get(job_id)
+    finally:
+        db.close()
+
+
+def configure_project_research_schedule(payload: dict[str, Any]) -> dict[str, Any]:
+    project_id = str(payload.get("project_id") or "").strip()
+    project = _project_registry().get(project_id)
+    if project is None:
+        return {"ok": False, "error": f"项目未找到：{project_id}"}
+    enabled = bool(payload.get("enabled", False))
+    try:
+        interval_minutes = max(1, int(payload.get("interval_minutes") or 1440))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "interval_minutes 必须是正整数。"}
+    original_research = dict(project.research) if project.research is not None else None
+    research = dict(project.research or {})
+    research["schedule_enabled"] = enabled
+    research["interval_minutes"] = interval_minutes
+    research["schedule_timezone"] = str(payload.get("timezone") or research.get("schedule_timezone") or "Asia/Shanghai")
+    if enabled:
+        next_run_at = time.time() + interval_minutes * 60
+        research["next_run_at"] = _iso_utc(next_run_at)
+        project.research = research
+    else:
+        research["next_run_at"] = ""
+        project.research = research if project.research is not None else None
+
+    if enabled:
+        resolved, error = _resolve_project_profile(project)
+        if resolved is None:
+            project.research = original_research
+            return {"ok": False, "error": error}
+
+    source_path = Path(project.source_file) if project.source_file else None
+    original_bytes = source_path.read_bytes() if source_path and source_path.is_file() else None
+    saved_path: Path | None = None
+    db = _research_database()
+    try:
+        db.connection.execute("BEGIN IMMEDIATE")
+        _cancel_project_radar_jobs(project_id, periodic_only=True, db=db, commit=False)
+        job = (
+            _enqueue_periodic_project_radar(project, next_run_at, db=db, commit=False)
+            if enabled else None
+        )
+        if project.research is not None:
+            saved_path = _project_registry().save(project)
+        db.connection.commit()
+    except Exception as exc:
+        db.connection.rollback()
+        project.research = original_research
+        try:
+            if original_bytes is not None and source_path is not None:
+                source_path.write_bytes(original_bytes)
+            elif saved_path is not None and saved_path.exists():
+                saved_path.unlink()
+        except OSError:
+            pass
+        return {"ok": False, "error": f"周期任务保存失败：{exc}"}
+    finally:
+        db.close()
+    if enabled:
+        _start_persistent_worker()
+    return {"ok": True, "project_id": project_id, "schedule": _project_research_schedule(project_id), "job": job}
+
+
+def _project_research_schedule(project_id: str) -> dict[str, Any]:
+    project = _project_registry().get(project_id)
+    research = dict(project.research or {}) if project else {}
+    try:
+        interval_minutes = max(1, int(research.get("interval_minutes") or 1440))
+    except (TypeError, ValueError):
+        interval_minutes = 1440
+    return {
+        "enabled": bool(research.get("schedule_enabled", False)),
+        "interval_minutes": interval_minutes,
+        "timezone": str(research.get("schedule_timezone") or "Asia/Shanghai"),
+        "last_run_at": str(research.get("last_run_at") or ""),
+        "next_run_at": str(research.get("next_run_at") or ""),
+    }
+
+
+def _enqueue_periodic_project_radar(
+    project: ProjectDefinition,
+    scheduled_at: float,
+    *,
+    db: SQLiteDatabase | None = None,
+    commit: bool = True,
+) -> dict[str, Any]:
+    resolved, error = _resolve_project_profile(project)
+    if resolved is None:
+        raise ValueError(error)
+    context_version = _project_research_context_version(project, resolved)
+    key = f"paper-radar:{project.id}:{context_version}:periodic:{int(scheduled_at)}"
+    owns_db = db is None
+    db = db or _research_database()
+    try:
+        return JobQueue(db).enqueue(
+            "paper_radar",
+            {"project_id": project.id, "periodic": True, "context_version": context_version},
+            idempotency_key=key,
+            scheduled_at=scheduled_at,
+            max_attempts=3,
+            commit=commit,
+        )
+    finally:
+        if owns_db:
+            db.close()
+
+
+def _cancel_project_radar_jobs(
+    project_id: str,
+    *,
+    periodic_only: bool,
+    db: SQLiteDatabase | None = None,
+    commit: bool = True,
+) -> None:
+    owns_db = db is None
+    db = db or _research_database()
+    try:
+        queue = JobQueue(db)
+        for job in queue.list(kind="paper_radar", limit=500):
+            payload = job.get("payload") or {}
+            if payload.get("project_id") != project_id:
+                continue
+            if periodic_only and not payload.get("periodic"):
+                continue
+            if job["status"] == "pending":
+                queue.cancel(job["job_id"], commit=commit)
+    finally:
+        if owns_db:
+            db.close()
+
+
+def _latest_project_radar_job(project_id: str, *, active_only: bool = False) -> dict[str, Any] | None:
+    db = _research_database()
+    try:
+        jobs = JobQueue(db).list(kind="paper_radar", limit=200)
+    finally:
+        db.close()
+    for job in reversed(jobs):
+        if (job.get("payload") or {}).get("project_id") != project_id:
+            continue
+        if active_only and job["status"] not in {"pending", "running"}:
+            continue
+        return job
+    return None
+
+
+def _start_persistent_worker() -> None:
+    global _persistent_worker_started, _persistent_worker_thread
+    with _persistent_worker_lock:
+        if _persistent_worker_thread is not None and _persistent_worker_thread.is_alive():
+            return
+        _persistent_worker_started = True
+
+    def _loop() -> None:
+        worker_id = f"workbench-{os.getpid()}"
+        next_reconcile_at = 0.0
+        while True:
+            try:
+                if time.time() >= next_reconcile_at:
+                    _reconcile_project_radar_schedules()
+                    next_reconcile_at = time.time() + 30.0
+                worked = _run_one_persistent_job(worker_id)
+                time.sleep(0.2 if worked else 1.0)
+            except Exception:
+                time.sleep(1.0)
+
+    thread = threading.Thread(target=_loop, daemon=True, name="conflux-persistent-jobs")
+    _persistent_worker_thread = thread
+    thread.start()
+
+
+def _reconcile_project_radar_schedules() -> int:
+    """Restore a missing periodic job from the YAML schedule authority."""
+    projects = _project_registry().load_all().projects
+    db = _research_database()
+    try:
+        jobs = JobQueue(db).list(kind="paper_radar", limit=500)
+        active_projects = {
+            str((job.get("payload") or {}).get("project_id") or "")
+            for job in jobs
+            if job["status"] in {"pending", "running"}
+            and (job.get("payload") or {}).get("periodic")
+        }
+        restored = 0
+        for project in projects:
+            research = dict(project.research or {})
+            if not research.get("schedule_enabled") or project.id in active_projects:
+                continue
+            next_run_text = str(research.get("next_run_at") or "").strip()
+            try:
+                scheduled_at = float(calendar.timegm(time.strptime(next_run_text, "%Y-%m-%dT%H:%M:%SZ")))
+            except (TypeError, ValueError, OverflowError):
+                scheduled_at = float(int(time.time() // 60) * 60)
+            _enqueue_periodic_project_radar(project, scheduled_at, db=db)
+            active_projects.add(project.id)
+            restored += 1
+        return restored
+    finally:
+        db.close()
+
+
+def _run_one_persistent_job(worker_id: str) -> bool:
+    db = _research_database()
+    try:
+        queue = JobQueue(db, lease_seconds=60)
+        expired = queue.expire_exhausted(kind="paper_radar")
+        job = queue.claim(worker_id, kind="paper_radar")
+    finally:
+        db.close()
+    for expired_job in expired:
+        expired_payload = expired_job.get("payload") or {}
+        if expired_payload.get("periodic"):
+            _advance_project_radar_schedule(str(expired_payload.get("project_id") or ""))
+    if job is None:
+        return bool(expired)
+    stop_heartbeat = threading.Event()
+
+    def _heartbeat() -> None:
+        while not stop_heartbeat.wait(20):
+            heartbeat_db = _research_database()
+            try:
+                JobQueue(heartbeat_db, lease_seconds=60).heartbeat(job["job_id"], worker_id)
+            finally:
+                heartbeat_db.close()
+
+    heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
+    heartbeat_thread.start()
+    try:
+        result = _execute_project_research_radar(job.get("payload") or {}, job_id=job["job_id"])
+        if not result.get("ok"):
+            raise RuntimeError(str(result.get("error") or "paper radar failed"))
+        complete_db = _research_database()
+        try:
+            completed = JobQueue(complete_db).complete(job["job_id"], worker_id, result=result)
+        finally:
+            complete_db.close()
+        if completed and (job.get("payload") or {}).get("periodic"):
+            _advance_project_radar_schedule(str((job.get("payload") or {}).get("project_id") or ""))
+    except Exception as exc:
+        fail_db = _research_database()
+        try:
+            queue = JobQueue(fail_db)
+            failed = queue.fail(job["job_id"], worker_id, str(exc), retry_delay=30)
+            failed_job = queue.get(job["job_id"]) if failed else None
+        finally:
+            fail_db.close()
+        if (
+            failed_job is not None
+            and failed_job["status"] == "failed"
+            and (job.get("payload") or {}).get("periodic")
+        ):
+            _advance_project_radar_schedule(str((job.get("payload") or {}).get("project_id") or ""))
+    finally:
+        stop_heartbeat.set()
+        heartbeat_thread.join(timeout=1)
+    return True
+
+
+def _advance_project_radar_schedule(project_id: str) -> bool:
+    project = _project_registry().get(project_id)
+    if project is None or not project.research:
+        return False
+    research = dict(project.research)
+    if not research.get("schedule_enabled"):
+        return False
+    interval_minutes = max(1, int(research.get("interval_minutes") or 1440))
+    now = time.time()
+    next_run_at = now + interval_minutes * 60
+    research["last_run_at"] = _iso_utc(now)
+    research["next_run_at"] = _iso_utc(next_run_at)
+    original_research = dict(project.research)
+    project.research = research
+    source_path = Path(project.source_file) if project.source_file else None
+    original_bytes = source_path.read_bytes() if source_path and source_path.is_file() else None
+    saved_path: Path | None = None
+    db = _research_database()
+    try:
+        db.connection.execute("BEGIN IMMEDIATE")
+        _enqueue_periodic_project_radar(project, next_run_at, db=db, commit=False)
+        saved_path = _project_registry().save(project)
+        db.connection.commit()
+        return True
+    except Exception:
+        db.connection.rollback()
+        project.research = original_research
+        try:
+            if original_bytes is not None and source_path is not None:
+                source_path.write_bytes(original_bytes)
+            elif saved_path is not None and saved_path.exists():
+                saved_path.unlink()
+        except OSError:
+            pass
+        return False
+    finally:
+        db.close()
+
+
+def _iso_utc(timestamp: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp))
 
 
 def get_project_research_coverage(project_id: str) -> dict[str, Any]:
@@ -2883,6 +3330,14 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json(get_project_research_coverage(project_id))
             return
+        if parsed.path.startswith("/api/projects/research/jobs/"):
+            job_id = parsed.path[len("/api/projects/research/jobs/"):]
+            job = get_project_research_job(job_id)
+            if job is None:
+                self.send_error(404)
+            else:
+                self._send_json({"ok": True, **job}, headers={"Cache-Control": "no-store"})
+            return
         if parsed.path == "/api/sessions":
             self._send_json(build_session_index())
             return
@@ -3006,6 +3461,9 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/projects/research/run":
                 self._send_json(run_project_research_radar(payload))
+                return
+            if parsed.path == "/api/projects/research/schedule":
+                self._send_json(configure_project_research_schedule(payload))
                 return
             if parsed.path == "/api/projects/research/papers/action":
                 self._send_json(apply_paper_action(payload))
@@ -3226,6 +3684,7 @@ def main(argv: list[str] | None = None) -> None:
 
     port = _available_port(args.host, args.port)
     server = ThreadingHTTPServer((args.host, port), WorkbenchHandler)
+    _start_persistent_worker()
     print(f"Conflux workbench: http://{args.host}:{port}", flush=True)
     try:
         server.serve_forever()

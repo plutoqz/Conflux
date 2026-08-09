@@ -142,6 +142,52 @@ def test_listwise_batch_uses_one_call_per_chunk():
     assert stats.semantic_review_failed == 0
 
 
+def test_listwise_partial_failure_marks_missing_papers_unreviewed():
+    stats = RadarRunStats(project_id="test", run_id="r")
+    payload = {
+        "reviews": [
+            {
+                "paper_id": "p-1", "relevance": 0.85, "research_value": 0.7,
+                "evidence_quality": 0.7, "reasoning": "x", "confidence": 0.8,
+                "needs_deeper_review": False, "evidence_utility": "method",
+            }
+        ]
+    }
+    model = _ReviewLLM(json.dumps(payload))
+    reviews = batch_semantic_review(
+        [_paper_dict("p-1"), _paper_dict("p-2")],
+        _context(),
+        model,
+        max_papers=2,
+        stats=stats,
+        mode="listwise",
+        chunk_size=8,
+    )
+    assert len(reviews) == 2
+    assert reviews["p-1"].reviewed is True
+    assert reviews["p-2"].reviewed is False
+    assert reviews["p-2"].telemetry["fell_back"] is True
+    assert stats.semantic_review_failed == 1
+
+
+def test_listwise_total_failure_marks_all_unreviewed():
+    stats = RadarRunStats(project_id="test", run_id="r")
+    model = _ReviewLLM("not json at all")
+    reviews = batch_semantic_review(
+        [_paper_dict("p-1"), _paper_dict("p-2")],
+        _context(),
+        model,
+        max_papers=2,
+        stats=stats,
+        mode="listwise",
+        chunk_size=8,
+    )
+    assert len(reviews) == 2
+    assert all(not review.reviewed for review in reviews.values())
+    assert all(review.telemetry["fell_back"] for review in reviews.values())
+    assert stats.semantic_review_failed == 1
+
+
 def test_few_shot_injects_calibrated_examples_not_gst_bench():
     model = _ReviewLLM(json.dumps({
         "relevance": 0.9, "research_value": 0.8, "evidence_quality": 0.7,
@@ -289,6 +335,37 @@ def test_radar_semantic_review_failure_marks_needs_review(monkeypatch):
     result = run_paper_radar(proj, profile, llm_review=True, review_model=_ReviewLLM(raise_error=True))
     assert result.stats.semantic_review_failed == 1
     assert result.links[0].status == PaperLinkStatus.NEEDS_REVIEW
+
+
+def test_radar_listwise_review_failure_marks_needs_review(monkeypatch):
+    from conflux.paper_radar.radar import run_paper_radar
+    from conflux.project_registry.models import ProjectDefinition
+    from conflux.research_profile import load_profile
+
+    def mock_execute(queries, stats=None):
+        return [PaperRecord(id="2401.00001", title="m", abstract="m", source="arxiv")], []
+
+    monkeypatch.setattr("conflux.paper_radar.radar._execute_queries", mock_execute)
+    monkeypatch.setattr(
+        "conflux.paper_radar.coarse_rank.embedding_coarse_rank",
+        _fake_coarse_rank({"2401.00001": 0.30}),
+    )
+    proj = ProjectDefinition(id="test", name="Test", path=".")
+    proj.plan.overall_goal = "Knowledge-graph-augmented GIS agents"
+    proj.research = {"profile": "profiles/example_gis_agent.yaml", "deep_read_limit": 0}
+    profile = load_profile("profiles/example_gis_agent.yaml", validate=False)
+
+    result = run_paper_radar(
+        proj,
+        profile,
+        llm_review=True,
+        review_model=_ReviewLLM("not json at all"),
+        review_mode="listwise",
+    )
+    assert result.stats.semantic_review_failed == 1
+    assert result.stats.needs_review == 1
+    assert result.links[0].status == PaperLinkStatus.NEEDS_REVIEW
+    assert result.links[0].relevance == 0.30  # coarse-rank fallback order signal retained
 
 
 def _fake_coarse_rank(combined_by_id):

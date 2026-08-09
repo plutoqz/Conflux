@@ -1,7 +1,7 @@
 {
   "schema_version": "conflux-p2-radar-labels-v1",
   "dataset_id": "kg-llm-local-20260809",
-  "status": "codex_reviewed_pending_user",
+  "status": "final_reviewed_20260809_user_delegated_codex",
   "profile": "profiles/kg_llm_integration.yaml",
   "candidate_snapshot": "evaluation/kg_llm_radar/candidates_local_20260809.jsonl",
   "candidate_snapshot_sha256": "447D6B4655F0EF749A58E5F39C344F036C3A663A337B877DA0E46B3B5E92B6B1",
@@ -13,11 +13,11 @@
     "note": "both queries return relevant paper chunks from conflux_docs"
   },
   "labels": {
-    "path": "evaluation/kg_llm_radar/labels_reviewed_20260809.jsonl",
-    "status": "codex_reviewed_pending_user",
-    "distribution": {"R3": 43, "R2": 24, "R1": 44, "R0": 25},
+    "path": "evaluation/kg_llm_radar/labels_final_20260809.jsonl",
+    "status": "final_reviewed_20260809_user_delegated_codex",
+    "distribution": {"R3": 43, "R2": 29, "R1": 43, "R0": 21},
     "metrics": {
-      "recall_at_10": 0.1493,
+      "recall_at_10": 0.1389,
       "precision_at_10": 1.0,
       "nDCG_at_10": 0.9581,
       "mrr": 1.0,
@@ -50,9 +50,27 @@
     "labels_sha256": "213DD5FE7D07978B2E3D753FE83D6D8F04371CD94FD2F8808A8E5F1F2D2DB185",
     "candidate_snapshot_sha256": "447D6B4655F0EF749A58E5F39C344F036C3A663A337B877DA0E46B3B5E92B6B1"
   },
+  "final_review": {
+    "date": "2026-08-09",
+    "reviewer": "codex-on-behalf-of-user (user-delegated final review)",
+    "report": "evaluation/kg_llm_radar/annotation_final_review_20260809.md",
+    "scope": "136 labels / 136 unique papers",
+    "grade_changes": 5,
+    "grade_changes_detail": [
+      {"paper_id": "2504.06766v2", "from": 1, "to": 2, "reason": "KG-grounded multi-hop tool-use benchmark + KG-augmented evaluation"},
+      {"paper_id": "2605.04003v1", "from": 0, "to": 2, "reason": "KG retrieval + critic verification + provenance for agent decision support"},
+      {"paper_id": "2605.10120v1", "from": 0, "to": 2, "reason": "KG construction + graph-augmented retrieval for MLLM reasoning"},
+      {"paper_id": "2605.26256v1", "from": 0, "to": 2, "reason": "Multimodal KG memory for long-term agent memory"},
+      {"paper_id": "2605.27845v1", "from": 0, "to": 2, "reason": "LLM-driven supply-chain KG construction with provenance"}
+    ],
+    "labels_final": "evaluation/kg_llm_radar/labels_final_20260809.jsonl",
+    "labels_final_sha256": "28794CD650E2CB5F8B86C355C8FBA5B3EA9C132DE35385A1881B443705D95925",
+    "distribution": {"R3": 43, "R2": 29, "R1": 43, "R0": 21}
+  },
   "multi_run_median": {
     "date": "2026-08-09",
     "labels": "evaluation/kg_llm_radar/labels_reviewed_20260809.jsonl",
+    "labels_final": "evaluation/kg_llm_radar/labels_final_20260809.jsonl",
     "candidate_snapshot": "evaluation/kg_llm_radar/candidates_local_20260809.jsonl",
     "runs": {
       "pointwise_cap40": [
@@ -64,12 +82,20 @@
         "reports/evaluation/kg_llm_radar/multi_lw_cap60_1/radar_run.json",
         "reports/evaluation/kg_llm_radar/multi_lw_cap60_2/radar_run.json",
         "reports/evaluation/kg_llm_radar/multi_lw_cap60_3/radar_run.json"
+      ],
+      "listwise_cap60_fixed": [
+        "reports/evaluation/kg_llm_radar/multi_lw_cap60_fixed_1/radar_run.json",
+        "reports/evaluation/kg_llm_radar/multi_lw_cap60_fixed_2/radar_run.json",
+        "reports/evaluation/kg_llm_radar/multi_lw_cap60_fixed_3/radar_run.json"
       ]
     },
     "merged_results": [
       "reports/evaluation/kg_llm_radar/merge_pp_cap40_3runs_reviewed.json",
-      "reports/evaluation/kg_llm_radar/merge_lw_cap60_3runs_reviewed.json"
+      "reports/evaluation/kg_llm_radar/merge_lw_cap60_3runs_reviewed.json",
+      "reports/evaluation/kg_llm_radar/merge_lw_cap60_3runs_fixed.json",
+      "reports/evaluation/kg_llm_radar/merge_pp_cap40_3runs_final.json",
+      "reports/evaluation/kg_llm_radar/merge_lw_cap60_3runs_final.json"
     ],
-    "conclusion": "listwise cap60 strong_recall@20 median not worse (0.3488 vs 0.3256) at 1/5 calls and ~15% fewer tokens; pointwise cap40 nDCG higher (0.9581 vs 0.9217)"
+    "conclusion": "with final labels, pointwise cap40 remains the better default (nDCG@10 0.9581 vs 0.8196, strong_success@1 3/3 vs 2/3, strong_recall@20 0.3256 vs 0.3256); listwise still has parse failures"
   }
 }

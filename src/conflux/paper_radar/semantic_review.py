@@ -255,8 +255,16 @@ def batch_semantic_review(
                 profile_keywords=profile_keywords,
                 few_shot=few_shot,
             )
+            reviewed_ids = set()
             for review in batch_reviews:
                 reviews[str(review.paper_id)] = review
+                reviewed_ids.add(str(review.paper_id))
+            for paper in chunk:
+                paper_id = str(paper.get("id") or "")
+                if paper_id not in reviewed_ids:
+                    reviews[paper_id] = SemanticReview(
+                        paper_id=paper_id, telemetry=telemetry
+                    )
             if stats is not None:
                 stats.semantic_review_calls += telemetry.get("calls", 0)
                 stats.semantic_review_tokens += telemetry.get("total_tokens", 0)
@@ -338,6 +346,7 @@ def review_batch_listwise(
         payload = by_id.get(paper_id)
         if payload is None:
             telemetry["fell_back"] = True
+            reviews.append(SemanticReview(paper_id=paper_id, telemetry=telemetry))
             continue
         reviews.append(_payload_to_review(paper_id, payload, telemetry))
     return reviews, telemetry

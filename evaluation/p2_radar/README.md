@@ -112,7 +112,8 @@
   `cs.LO`；`build_p2_label_candidates.py` 与真实雷达一致传递 QuerySpec categories，
   避免标注候选和运行候选使用不同检索口径。
 - 当前 75 篇标注为 codex-agent 初标、evidence=abstract-only，已代审并冻结；
-  用户终审仍建议保留。未达到计划中“至少 100 篇人工标注集”的 P2 退出标准。
+  2026-08-09 完成用户委托终审。计划已取消“至少 100 篇人工标注集”的数量门槛，
+  以已终审冻结的标注集为 P2 退出标准。
 - 成本：约 41k tokens / 次，波动小。
 
 ## 2026-08-08 标注复核 + RTLola 修复后真实运行
@@ -247,3 +248,42 @@ RAG/LLM wiki），对 KG 画像查询做无 LLM embedding 粗排：
   粗排分进入 links，违反“评审失败必须 unreviewed”合同。
 - 两篇分别落在 rank 8（R3）与 rank 37（R2），对当轮指标影响很小，但 listwise
   结论需在修复该语义缺口后重新确认。
+
+### listwise 缺口修复与重跑（2026-08-09）
+
+缺口已修复：`semantic_review.py` 对缺失/失败的 listwise 论文生成
+`reviewed=False` 记录，雷达层将其标记为 `needs_review`，并补了部分/整批失败
+回归测试。修复后 `listwise cap60` 3 次中位数：
+
+| 指标 | pointwise cap40 median | listwise cap60 median（修复后） |
+|---|---|---|
+| nDCG@10 | 0.9581 | 0.8196（0.7418 / 0.838） |
+| strong_recall@20 | 0.3256 | 0.3256（0.2558 / 0.3488） |
+| strong_success@1 | 3/3 | 2/3 |
+| semantic_review_tokens | 48,228 | 41,975 |
+| semantic_review_calls | 40 | 8 |
+
+结论变化：修复后 listwise 不再优于 pointwise，且三轮仍有 1-2 个批次解析失败并
+正确标记 `needs_review`；默认保持 `pointwise cap40`，listwise 需先提升解析
+稳定性再重新评估。
+
+## 2026-08-09 标注终审与配置确认
+
+用户委托 Codex 对 75 行 P2 标注做正式终审，无等级调整，冻结为
+`evaluation/p2_radar/labels_final_20260809.jsonl`，详见
+`evaluation/p2_radar/annotation_final_review_20260809.md`。
+
+final labels 下默认 `pointwise cap40` 3 次中位数：
+
+| 指标 | median |
+|---|---:|
+| recall@10 | 0.4286 |
+| precision@10 | 0.6 |
+| nDCG@10 | 0.5739 |
+| strong_recall@20 | 0.5 |
+| strong_success@1 | 2/3 |
+| semantic_review_tokens | 43,420 |
+
+配置确认：`run_paper_radar` 默认 `review_mode=pointwise`、
+`semantic_review_limit=40`、非分层；Workbench `research_radar` 默认回落
+`balanced`（温度 0.25），与实验结论所用配置一致。

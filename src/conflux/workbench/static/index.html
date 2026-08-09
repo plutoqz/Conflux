@@ -503,6 +503,12 @@
                       <button id="runProjectRadar" class="button primary compact" type="button"><i data-lucide="radar" aria-hidden="true"></i><span>运行雷达</span></button>
                     </div>
                   </div>
+                  <div class="research-schedule-controls" aria-label="论文雷达周期任务">
+                    <label class="toggle-row"><input id="researchScheduleEnabled" type="checkbox"><span>周期运行</span></label>
+                    <label>间隔（分钟）<input id="researchScheduleInterval" type="number" min="1" max="525600" value="1440"></label>
+                    <button id="saveResearchSchedule" class="button secondary compact" type="button"><i data-lucide="clock-3" aria-hidden="true"></i><span>保存周期</span></button>
+                    <span id="researchScheduleState" class="field-hint" aria-live="polite">未启用</span>
+                  </div>
                   <div id="projectResearchEmpty" class="inline-empty">尚未配置研究画像或运行雷达。请在项目设置中添加 research 配置。</div>
                   <div id="projectResearchContent" hidden>
                     <dl class="evidence-metrics">

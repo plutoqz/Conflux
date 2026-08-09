@@ -845,15 +845,27 @@ function renderProjectResearch(overview) {
   $('runProjectRadar').disabled = false;
   $('projectResearchSummary').textContent =
     '画像: ' + (researchCfg.profile || '未指定') + '  |  来源: ' + (researchCfg.sources || []).join(', ');
+  renderResearchSchedule({
+    enabled: Boolean(researchCfg.schedule_enabled),
+    interval_minutes: researchCfg.interval_minutes || 1440,
+    timezone: researchCfg.schedule_timezone || 'Asia/Shanghai',
+    last_run_at: researchCfg.last_run_at || '',
+    next_run_at: researchCfg.next_run_at || '',
+  });
 
   // Fetch cached radar status
   fetch('/api/projects/research/status?project_id=' + encodeURIComponent(projectId))
     .then((r) => r.json())
     .then((data) => {
+      renderResearchSchedule(data.schedule || {});
       if (!data.ok) {
         $('projectResearchStatus').className = 'status-pill neutral';
         $('projectResearchStatus').textContent = '未运行';
         return;
+      }
+      if (data.job && (data.job.status === 'pending' || data.job.status === 'running')) {
+        $('projectResearchStatus').className = 'status-pill warn';
+        $('projectResearchStatus').textContent = data.job.status === 'running' ? '运行中' : '等待执行';
       }
       const stats = data.stats || {};
       const candidateCount = stats.after_coarse_rank || (data.links || []).length || data.candidate_count || 0;
@@ -918,10 +930,9 @@ function runProjectRadar() {
   api('/api/projects/research/run', { project_id: projectId })
     .then((data) => {
       if (data.ok) {
-        $('projectResearchStatus').className = 'status-pill ' + (data.usable ? 'success' : 'warn');
-        $('projectResearchStatus').textContent = data.usable ? '可审查' : (data.status === 'no_candidates' ? '无候选' : '无精读候选');
-        const overview = projectsCache.find((item) => item.project.id === projectId);
-        if (overview) renderProjectResearch(overview.project || {});
+        $('projectResearchStatus').className = 'status-pill warn';
+        $('projectResearchStatus').textContent = '等待执行';
+        return waitForProjectRadarJob(data.job_id, projectId);
       } else {
         $('projectResearchStatus').className = 'status-pill error';
         $('projectResearchStatus').textContent = '失败: ' + (data.error || '未知错误');
@@ -934,6 +945,81 @@ function runProjectRadar() {
     .finally(() => { $('runProjectRadar').disabled = false; });
 }
 
+function waitForProjectRadarJob(jobId, projectId) {
+  return new Promise((resolve) => {
+    const poll = () => {
+      fetch('/api/projects/research/jobs/' + encodeURIComponent(jobId), { cache: 'no-store' })
+        .then((response) => response.json())
+        .then((job) => {
+          if (job.status === 'pending' || job.status === 'running') {
+            $('projectResearchStatus').className = 'status-pill warn';
+            $('projectResearchStatus').textContent = job.status === 'running' ? '运行中' : '等待执行';
+            window.setTimeout(poll, 1000);
+            return;
+          }
+          if (job.status === 'completed') {
+            const overview = projectsCache.find((item) => item.project.id === projectId);
+            if (overview) renderProjectResearch(overview.project || {});
+          } else {
+            $('projectResearchStatus').className = 'status-pill error';
+            $('projectResearchStatus').textContent = job.status === 'cancelled' ? '已取消' : '执行失败';
+          }
+          resolve(job);
+        })
+        .catch(() => {
+          $('projectResearchStatus').className = 'status-pill error';
+          $('projectResearchStatus').textContent = '状态读取失败';
+          resolve(null);
+        });
+    };
+    poll();
+  });
+}
+
+function renderResearchSchedule(schedule) {
+  const enabled = Boolean(schedule && schedule.enabled);
+  $('researchScheduleEnabled').checked = enabled;
+  $('researchScheduleInterval').value = String((schedule && schedule.interval_minutes) || 1440);
+  $('researchScheduleInterval').disabled = !enabled;
+  const nextRun = schedule && schedule.next_run_at ? fmtIsoDate(schedule.next_run_at) : '';
+  $('researchScheduleState').textContent = enabled
+    ? ('已启用' + (nextRun ? ' · 下次 ' + nextRun : ''))
+    : '未启用';
+}
+
+function saveResearchSchedule() {
+  const enabled = $('researchScheduleEnabled').checked;
+  const intervalMinutes = Number($('researchScheduleInterval').value || 1440);
+  $('saveResearchSchedule').disabled = true;
+  api('/api/projects/research/schedule', {
+    project_id: selectedProjectId,
+    enabled: enabled,
+    interval_minutes: intervalMinutes,
+    timezone: 'Asia/Shanghai',
+  }).then((data) => {
+    if (!data.ok) {
+      toast(data.error || '周期任务保存失败', 'err');
+      return;
+    }
+    renderResearchSchedule(data.schedule || {});
+    const overview = projectsCache.find((item) => item.project.id === selectedProjectId);
+    if (overview && overview.project) {
+      overview.project.research = Object.assign({}, overview.project.research || {}, {
+        schedule_enabled: data.schedule.enabled,
+        interval_minutes: data.schedule.interval_minutes,
+        schedule_timezone: data.schedule.timezone,
+        last_run_at: data.schedule.last_run_at,
+        next_run_at: data.schedule.next_run_at,
+      });
+    }
+    toast(enabled ? '论文雷达周期任务已启用' : '论文雷达周期任务已停用', 'ok');
+  }).catch((error) => {
+    toast('周期任务保存失败：' + error.message, 'err');
+  }).finally(() => {
+    $('saveResearchSchedule').disabled = false;
+  });
+}
+
 function renderResearchPapers(data) {
   const papers = (data && data.papers) || [];
   $('researchPaperSummary').textContent = papers.length + ' 篇';
@@ -943,20 +1029,20 @@ function renderResearchPapers(data) {
   }
   $('researchPapersList').innerHTML = papers.map((p) => {
     const badge = p.status === 'saved' ? 'success' : p.status === 'rejected' ? 'error' : (p.status === 'shortlisted' ? 'warn' : 'neutral');
-    return '<div class="analysis-item paper-row" data-paper-id="' + escapeHtml(p.paper_id) + '">' +
+    return '<div class="analysis-item paper-row" data-paper-key="' + escapeHtml(p.paper_key) + '">' +
       '<span class="analysis-tag ' + badge + '">' + escapeHtml(p.status) + '</span>' +
       '<span class="paper-id">' + escapeHtml(p.paper_id) + '</span>' +
       '<span class="paper-util">' + escapeHtml(p.evidence_utility || 'none') + '</span>' +
       '<div class="paper-actions">' +
-        '<button class="button ghost compact paper-save-btn" data-action="save" data-paper-id="' + escapeHtml(p.paper_id) + '" title="保存"><i data-lucide="bookmark" aria-hidden="true"></i></button>' +
-        '<button class="button ghost compact paper-ignore-btn" data-action="ignore" data-paper-id="' + escapeHtml(p.paper_id) + '" title="忽略"><i data-lucide="x" aria-hidden="true"></i></button>' +
-        '<button class="button ghost compact paper-shortlist-btn" data-action="shortlist" data-paper-id="' + escapeHtml(p.paper_id) + '" title="加入精读"><i data-lucide="star" aria-hidden="true"></i></button>' +
+        '<button class="button ghost compact paper-save-btn" data-action="save" data-paper-key="' + escapeHtml(p.paper_key) + '" title="保存"><i data-lucide="bookmark" aria-hidden="true"></i></button>' +
+        '<button class="button ghost compact paper-ignore-btn" data-action="ignore" data-paper-key="' + escapeHtml(p.paper_key) + '" title="忽略"><i data-lucide="x" aria-hidden="true"></i></button>' +
+        '<button class="button ghost compact paper-shortlist-btn" data-action="shortlist" data-paper-key="' + escapeHtml(p.paper_key) + '" title="加入精读"><i data-lucide="star" aria-hidden="true"></i></button>' +
       '</div></div>';
   }).join('');
   // Bind action buttons
   document.querySelectorAll('.paper-save-btn, .paper-ignore-btn, .paper-shortlist-btn').forEach(function(btn) {
     btn.addEventListener('click', function() {
-      performPaperAction(btn.dataset.paperId, btn.dataset.action, btn);
+      performPaperAction(btn.dataset.paperKey, btn.dataset.action, btn);
     });
   });
   refreshIcons();
@@ -975,17 +1061,17 @@ function renderResearchCoverage(data) {
     : '<div class="inline-empty">无覆盖数据</div>';
 }
 
-function performPaperAction(paperId, action, button) {
+function performPaperAction(paperKey, action, button) {
   const projectId = selectedProjectId;
   if (button) { button.disabled = true; }
   api('/api/projects/research/papers/action', {
     project_id: projectId,
-    paper_id: paperId,
+    paper_key: paperKey,
     action: action,
   }).then(function(data) {
     if (data.ok) {
       // Update the row status badge
-      var row = document.querySelector('.paper-row[data-paper-id="' + paperId + '"]');
+      var row = button ? button.closest('.paper-row') : null;
       if (row) {
         var badge = row.querySelector('.analysis-tag');
         if (badge) {
@@ -2286,6 +2372,10 @@ function bindEvents() {
   $('saveProjectSettings').addEventListener('click', saveSelectedProjectSettings);
   $('auditSelectedProject').addEventListener('click', auditSelectedProject);
   $('runProjectRadar').addEventListener('click', runProjectRadar);
+  $('researchScheduleEnabled').addEventListener('change', () => {
+    $('researchScheduleInterval').disabled = !$('researchScheduleEnabled').checked;
+  });
+  $('saveResearchSchedule').addEventListener('click', saveResearchSchedule);
   $('registeredProjectPath').addEventListener('blur', () => {
     if ($('registeredProjectName').value.trim()) return;
     const parts = $('registeredProjectPath').value.trim().replace(/[\\\/]+$/, '').split(/[\\\/]/);

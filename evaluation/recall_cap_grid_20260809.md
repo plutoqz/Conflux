@@ -41,7 +41,7 @@ pointwise cap100 单次运行质量最高（nDCG 0.9184、strong_recall@20 0.377
   - KG：成本敏感用 listwise cap60；质量优先用 pointwise cap100，并需 3 次运行确认。
 - 所有 KG 指标基于 provisional 初标和单次运行，正式结论前需补多次运行与人工复核。
 
-## 2026-08-09 多次运行修正（reviewed labels）
+## 2026-08-09 多次运行修正（reviewed labels，listwise 为修复前运行）
 
 KG 领域补做标注复核与多次运行：136 篇初标经 Codex 复核（2 处 R3→R2），
 `pointwise cap40` 与 `listwise cap60` 各 3 次真实评审中位数：
@@ -50,7 +50,7 @@ KG 领域补做标注复核与多次运行：136 篇初标经 Codex 复核（2 �
 |---|---|---|---|---|---|---|---|
 | 无 LLM 粗排（确定性） | 0.1493 | 1.0 | 0.9621 | 0.3488 | 3/3* | 0 | 0 |
 | pointwise cap40（median） | 0.1493 | 1.0 | 0.9581 | 0.3256 | 3/3 | 48,228 | 40 |
-| listwise cap60（median） | 0.1493 | 1.0 | 0.9217 | 0.3488 | 3/3 | 40,664 | 8 |
+| listwise cap60（median，修复前） | 0.1493 | 1.0 | 0.9217 | 0.3488 | 3/3 | 40,664 | 8 |
 
 修正后结论：多次运行下 `listwise cap60` 的 strong_recall@20 中位数不劣于
 `pointwise cap40`（0.3488 vs 0.3256），调用数降至 1/5、token 省约 15%；
@@ -64,3 +64,41 @@ hold-out 验证。
 说明 LLM 评审收益是 GIS/arXiv 稀疏场景结论。另做了分领域向量库模拟（136 KG 论文
 + 29 跨域文档），Top-25 无跨域文档、跨域文档最早第 100 名，按领域拆库在当前
 embedding 粗排下收益很小；更优先的是“论文 vs 通用资料”来源分层与索引覆盖补全。
+
+### 2026-08-09 listwise 缺口修复后重跑
+
+修复 `review is None` 时静默保留粗排分的缺口后，`listwise cap60` 另跑 3 次
+真实评审中位数：
+
+| 指标 | pointwise cap40 median | listwise cap60 median（修复后） |
+|---|---|---|
+| recall@10 | 0.1493 | 0.1493 |
+| precision@10 | 1.0 | 1.0 |
+| nDCG@10 | 0.9581 | 0.8196（0.7418 / 0.838） |
+| strong_recall@20 | 0.3256 | 0.3256（0.2558 / 0.3488） |
+| strong_success@1 | 3/3 | 2/3 |
+| semantic_review_tokens | 48,228 | 41,975（40,444 / 42,476） |
+| semantic_review_calls | 40 | 8 |
+
+结论更新：修复后 `listwise cap60` 的 strong_recall@20 中位数与 `pointwise cap40`
+持平，不再优于 pointwise；nDCG 明显下降，strong_success@1 降为 2/3。三轮仍有
+1-2 个批次解析失败（1-9 篇论文被正确标记 `needs_review`），原“成本敏感默认可
+用 listwise cap60”的建议不再成立，默认应保持 `pointwise cap40`。
+
+### 2026-08-09 终审标注后指标（final labels）
+
+用户委托 Codex 完成两套标注终审：P2 无调整，KG 5 处 R0/R1 上调为 R2。
+KG final labels 下相关论文 67 -> 72，强相关仍为 43。用 final labels 重评
+原有 3 次中位数运行：
+
+| 指标 | pointwise cap40 median | listwise cap60 median（修复后） |
+|---|---|---|
+| recall@10 | 0.1389 | 0.1389 |
+| precision@10 | 1.0 | 1.0 |
+| nDCG@10 | 0.9581 | 0.8196（0.7418 / 0.838） |
+| strong_recall@20 | 0.3256 | 0.3256（0.2558 / 0.3488） |
+| strong_success@1 | 3/3 | 2/3 |
+| semantic_review_tokens | 48,228 | 41,975 |
+| semantic_review_calls | 40 | 8 |
+
+结论保持不变：`pointwise cap40` 是 final 标注下的更优配置。
