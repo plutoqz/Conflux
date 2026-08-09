@@ -4083,8 +4083,6 @@ def _model_env_updates(payload: dict[str, Any]) -> dict[str, str]:
         updates["CONFLUX_AGENT__MAX_ITERATIONS"] = "5"
         updates["CONFLUX_RESEARCH__ENABLE_L4"] = "true"
         updates["CONFLUX_RESEARCH__MAX_DEEP_QUESTIONS"] = "5"
-        updates["CONFLUX_RETRIEVAL__TOP_K"] = "15"
-        updates["CONFLUX_RETRIEVAL__FINAL_K"] = "10"
     return updates
 
 

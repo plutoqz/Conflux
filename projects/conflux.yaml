@@ -49,8 +49,8 @@ plan:
     - M2 集成测试
   - id: p2-project-paper-radar
     title: P2 项目驱动论文雷达
-    status: in_progress
-    description: 已完成项目绑定、Track 搜索扩面、项目论文关联和 Workbench Research 视图的文件模式闭环，待 M3 统一持久化。
+    status: completed
+    description: 已完成项目绑定、Track 搜索扩面、项目论文关联、两领域终审评测和 Workbench Research 视图，并由 M3 迁入 SQLite 权威状态。
     deliverables:
     - ProjectResearchConfig 与 SearchIntent 等类型化契约（19 个 Pydantic 类型）
     - 项目级论文状态和报告目录（reports/workbench/projects/{id}/papers/）
@@ -58,28 +58,45 @@ plan:
     - P2 人工标注集和验收报告（tests/test_p2_paper_radar.py，25 tests）
   - id: phase2-usability
     title: 阶段 2 真实使用与阻断修复
-    status: in_progress
-    description: 修复知识库模型切换、研究查询交付状态和项目监控数据口径，并由用户进行真实使用复核。
+    status: completed
+    description: 已完成知识库模型切换、研究查询交付状态、项目监控数据口径和真实使用阻断修复。
     deliverables:
     - 可保留旧向量的知识库完整重建流程
     - 研究查询完整性与引用核验分离
     - 基于当前计划和实际成果的项目监控
   - id: m3-persistent-runs
     title: M3 持久运行与初始化迁移
-    status: planned
-    description: 在 P2 文件模式闭环验证后，引入 SQLite Run Store，并迁移论文身份、项目关联、搜索意图、事件和审批状态。
-    deliverables: []
+    status: completed
+    description: SQLite 已成为 Run、Job、Event、Checkpoint、论文身份、项目关联和搜索状态权威来源。
+    deliverables:
+    - SQLite Repository 与 Legacy 导入
+    - 论文雷达周期 Job 和通用查询持久 Job
+    - SSE EventStore、Checkpoint 恢复和 RunContext 配置隔离
+  - id: m4-evidence-ledger
+    title: M4 Evidence Ledger 与验证闭环
+    status: completed
+    description: 已完成跨运行来源版本、声明关系、产物影响分析和 Workbench 待确认复核闭环。
+    deliverables:
+    - SQLite migration 0005_evidence_ledger
+    - EvidenceLedgerRepository 与持久查询自动落库
+    - 外部进程中断恢复验证和 Workbench 证据变化复核
+  - id: m5-evaluation-extensions
+    title: M5 LLM 评审评测与示例扩展
+    status: completed
+    description: 已完成四策略评测、当前 V2/V3 路径 R3 replay 和两个互补 SDK 示例；asp-2/asp-6 live 结果保留为不稳定。
+    deliverables:
+    - evaluation/m5/manifest.json
+    - reports/evaluation/m5/m5_evaluation.json
+    - example.local-jsonl-source 与 example.evidence-coverage-evaluator
   next_actions:
-  - 完成阶段 2 真实使用复核，关闭研究查询和项目监控的剩余阻断。
-  - 建立 P2 人工标注集、跨项目隔离验证和退出标准。
-  - 收集完整研究样例、各阶段耗时、实际 token usage、成本和评分数据。
-  - P2 退出后启动 M3 持久运行与初始化迁移。
+  - 继续观察 RAG Gold asp-2/asp-6 的跨运行稳定性，不把 1/3 live 覆盖升级为能力通过。
+  - 仅在多工作区并发、SQLite 瓶颈、远程 Worker/备份或强隔离需求出现时评估 M6。
   source_documents:
   - docs/plans/执行计划v1.md
   - docs/架构设计.md
   - docs/plans/done/项目总体进展报告.md
   - PRODUCT.md
-  updated_at: '2026-08-04'
+  updated_at: '2026-08-09'
 refresh:
   mode: manual
   schedule_enabled: false
@@ -97,6 +114,7 @@ research:
   cadence: manual
   max_candidates: 100
   deep_read_limit: 5
+  semantic_review_limit: 40
   auto_generate_queries: true
   require_query_review: true
   require_plan_writeback_approval: true

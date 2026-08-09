@@ -114,13 +114,19 @@ def index_command(docs_dir: str) -> None:
 
     print(f"Read {len(documents)} documents.")
 
-    parents, children = chunk_documents(documents)
+    parent_size = int(config_get("retrieval", "parent_chunk_size", default=512))
+    child_size = int(config_get("retrieval", "child_chunk_size", default=128))
+    parents, children = chunk_documents(
+        documents,
+        parent_size=parent_size,
+        child_size=child_size,
+    )
     print(f"Chunked into {len(parents)} parent chunks and {len(children)} child chunks.")
 
     vector_store = create_vector_store()
     clear_index(vector_store)
-    indexed = index_documents(vector_store, children)
-    print(f"Indexed {indexed} child chunks into the vector store.")
+    indexed = index_documents(vector_store, parents)
+    print(f"Indexed {indexed} parent chunks into the vector store.")
 
 
 def _new_v2_state(

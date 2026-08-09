@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -31,8 +31,8 @@ class DepthPreset:
     agent_max_iterations: int
     enable_l4: bool
     max_deep_questions: int
-    retrieval_top_k: int
-    retrieval_final_k: int
+    retrieval_top_k: int | None
+    retrieval_final_k: int | None
 
 
 DEPTH_PRESETS: dict[str, DepthPreset] = {
@@ -51,8 +51,8 @@ DEPTH_PRESETS: dict[str, DepthPreset] = {
         agent_max_iterations=3,
         enable_l4=True,
         max_deep_questions=2,
-        retrieval_top_k=10,
-        retrieval_final_k=5,
+        retrieval_top_k=None,
+        retrieval_final_k=None,
     ),
     "deep": DepthPreset(
         key="deep",
@@ -60,8 +60,8 @@ DEPTH_PRESETS: dict[str, DepthPreset] = {
         agent_max_iterations=5,
         enable_l4=True,
         max_deep_questions=5,
-        retrieval_top_k=15,
-        retrieval_final_k=10,
+        retrieval_top_k=None,
+        retrieval_final_k=None,
     ),
 }
 
@@ -69,7 +69,20 @@ DEPTH_PRESETS: dict[str, DepthPreset] = {
 def get_depth_preset(key: str | None = None) -> DepthPreset:
     """Return the active depth preset. Falls back to 'standard'."""
     key = key or os.environ.get("CONFLUX_DEPTH", "standard")
-    return DEPTH_PRESETS.get(key, DEPTH_PRESETS["standard"])
+    preset = DEPTH_PRESETS.get(key, DEPTH_PRESETS["standard"])
+    return replace(
+        preset,
+        retrieval_top_k=(
+            preset.retrieval_top_k
+            if preset.retrieval_top_k is not None
+            else int(config.get("retrieval", "top_k", default=60))
+        ),
+        retrieval_final_k=(
+            preset.retrieval_final_k
+            if preset.retrieval_final_k is not None
+            else int(config.get("retrieval", "final_k", default=20))
+        ),
+    )
 
 
 def build_sanitized_config() -> dict[str, Any]:
@@ -86,14 +99,15 @@ def build_sanitized_config() -> dict[str, Any]:
         "depth": os.environ.get("CONFLUX_DEPTH", "standard"),
         "depth_presets": {
             k: {
-                "label": p.label,
-                "agent_max_iterations": p.agent_max_iterations,
-                "enable_l4": p.enable_l4,
-                "max_deep_questions": p.max_deep_questions,
-                "retrieval_top_k": p.retrieval_top_k,
-                "retrieval_final_k": p.retrieval_final_k,
+                "label": resolved.label,
+                "agent_max_iterations": resolved.agent_max_iterations,
+                "enable_l4": resolved.enable_l4,
+                "max_deep_questions": resolved.max_deep_questions,
+                "retrieval_top_k": resolved.retrieval_top_k,
+                "retrieval_final_k": resolved.retrieval_final_k,
             }
-            for k, p in DEPTH_PRESETS.items()
+            for k in DEPTH_PRESETS
+            for resolved in (get_depth_preset(k),)
         },
     }
     return sanitized

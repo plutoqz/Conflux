@@ -1,0 +1,15 @@
+{
+  "schema_version": "conflux-m4-live-recovery-v1",
+  "run_id": "3245954ae595",
+  "query": "What are the core mechanisms and limitations of retrieval-augmented generation?",
+  "child_exit_code": 99,
+  "terminal_status": "completed_diagnostic",
+  "queue_status": "completed",
+  "resume_event_count": 1,
+  "event_count": 5,
+  "ledger_evidence_count": 11,
+  "ledger_claim_count": 0,
+  "elapsed_seconds": 96.012,
+  "live_external": true,
+  "passed": true
+}

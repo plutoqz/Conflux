@@ -1,0 +1,132 @@
+{
+  "schema_version": "conflux-p2-radar-eval-v1",
+  "label_set": "evaluation\\p2_radar\\labels.jsonl",
+  "results": [
+    {
+      "schema_version": "conflux-p2-radar-labels-v1",
+      "retrieval": {
+        "recall_at_1": 0.0714,
+        "precision_at_1": 1.0,
+        "recall_at_5": 0.1429,
+        "precision_at_5": 0.4,
+        "recall_at_10": 0.1429,
+        "precision_at_10": 0.2,
+        "relevant_labeled_count": 14,
+        "linked_count": 73,
+        "linked_relevant_count": 13,
+        "ndcg_at_10": 0.1952,
+        "mrr": 1.0,
+        "strong_recall_at_20": 0.25,
+        "success_at_10": false,
+        "strong_labeled_count": 4
+      },
+      "queries": {
+        "query_count": 5,
+        "failed_query_count": 0,
+        "by_query": [
+          {
+            "query_id": "537106a01c60",
+            "track_id": "geo_agents",
+            "source": "arxiv",
+            "candidate_count": 20,
+            "failed": false
+          },
+          {
+            "query_id": "9bb81c3a1984",
+            "track_id": "geo_agents",
+            "source": "arxiv",
+            "candidate_count": 20,
+            "failed": false
+          },
+          {
+            "query_id": "39ef2fad864d",
+            "track_id": "agent_verification",
+            "source": "arxiv",
+            "candidate_count": 17,
+            "failed": false
+          },
+          {
+            "query_id": "9dc612f52283",
+            "track_id": "agent_verification",
+            "source": "arxiv",
+            "candidate_count": 17,
+            "failed": false
+          },
+          {
+            "query_id": "78c69b92c756",
+            "track_id": "reproducibility",
+            "source": "arxiv",
+            "candidate_count": 25,
+            "failed": false
+          }
+        ],
+        "by_track": {
+          "geo_agents": {
+            "query_count": 2,
+            "failed_count": 0,
+            "candidate_count": 40
+          },
+          "agent_verification": {
+            "query_count": 2,
+            "failed_count": 0,
+            "candidate_count": 34
+          },
+          "reproducibility": {
+            "query_count": 1,
+            "failed_count": 0,
+            "candidate_count": 25
+          }
+        }
+      },
+      "duplicate_handling": {
+        "total_candidates": 99,
+        "after_dedup": 73,
+        "dedup_rate": 0.2626
+      },
+      "analysis": {
+        "suggestion_count": 0,
+        "ungrounded_suggestion_count": 0,
+        "ungrounded_analysis_rate": null,
+        "llm_fallback_count": 0,
+        "needs_review_count": 0
+      },
+      "cost": {
+        "llm_total_tokens": 0,
+        "semantic_review_tokens": 0,
+        "semantic_review_calls": 0,
+        "semantic_review_failed": 0,
+        "llm_elapsed_ms": 0,
+        "elapsed_seconds": 11.684368371963501,
+        "cost_available": false
+      },
+      "sources": {
+        "sources_used": [
+          "arxiv"
+        ],
+        "failed_sources": [],
+        "source_error_rate": 0.0
+      },
+      "run_label": "no_llm"
+    }
+  ],
+  "aggregate": {
+    "run_count": 1,
+    "retrieval": {
+      "mean_recall_at_1": 0.0714,
+      "mean_recall_at_5": 0.1429,
+      "mean_recall_at_10": 0.1429,
+      "mean_precision_at_1": 1.0,
+      "mean_precision_at_5": 0.4,
+      "mean_precision_at_10": 0.2,
+      "mean_ndcg_at_10": 0.1952,
+      "mean_mrr": 1.0,
+      "mean_strong_recall_at_20": 0.25,
+      "success_at_10_count": 0
+    },
+    "analysis": {
+      "mean_ungrounded_analysis_rate": null,
+      "total_needs_review": 0,
+      "total_llm_fallback": 0
+    }
+  }
+}

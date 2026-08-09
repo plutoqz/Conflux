@@ -1,0 +1,647 @@
+{
+  "schema_version": "conflux-m5-live-gold-repeats-v1",
+  "query_contract": "rag-hallucination-verification",
+  "run_count": 3,
+  "runs": [
+    {
+      "summary": "reports\\evaluation\\v2_gold\\rerun_20260809\\3f72a9eb7525.summary.json",
+      "run_id": "3f72a9eb7525",
+      "score": {
+        "case_id": "rag-hallucination-verification",
+        "query": "What evidence shows that retrieval-augmented generation reduces hallucination, and what limitations remain for research-report verification?",
+        "retrieval": [
+          {
+            "aspect_id": "asp-1",
+            "aligned_subquestion_id": "sq-1",
+            "retrieved_count": 6,
+            "precision_at_k": 0.0,
+            "irrelevant_at_k": 5,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": null,
+            "matched_positive_semantics": []
+          },
+          {
+            "aspect_id": "asp-2",
+            "aligned_subquestion_id": "sq-4",
+            "retrieved_count": 4,
+            "precision_at_k": 0.2,
+            "irrelevant_at_k": 3,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": 0.6309,
+            "matched_positive_semantics": []
+          },
+          {
+            "aspect_id": "asp-3",
+            "aligned_subquestion_id": null,
+            "retrieved_count": 0,
+            "precision_at_k": 0.0,
+            "irrelevant_at_k": 0,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": null,
+            "matched_positive_semantics": []
+          },
+          {
+            "aspect_id": "asp-4",
+            "aligned_subquestion_id": null,
+            "retrieved_count": 0,
+            "precision_at_k": 0.0,
+            "irrelevant_at_k": 0,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": null,
+            "matched_positive_semantics": []
+          },
+          {
+            "aspect_id": "asp-5",
+            "aligned_subquestion_id": "sq-4",
+            "retrieved_count": 4,
+            "precision_at_k": 0.2,
+            "irrelevant_at_k": 3,
+            "semantic_coverage": 0.3333,
+            "ndcg_at_k": 0.5,
+            "matched_positive_semantics": [
+              "semantic search enhances rag results"
+            ]
+          },
+          {
+            "aspect_id": "asp-6",
+            "aligned_subquestion_id": "sq-2",
+            "retrieved_count": 3,
+            "precision_at_k": 0.0,
+            "irrelevant_at_k": 3,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": null,
+            "matched_positive_semantics": []
+          }
+        ],
+        "verification": {
+          "observed_count": 12,
+          "verdict_accuracy": 0.6667,
+          "negative_evidence_cited_as_support": [
+            {
+              "claim_id": "3f72a9eb7525:claim:sq-1:03",
+              "evidence_id": "3f72a9eb7525:ev-0009",
+              "expected_verdict": "insufficient",
+              "observed_verdict": "supports",
+              "correct": false,
+              "negative_hits": [
+                "learn more"
+              ]
+            },
+            {
+              "claim_id": "3f72a9eb7525:claim:sq-1:04",
+              "evidence_id": "3f72a9eb7525:ev-0009",
+              "expected_verdict": "insufficient",
+              "observed_verdict": "supports",
+              "correct": false,
+              "negative_hits": [
+                "learn more"
+              ]
+            },
+            {
+              "claim_id": "3f72a9eb7525:claim:sq-1:05",
+              "evidence_id": "3f72a9eb7525:ev-0009",
+              "expected_verdict": "insufficient",
+              "observed_verdict": "supports",
+              "correct": false,
+              "negative_hits": [
+                "learn more"
+              ]
+            },
+            {
+              "claim_id": "3f72a9eb7525:claim:sq-1:07",
+              "evidence_id": "3f72a9eb7525:ev-0009",
+              "expected_verdict": "insufficient",
+              "observed_verdict": "supports",
+              "correct": false,
+              "negative_hits": [
+                "learn more"
+              ]
+            }
+          ],
+          "observations": [
+            {
+              "claim_id": "3f72a9eb7525:claim:sq-1:01",
+              "evidence_id": "3f72a9eb7525:ev-0001",
+              "expected_verdict": "supports",
+              "observed_verdict": "supports",
+              "correct": true,
+              "negative_hits": []
+            },
+            {
+              "claim_id": "3f72a9eb7525:claim:sq-1:02",
+              "evidence_id": "3f72a9eb7525:ev-0001",
+              "expected_verdict": "supports",
+              "observed_verdict": "supports",
+              "correct": true,
+              "negative_hits": []
+            },
+            {
+              "claim_id": "3f72a9eb7525:claim:sq-1:03",
+              "evidence_id": "3f72a9eb7525:ev-0009",
+              "expected_verdict": "insufficient",
+              "observed_verdict": "supports",
+              "correct": false,
+              "negative_hits": [
+                "learn more"
+              ]
+            },
+            {
+              "claim_id": "3f72a9eb7525:claim:sq-1:04",
+              "evidence_id": "3f72a9eb7525:ev-0001",
+              "expected_verdict": "supports",
+              "observed_verdict": "supports",
+              "correct": true,
+              "negative_hits": []
+            },
+            {
+              "claim_id": "3f72a9eb7525:claim:sq-1:04",
+              "evidence_id": "3f72a9eb7525:ev-0009",
+              "expected_verdict": "insufficient",
+              "observed_verdict": "supports",
+              "correct": false,
+              "negative_hits": [
+                "learn more"
+              ]
+            },
+            {
+              "claim_id": "3f72a9eb7525:claim:sq-1:05",
+              "evidence_id": "3f72a9eb7525:ev-0001",
+              "expected_verdict": "supports",
+              "observed_verdict": "supports",
+              "correct": true,
+              "negative_hits": []
+            },
+            {
+              "claim_id": "3f72a9eb7525:claim:sq-1:05",
+              "evidence_id": "3f72a9eb7525:ev-0009",
+              "expected_verdict": "insufficient",
+              "observed_verdict": "supports",
+              "correct": false,
+              "negative_hits": [
+                "learn more"
+              ]
+            },
+            {
+              "claim_id": "3f72a9eb7525:claim:sq-1:07",
+              "evidence_id": "3f72a9eb7525:ev-0001",
+              "expected_verdict": "supports",
+              "observed_verdict": "supports",
+              "correct": true,
+              "negative_hits": []
+            },
+            {
+              "claim_id": "3f72a9eb7525:claim:sq-1:07",
+              "evidence_id": "3f72a9eb7525:ev-0009",
+              "expected_verdict": "insufficient",
+              "observed_verdict": "supports",
+              "correct": false,
+              "negative_hits": [
+                "learn more"
+              ]
+            },
+            {
+              "claim_id": "3f72a9eb7525:claim:sq-2:01",
+              "evidence_id": "3f72a9eb7525:ev-0012",
+              "expected_verdict": "supports",
+              "observed_verdict": "supports",
+              "correct": true,
+              "negative_hits": []
+            },
+            {
+              "claim_id": "3f72a9eb7525:claim:sq-2:02",
+              "evidence_id": "3f72a9eb7525:ev-0012",
+              "expected_verdict": "supports",
+              "observed_verdict": "supports",
+              "correct": true,
+              "negative_hits": []
+            },
+            {
+              "claim_id": "3f72a9eb7525:claim:sq-2:06",
+              "evidence_id": "3f72a9eb7525:ev-0012",
+              "expected_verdict": "supports",
+              "observed_verdict": "supports",
+              "correct": true,
+              "negative_hits": []
+            }
+          ]
+        },
+        "answer": {
+          "expected_run_status": "completed",
+          "actual_run_status": "completed",
+          "run_status_match": true,
+          "confidence_match": true,
+          "factcheck_match": true,
+          "aspect_coverage": {
+            "asp-1": true,
+            "asp-2": false,
+            "asp-3": false,
+            "asp-4": true,
+            "asp-5": true,
+            "asp-6": false
+          },
+          "aspect_coverage_detail": {
+            "asp-1": {
+              "exact_positive_semantics": [
+                "reduces hallucination"
+              ],
+              "keywords": [
+                "基准"
+              ]
+            },
+            "asp-2": {
+              "exact_positive_semantics": [],
+              "keywords": []
+            },
+            "asp-3": {
+              "exact_positive_semantics": [],
+              "keywords": []
+            },
+            "asp-4": {
+              "exact_positive_semantics": [],
+              "keywords": [
+                "compositional",
+                "推理错误",
+                "组合",
+                "逻辑错误"
+              ]
+            },
+            "asp-5": {
+              "exact_positive_semantics": [],
+              "keywords": [
+                "改进"
+              ]
+            },
+            "asp-6": {
+              "exact_positive_semantics": [],
+              "keywords": []
+            }
+          },
+          "aspect_gaps": [
+            "asp-3",
+            "asp-4"
+          ],
+          "generated_claim_count": 13,
+          "invalid_citation_count": 0
+        },
+        "runtime": {
+          "run_status": "completed",
+          "confidence": "medium",
+          "factcheck_status": "passed",
+          "elapsed_ms": 181958.0,
+          "input_tokens": 4069,
+          "output_tokens": 19000,
+          "total_tokens": 23069,
+          "estimated_cost_usd": null
+        }
+      }
+    },
+    {
+      "summary": "reports\\evaluation\\v2_gold\\m5_live_1\\52e770921648.summary.json",
+      "run_id": "52e770921648",
+      "score": {
+        "case_id": "rag-hallucination-verification",
+        "query": "What evidence shows that retrieval-augmented generation reduces hallucinations compared with fine-tuning and prompt engineering, through which retrieval and context-integration mechanisms, and which reasoning or logical hallucinations remain unresolved?",
+        "retrieval": [
+          {
+            "aspect_id": "asp-1",
+            "aligned_subquestion_id": "sq-1",
+            "retrieved_count": 7,
+            "precision_at_k": 0.0,
+            "irrelevant_at_k": 5,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": null,
+            "matched_positive_semantics": []
+          },
+          {
+            "aspect_id": "asp-2",
+            "aligned_subquestion_id": "sq-1",
+            "retrieved_count": 7,
+            "precision_at_k": 0.0,
+            "irrelevant_at_k": 5,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": null,
+            "matched_positive_semantics": []
+          },
+          {
+            "aspect_id": "asp-3",
+            "aligned_subquestion_id": null,
+            "retrieved_count": 0,
+            "precision_at_k": 0.0,
+            "irrelevant_at_k": 0,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": null,
+            "matched_positive_semantics": []
+          },
+          {
+            "aspect_id": "asp-4",
+            "aligned_subquestion_id": "sq-3",
+            "retrieved_count": 3,
+            "precision_at_k": 0.0,
+            "irrelevant_at_k": 3,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": null,
+            "matched_positive_semantics": []
+          },
+          {
+            "aspect_id": "asp-5",
+            "aligned_subquestion_id": "sq-4",
+            "retrieved_count": 0,
+            "precision_at_k": 0.0,
+            "irrelevant_at_k": 0,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": null,
+            "matched_positive_semantics": []
+          },
+          {
+            "aspect_id": "asp-6",
+            "aligned_subquestion_id": "sq-2",
+            "retrieved_count": 5,
+            "precision_at_k": 0.0,
+            "irrelevant_at_k": 5,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": null,
+            "matched_positive_semantics": []
+          }
+        ],
+        "verification": {
+          "observed_count": 0,
+          "verdict_accuracy": null,
+          "negative_evidence_cited_as_support": [],
+          "observations": []
+        },
+        "answer": {
+          "expected_run_status": "completed",
+          "actual_run_status": "partial",
+          "run_status_match": false,
+          "confidence_match": false,
+          "factcheck_match": false,
+          "aspect_coverage": {
+            "asp-1": false,
+            "asp-2": false,
+            "asp-3": false,
+            "asp-4": false,
+            "asp-5": false,
+            "asp-6": false
+          },
+          "aspect_coverage_detail": {
+            "asp-1": {
+              "exact_positive_semantics": [],
+              "keywords": []
+            },
+            "asp-2": {
+              "exact_positive_semantics": [],
+              "keywords": []
+            },
+            "asp-3": {
+              "exact_positive_semantics": [],
+              "keywords": []
+            },
+            "asp-4": {
+              "exact_positive_semantics": [],
+              "keywords": []
+            },
+            "asp-5": {
+              "exact_positive_semantics": [],
+              "keywords": []
+            },
+            "asp-6": {
+              "exact_positive_semantics": [],
+              "keywords": []
+            }
+          },
+          "aspect_gaps": [
+            "asp-3"
+          ],
+          "generated_claim_count": 0,
+          "invalid_citation_count": 0
+        },
+        "runtime": {
+          "run_status": "partial",
+          "confidence": "low",
+          "factcheck_status": "skipped",
+          "elapsed_ms": 159055.0,
+          "input_tokens": 79391,
+          "output_tokens": 2729,
+          "total_tokens": 82120,
+          "estimated_cost_usd": null
+        }
+      }
+    },
+    {
+      "summary": "reports\\evaluation\\v2_gold\\m5_live_2\\9bffe4b257f6.summary.json",
+      "run_id": "9bffe4b257f6",
+      "score": {
+        "case_id": "rag-hallucination-verification",
+        "query": "What evidence shows that retrieval-augmented generation reduces hallucinations compared with fine-tuning and prompt engineering, through which retrieval and context-integration mechanisms, and which reasoning or logical hallucinations remain unresolved?",
+        "retrieval": [
+          {
+            "aspect_id": "asp-1",
+            "aligned_subquestion_id": "sq-1",
+            "retrieved_count": 6,
+            "precision_at_k": 0.0,
+            "irrelevant_at_k": 5,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": null,
+            "matched_positive_semantics": []
+          },
+          {
+            "aspect_id": "asp-2",
+            "aligned_subquestion_id": "sq-1",
+            "retrieved_count": 6,
+            "precision_at_k": 0.2,
+            "irrelevant_at_k": 4,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": 0.6309,
+            "matched_positive_semantics": []
+          },
+          {
+            "aspect_id": "asp-3",
+            "aligned_subquestion_id": "sq-3",
+            "retrieved_count": 4,
+            "precision_at_k": 0.0,
+            "irrelevant_at_k": 4,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": null,
+            "matched_positive_semantics": []
+          },
+          {
+            "aspect_id": "asp-4",
+            "aligned_subquestion_id": "sq-3",
+            "retrieved_count": 4,
+            "precision_at_k": 0.0,
+            "irrelevant_at_k": 4,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": null,
+            "matched_positive_semantics": []
+          },
+          {
+            "aspect_id": "asp-5",
+            "aligned_subquestion_id": null,
+            "retrieved_count": 0,
+            "precision_at_k": 0.0,
+            "irrelevant_at_k": 0,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": null,
+            "matched_positive_semantics": []
+          },
+          {
+            "aspect_id": "asp-6",
+            "aligned_subquestion_id": "sq-2",
+            "retrieved_count": 2,
+            "precision_at_k": 0.0,
+            "irrelevant_at_k": 2,
+            "semantic_coverage": 0.0,
+            "ndcg_at_k": null,
+            "matched_positive_semantics": []
+          }
+        ],
+        "verification": {
+          "observed_count": 5,
+          "verdict_accuracy": 1.0,
+          "negative_evidence_cited_as_support": [],
+          "observations": [
+            {
+              "claim_id": "9bffe4b257f6:claim:sq-1:01",
+              "evidence_id": "9bffe4b257f6:ev-0010",
+              "expected_verdict": "supports",
+              "observed_verdict": "supports",
+              "correct": true,
+              "negative_hits": []
+            },
+            {
+              "claim_id": "9bffe4b257f6:claim:sq-1:02",
+              "evidence_id": "9bffe4b257f6:ev-0010",
+              "expected_verdict": "supports",
+              "observed_verdict": "supports",
+              "correct": true,
+              "negative_hits": []
+            },
+            {
+              "claim_id": "9bffe4b257f6:claim:sq-1:03",
+              "evidence_id": "9bffe4b257f6:ev-0010",
+              "expected_verdict": "supports",
+              "observed_verdict": "supports",
+              "correct": true,
+              "negative_hits": []
+            },
+            {
+              "claim_id": "9bffe4b257f6:claim:sq-1:04",
+              "evidence_id": "9bffe4b257f6:ev-0010",
+              "expected_verdict": "supports",
+              "observed_verdict": "supports",
+              "correct": true,
+              "negative_hits": []
+            },
+            {
+              "claim_id": "9bffe4b257f6:claim:sq-1:05",
+              "evidence_id": "9bffe4b257f6:ev-0010",
+              "expected_verdict": "supports",
+              "observed_verdict": "supports",
+              "correct": true,
+              "negative_hits": []
+            }
+          ]
+        },
+        "answer": {
+          "expected_run_status": "completed",
+          "actual_run_status": "completed",
+          "run_status_match": true,
+          "confidence_match": true,
+          "factcheck_match": true,
+          "aspect_coverage": {
+            "asp-1": true,
+            "asp-2": true,
+            "asp-3": false,
+            "asp-4": true,
+            "asp-5": true,
+            "asp-6": true
+          },
+          "aspect_coverage_detail": {
+            "asp-1": {
+              "exact_positive_semantics": [],
+              "keywords": [
+                "benchmark",
+                "empirical"
+              ]
+            },
+            "asp-2": {
+              "exact_positive_semantics": [],
+              "keywords": [
+                "fine tuning",
+                "fine-tuning",
+                "prompt engineering"
+              ]
+            },
+            "asp-3": {
+              "exact_positive_semantics": [],
+              "keywords": []
+            },
+            "asp-4": {
+              "exact_positive_semantics": [],
+              "keywords": [
+                "compositional",
+                "reasoning error",
+                "组合"
+              ]
+            },
+            "asp-5": {
+              "exact_positive_semantics": [],
+              "keywords": [
+                "迭代检索"
+              ]
+            },
+            "asp-6": {
+              "exact_positive_semantics": [],
+              "keywords": [
+                "mechanism",
+                "上下文",
+                "机制",
+                "融合"
+              ]
+            }
+          },
+          "aspect_gaps": [
+            "asp-5"
+          ],
+          "generated_claim_count": 17,
+          "invalid_citation_count": 0
+        },
+        "runtime": {
+          "run_status": "completed",
+          "confidence": "medium",
+          "factcheck_status": "passed",
+          "elapsed_ms": 202408.0,
+          "input_tokens": 3980,
+          "output_tokens": 13275,
+          "total_tokens": 17255,
+          "estimated_cost_usd": null
+        }
+      }
+    }
+  ],
+  "aspect_coverage": {
+    "asp-2": {
+      "count": 1,
+      "total": 3,
+      "values": [
+        false,
+        false,
+        true
+      ]
+    },
+    "asp-6": {
+      "count": 1,
+      "total": 3,
+      "values": [
+        false,
+        false,
+        true
+      ]
+    }
+  },
+  "runtime": {
+    "median_total_tokens": 23069,
+    "median_elapsed_ms": 181958.0
+  },
+  "interpretation": "Live provider runs. Coverage must be read with run status, claim count, and evidence quality; repeated failure is retained."
+}

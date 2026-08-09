@@ -16,6 +16,23 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_m5_manifest_covers_strategy_matrix_r3_and_hashes() -> None:
     manifest = json.loads((ROOT / "evaluation/m5/manifest.json").read_text(encoding="utf-8"))
+    evidence_prefix = "evaluation/m5/evidence/"
+    evidence_paths = [item["artifact"] for item in manifest["strategies"]]
+    evidence_paths.extend(
+        config
+        for item in manifest["strategies"]
+        for config in item.get("configs", [])
+    )
+    evidence_paths.append(manifest["r3"]["artifact"])
+    evidence_paths.extend(
+        value
+        for key, value in manifest["debt"].items()
+        if key.endswith("_artifact")
+    )
+
+    assert all(path.startswith(evidence_prefix) for path in evidence_paths)
+    assert all((ROOT / path).is_file() for path in evidence_paths)
+
     result = evaluate_manifest(manifest, root=ROOT)
 
     assert result["checks"]["four_strategy_matrix_complete"] is True
@@ -65,4 +82,3 @@ def test_evidence_coverage_evaluator_is_non_source_extension() -> None:
 
     assert result.status == StepStatus.SUCCESS
     assert result.output == {"coverage": 0.5, "uncovered_claim_ids": ["c2"]}
-

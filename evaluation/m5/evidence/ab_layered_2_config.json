@@ -1,0 +1,10 @@
+{
+  "label": "layered-2",
+  "temperature": 0.0,
+  "layered": true,
+  "candidates": "evaluation\\p2_radar\\candidates_ab_20260808.jsonl",
+  "semantic_review_calls": 40,
+  "semantic_review_tokens": 41428,
+  "semantic_review_failed": 0,
+  "elapsed_seconds": 144.925
+}

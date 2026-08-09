@@ -1,0 +1,146 @@
+{
+  "schema_version": "conflux-p2-radar-labels-v1",
+  "run_count": 3,
+  "retrieval": {
+    "recall_at_1": {
+      "median": 0.0714,
+      "min": 0.0,
+      "max": 0.0714,
+      "values": [
+        0.0,
+        0.0714,
+        0.0714
+      ]
+    },
+    "recall_at_5": {
+      "median": 0.2857,
+      "min": 0.2857,
+      "max": 0.2857,
+      "values": [
+        0.2857,
+        0.2857,
+        0.2857
+      ]
+    },
+    "recall_at_10": {
+      "median": 0.4286,
+      "min": 0.4286,
+      "max": 0.5,
+      "values": [
+        0.5,
+        0.4286,
+        0.4286
+      ]
+    },
+    "precision_at_1": {
+      "median": 1.0,
+      "min": 0.0,
+      "max": 1.0,
+      "values": [
+        0.0,
+        1.0,
+        1.0
+      ]
+    },
+    "precision_at_5": {
+      "median": 0.8,
+      "min": 0.8,
+      "max": 0.8,
+      "values": [
+        0.8,
+        0.8,
+        0.8
+      ]
+    },
+    "precision_at_10": {
+      "median": 0.6,
+      "min": 0.6,
+      "max": 0.7,
+      "values": [
+        0.7,
+        0.6,
+        0.6
+      ]
+    },
+    "ndcg_at_10": {
+      "median": 0.5739,
+      "min": 0.5617,
+      "max": 0.6319,
+      "values": [
+        0.5617,
+        0.6319,
+        0.5739
+      ]
+    },
+    "mrr": {
+      "median": 1.0,
+      "min": 0.5,
+      "max": 1.0,
+      "values": [
+        0.5,
+        1.0,
+        1.0
+      ]
+    },
+    "first_strong_rank": {
+      "median": 1.0,
+      "min": 1.0,
+      "max": 2.0,
+      "values": [
+        2.0,
+        1.0,
+        1.0
+      ]
+    },
+    "strong_recall_at_20": {
+      "median": 0.5,
+      "min": 0.5,
+      "max": 0.75,
+      "values": [
+        0.75,
+        0.5,
+        0.5
+      ]
+    },
+    "success_at_10": {
+      "count": 3,
+      "total": 3,
+      "values": [
+        true,
+        true,
+        true
+      ]
+    },
+    "strong_success_at_1": {
+      "count": 2,
+      "total": 3,
+      "values": [
+        false,
+        true,
+        true
+      ]
+    }
+  },
+  "cost": {
+    "semantic_review_tokens": {
+      "median": 43420.0,
+      "min": 42975,
+      "max": 43691,
+      "values": [
+        42975,
+        43420,
+        43691
+      ]
+    },
+    "semantic_review_calls": {
+      "median": 40.0,
+      "min": 40,
+      "max": 40,
+      "values": [
+        40,
+        40,
+        40
+      ]
+    }
+  }
+}

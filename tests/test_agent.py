@@ -40,6 +40,47 @@ def test_chunking():
     assert all(c.metadata.get("parent_id") for c in children)
 
 
+def test_index_command_uses_configured_parent_chunks(tmp_path, monkeypatch):
+    from langchain_core.documents import Document
+    from conflux import __main__ as cli
+
+    captured = {}
+    documents = [Document(page_content="content", metadata={"source": "doc.md"})]
+    parents = [Document(page_content="parent", metadata={"chunk_id": "doc.md#p0"})]
+    children = [Document(page_content="child", metadata={"chunk_id": "doc.md#p0#c0"})]
+
+    monkeypatch.setattr(cli, "load_config", lambda: {})
+    monkeypatch.setattr(cli, "validate_embedding_credentials", lambda: [])
+    monkeypatch.setattr(cli, "_load_index_documents", lambda _path: documents)
+    monkeypatch.setattr(
+        cli,
+        "config_get",
+        lambda *path, default=None: {
+            ("retrieval", "parent_chunk_size"): 512,
+            ("retrieval", "child_chunk_size"): 128,
+        }.get(path, default),
+    )
+
+    def fake_chunk(_documents, *, parent_size, child_size):
+        captured["sizes"] = (parent_size, child_size)
+        return parents, children
+
+    monkeypatch.setattr(cli, "chunk_documents", fake_chunk)
+    monkeypatch.setattr(cli, "create_vector_store", lambda: object())
+    monkeypatch.setattr(cli, "clear_index", lambda _store: None)
+
+    def fake_index(_store, indexed_documents):
+        captured["documents"] = indexed_documents
+        return len(indexed_documents)
+
+    monkeypatch.setattr(cli, "index_documents", fake_index)
+
+    cli.index_command(str(tmp_path))
+
+    assert captured["sizes"] == (512, 128)
+    assert captured["documents"] == parents
+
+
 def test_graph_compiles():
     """验证 V2 LangGraph 可编译（不需要真实 API key）"""
     from unittest.mock import MagicMock

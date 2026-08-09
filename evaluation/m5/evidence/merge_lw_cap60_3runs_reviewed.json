@@ -1,0 +1,146 @@
+{
+  "schema_version": "conflux-p2-radar-labels-v1",
+  "run_count": 3,
+  "retrieval": {
+    "recall_at_1": {
+      "median": 0.0149,
+      "min": 0.0149,
+      "max": 0.0149,
+      "values": [
+        0.0149,
+        0.0149,
+        0.0149
+      ]
+    },
+    "recall_at_5": {
+      "median": 0.0746,
+      "min": 0.0746,
+      "max": 0.0746,
+      "values": [
+        0.0746,
+        0.0746,
+        0.0746
+      ]
+    },
+    "recall_at_10": {
+      "median": 0.1493,
+      "min": 0.1493,
+      "max": 0.1493,
+      "values": [
+        0.1493,
+        0.1493,
+        0.1493
+      ]
+    },
+    "precision_at_1": {
+      "median": 1.0,
+      "min": 1.0,
+      "max": 1.0,
+      "values": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "precision_at_5": {
+      "median": 1.0,
+      "min": 1.0,
+      "max": 1.0,
+      "values": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "precision_at_10": {
+      "median": 1.0,
+      "min": 1.0,
+      "max": 1.0,
+      "values": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "ndcg_at_10": {
+      "median": 0.9217,
+      "min": 0.9173,
+      "max": 0.9225,
+      "values": [
+        0.9217,
+        0.9225,
+        0.9173
+      ]
+    },
+    "mrr": {
+      "median": 1.0,
+      "min": 1.0,
+      "max": 1.0,
+      "values": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "first_strong_rank": {
+      "median": 1.0,
+      "min": 1.0,
+      "max": 1.0,
+      "values": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "strong_recall_at_20": {
+      "median": 0.3488,
+      "min": 0.3256,
+      "max": 0.3721,
+      "values": [
+        0.3721,
+        0.3488,
+        0.3256
+      ]
+    },
+    "success_at_10": {
+      "count": 3,
+      "total": 3,
+      "values": [
+        true,
+        true,
+        true
+      ]
+    },
+    "strong_success_at_1": {
+      "count": 3,
+      "total": 3,
+      "values": [
+        true,
+        true,
+        true
+      ]
+    }
+  },
+  "cost": {
+    "semantic_review_tokens": {
+      "median": 40664.0,
+      "min": 38042,
+      "max": 41941,
+      "values": [
+        38042,
+        40664,
+        41941
+      ]
+    },
+    "semantic_review_calls": {
+      "median": 8.0,
+      "min": 8,
+      "max": 8,
+      "values": [
+        8,
+        8,
+        8
+      ]
+    }
+  }
+}

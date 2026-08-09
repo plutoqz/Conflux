@@ -1610,6 +1610,34 @@ def test_query_without_model_override_keeps_configured_role_presets():
     assert updates["CONFLUX_RESEARCH__DEPTH"] == "standard"
 
 
+def test_deep_query_inherits_configured_retrieval_width():
+    from conflux.workbench import jobs, server
+
+    for builder in (jobs._model_env_updates, server._model_env_updates):
+        updates = builder({"depth": "deep"})
+        assert "CONFLUX_RETRIEVAL__TOP_K" not in updates
+        assert "CONFLUX_RETRIEVAL__FINAL_K" not in updates
+
+
+def test_depth_preset_metadata_uses_configured_retrieval_width(monkeypatch):
+    from conflux.workbench import config_store
+
+    def fake_get(*path, default=None):
+        values = {
+            ("retrieval", "top_k"): 60,
+            ("retrieval", "final_k"): 20,
+        }
+        return values.get(path, default)
+
+    monkeypatch.setattr(config_store.config, "get", fake_get)
+
+    assert config_store.get_depth_preset("quick").retrieval_top_k == 3
+    assert config_store.get_depth_preset("standard").retrieval_top_k == 60
+    assert config_store.get_depth_preset("standard").retrieval_final_k == 20
+    assert config_store.get_depth_preset("deep").retrieval_top_k == 60
+    assert config_store.get_depth_preset("deep").retrieval_final_k == 20
+
+
 def test_job_status_exposes_complete_markdown_artifact_path():
     from conflux.workbench.jobs import JobManager, ResearchJob
 
