@@ -31,15 +31,15 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
             fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 
 
-def export_candidates(out_path: Path) -> int:
+def export_candidates(out_path: Path, args: argparse.Namespace) -> int:
     from conflux.core.p2_contracts import PaperSource, ProjectResearchConfig
     from conflux.paper_radar.query_builder import resolve_query_specs_from_profile
     from conflux.paper_radar.radar import _execute_queries
     from conflux.research_profile import load_profile
 
-    profile = load_profile("profiles/example_gis_agent.yaml", validate=False)
+    profile = load_profile(args.profile, validate=False)
     config = ProjectResearchConfig(
-        profile="profiles/example_gis_agent.yaml",
+        profile=args.profile,
         sources=[PaperSource.ARXIV],
         max_candidates=100,
         deep_read_limit=0,
@@ -74,15 +74,23 @@ def run_round(args: argparse.Namespace) -> int:
 
     radar._execute_queries = frozen_execute
 
-    proj = ProjectDefinition(id="radar-label-run", name="Radar Label Run", path=str(PROJECT_ROOT))
-    proj.plan.overall_goal = "验证知识图谱增强 GIS Agent 工作流的有效性与可复现性"
+    proj = ProjectDefinition(
+        id=args.project_id,
+        name=args.project_name,
+        path=str(PROJECT_ROOT),
+    )
+    profile = load_profile(args.profile, validate=False)
+    proj.plan.overall_goal = (
+        str(profile.research_questions[0])
+        if getattr(profile, "research_questions", None)
+        else "Research paper radar"
+    )
     proj.research = {
-        "profile": "profiles/example_gis_agent.yaml",
+        "profile": args.profile,
         "sources": ["arxiv"],
         "max_candidates": 100,
         "deep_read_limit": 0,
     }
-    profile = load_profile("profiles/example_gis_agent.yaml", validate=False)
     review_model = create_chat_model("balanced", temperature=args.temperature)
 
     started = time.time()
@@ -138,6 +146,9 @@ def run_round(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run one controlled P2 A/B round")
+    parser.add_argument("--profile", default="profiles/example_gis_agent.yaml")
+    parser.add_argument("--project-id", default="radar-label-run")
+    parser.add_argument("--project-name", default="Radar Label Run")
     parser.add_argument("--candidates", default="", help="frozen PaperRecord JSONL snapshot")
     parser.add_argument("--export-candidates", default="", help="export exact query candidates and exit")
     parser.add_argument("--label", default="round")
@@ -150,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.export_candidates:
-        return export_candidates(Path(args.export_candidates))
+        return export_candidates(Path(args.export_candidates), args)
     if not args.candidates or not args.out_dir:
         parser.error("--candidates and --out-dir are required for a run round")
     return run_round(args)

@@ -1,0 +1,16 @@
+{
+  "schema_version": "conflux-p2-radar-labels-v1",
+  "dataset_id": "kg-llm-local-20260809",
+  "status": "cross_domain_smoke",
+  "profile": "profiles/kg_llm_integration.yaml",
+  "candidate_snapshot": "evaluation/kg_llm_radar/candidates_local_20260809.jsonl",
+  "candidate_snapshot_sha256": "447D6B4655F0EF749A58E5F39C344F036C3A663A337B877DA0E46B3B5E92B6B1",
+  "run": "reports/evaluation/kg_llm_radar/run_20260809/radar_run.json",
+  "config": "pointwise, non-layered, temperature 0.25, review top-40",
+  "knowledge_base_check": {
+    "chroma_query_1": "knowledge graph large language model GraphRAG",
+    "chroma_query_2": "retrieval augmented generation evaluation metrics",
+    "note": "both queries return relevant paper chunks from conflux_docs"
+  },
+  "labels": "not_yet_built"
+}
