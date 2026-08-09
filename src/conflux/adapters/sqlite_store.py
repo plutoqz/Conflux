@@ -251,6 +251,134 @@ SCHEMA_MIGRATIONS = [
             "CREATE INDEX IF NOT EXISTS idx_search_run_intents_run ON search_run_intents(run_id, rank)",
         ],
     ),
+    (
+        "0005_evidence_ledger",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS source_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                source_identity TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                source_type TEXT NOT NULL DEFAULT '',
+                url TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                publisher TEXT NOT NULL DEFAULT '',
+                published_at TEXT NOT NULL DEFAULT '',
+                retrieved_at TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'available',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                UNIQUE(source_identity, content_hash)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_source_snapshots_identity ON source_snapshots(source_identity, created_at DESC)",
+            """
+            CREATE TABLE IF NOT EXISTS ledger_evidence_items (
+                evidence_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                source_snapshot_id TEXT NOT NULL REFERENCES source_snapshots(snapshot_id),
+                subquestion_id TEXT NOT NULL DEFAULT '',
+                query_id TEXT NOT NULL DEFAULT '',
+                evidence_type TEXT NOT NULL DEFAULT '',
+                relationship TEXT NOT NULL DEFAULT 'supports',
+                visibility TEXT NOT NULL DEFAULT 'primary',
+                claim_text TEXT NOT NULL DEFAULT '',
+                quote TEXT NOT NULL DEFAULT '',
+                locator_json TEXT NOT NULL DEFAULT '{}',
+                limitations_json TEXT NOT NULL DEFAULT '[]',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_ledger_evidence_run ON ledger_evidence_items(run_id)",
+            "CREATE INDEX IF NOT EXISTS idx_ledger_evidence_source ON ledger_evidence_items(source_snapshot_id)",
+            """
+            CREATE TABLE IF NOT EXISTS ledger_claims (
+                claim_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                subquestion_id TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL,
+                claim_type TEXT NOT NULL DEFAULT 'model_analysis',
+                importance TEXT NOT NULL DEFAULT 'medium',
+                status TEXT NOT NULL DEFAULT 'uncertain',
+                confidence REAL NOT NULL DEFAULT 0,
+                verification_json TEXT NOT NULL DEFAULT '{}',
+                generation_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_ledger_claims_run ON ledger_claims(run_id)",
+            """
+            CREATE TABLE IF NOT EXISTS evidence_relations (
+                relation_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL DEFAULT '',
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                target_kind TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                relation_type TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                UNIQUE(source_kind, source_id, target_kind, target_id, relation_type)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_evidence_relations_source ON evidence_relations(source_kind, source_id)",
+            "CREATE INDEX IF NOT EXISTS idx_evidence_relations_target ON evidence_relations(target_kind, target_id)",
+            """
+            CREATE TABLE IF NOT EXISTS ledger_transformations (
+                transformation_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                step_type TEXT NOT NULL,
+                input_hash TEXT NOT NULL,
+                output_hash TEXT NOT NULL,
+                input_refs_json TEXT NOT NULL DEFAULT '[]',
+                output_refs_json TEXT NOT NULL DEFAULT '[]',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_ledger_transformations_run ON ledger_transformations(run_id, created_at)",
+            """
+            CREATE TABLE IF NOT EXISTS ledger_artifact_claims (
+                artifact_id TEXT NOT NULL,
+                claim_id TEXT NOT NULL REFERENCES ledger_claims(claim_id),
+                artifact_type TEXT NOT NULL DEFAULT 'report',
+                project_id TEXT NOT NULL DEFAULT '',
+                location TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                PRIMARY KEY (artifact_id, claim_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_ledger_artifact_claims_claim ON ledger_artifact_claims(claim_id)",
+            """
+            CREATE TABLE IF NOT EXISTS evidence_review_runs (
+                review_id TEXT PRIMARY KEY,
+                source_identity TEXT NOT NULL,
+                prior_snapshot_id TEXT NOT NULL DEFAULT '',
+                current_snapshot_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                reason TEXT NOT NULL DEFAULT '',
+                requested_by_run_id TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_evidence_review_status ON evidence_review_runs(status, created_at DESC)",
+            """
+            CREATE TABLE IF NOT EXISTS evidence_review_impacts (
+                review_id TEXT NOT NULL REFERENCES evidence_review_runs(review_id) ON DELETE CASCADE,
+                target_kind TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT '',
+                impact_type TEXT NOT NULL DEFAULT 'source_changed',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                PRIMARY KEY (review_id, target_kind, target_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_evidence_review_impacts_target ON evidence_review_impacts(target_kind, target_id)",
+        ],
+    ),
 ]
 
 

@@ -808,6 +808,7 @@ class JobManager:
                 deadline_at=job.deadline_at,
                 commit_reserve_seconds=job.commit_reserve_seconds,
                 run_context=context,
+                ledger_db_path=self._db_path,
                 on_graph_state=on_state,
                 should_stop=should_stop,
             )

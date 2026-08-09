@@ -1,0 +1,20 @@
+api_version: conflux.dev/v1alpha1
+kind: Plugin
+id: example.evidence-coverage-evaluator
+version: 0.1.0
+entrypoint: examples.m5_plugins.evidence_coverage_evaluator.plugin:plugin
+capabilities:
+  - id: example.evidence-coverage-evaluator.score
+    description: Score claim-level evidence coverage
+    mode: deterministic
+    input_schema:
+      type: object
+      properties:
+        claims: {type: array, items: {type: object}}
+      required: [claims]
+    output_schema:
+      type: object
+      properties:
+        coverage: {type: number}
+        uncovered_claim_ids: {type: array}
+      required: [coverage, uncovered_claim_ids]

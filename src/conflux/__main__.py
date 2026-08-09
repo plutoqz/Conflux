@@ -19,6 +19,7 @@ from .config import load as load_config
 from .config import override as config_override
 from .core.storage_cli import doctor_command, import_legacy_command, init_command, migrate_command
 from .core.contracts import RunContext
+from .core.runtime_home import database_path
 from .graph_v2 import create_v2_research_graph
 from .model_factory import (
     create_research_models,
@@ -174,6 +175,7 @@ def query_command(
     replay: str | None = None,
     baseline_variant: str = "B4",
     run_context: RunContext | None = None,
+    ledger_db_path: str | Path | None = None,
     on_graph_state: Callable[[dict, list], None] | None = None,
     should_stop: Callable[[], None] | None = None,
 ) -> dict:
@@ -379,7 +381,6 @@ def query_command(
              "baseline_variant": final_state.get("_baseline_variant") or baseline_variant,
              "baseline_policy": final_state.get("_baseline_policy") or {},
          })
-    write_run_summary(summary, summary_path)
     final_state["_report_artifacts"] = {
         "markdown_path": summary["report_md_path"],
         "html_path": summary["report_html_path"],
@@ -394,6 +395,33 @@ def query_command(
         "diagnostic_deep_evidence_path": summary["diagnostic_deep_evidence_path"],
         "diagnostic_audit_path": summary["diagnostic_audit_path"],
     }
+    if ledger_db_path is not None:
+        from .adapters.evidence_ledger_store import persist_final_state
+
+        ledger_artifacts = [
+            {
+                "id": f"{run_id}:{key}",
+                "type": "report" if "report" in key else "artifact",
+                "location": value,
+            }
+            for key, value in final_state["_report_artifacts"].items()
+            if value
+        ]
+        try:
+            ledger_result = persist_final_state(
+                final_state,
+                db_path=ledger_db_path,
+                artifacts=ledger_artifacts,
+            )
+        except Exception as exc:
+            ledger_result = {
+                "persisted": False,
+                "reason": "ledger_persistence_failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        final_state["_ledger_persistence"] = ledger_result
+        summary["evidence_ledger"] = ledger_result
+    write_run_summary(summary, summary_path)
     print(f"Trace JSONL: {trace_path.resolve()}")
     print(f"Run summary: {summary_path.resolve()}")
 
@@ -764,9 +792,10 @@ def main() -> None:
                 stream_events=args.stream_events,
                  trace_dir=args.trace_dir,
                  depth=args.depth,
-                 replay=args.replay,
-                 baseline_variant=args.baseline_variant,
-             )
+                  replay=args.replay,
+                  baseline_variant=args.baseline_variant,
+                  ledger_db_path=database_path(),
+              )
         elif not args.index:
             parser.print_help()
             print("\nExamples:")

@@ -1,0 +1,21 @@
+api_version: conflux.dev/v1alpha1
+kind: Plugin
+id: example.local-jsonl-source
+version: 0.1.0
+entrypoint: examples.m5_plugins.local_jsonl_source.plugin:plugin
+permissions: [filesystem:read]
+capabilities:
+  - id: example.local-jsonl-source.search
+    description: Search an explicit workspace-local JSONL corpus
+    mode: deterministic
+    input_schema:
+      type: object
+      properties:
+        path: {type: string}
+        query: {type: string}
+      required: [path, query]
+    output_schema:
+      type: object
+      properties:
+        items: {type: array}
+      required: [items]

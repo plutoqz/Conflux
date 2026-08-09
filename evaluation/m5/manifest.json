@@ -1,0 +1,61 @@
+{
+  "schema_version": "conflux-m5-manifest-v1",
+  "dataset_id": "p2-final-gis-75-and-kg-136-20260809",
+  "evidence_scope": "recorded_real_runs_plus_controlled_v2_v3_replay",
+  "strategies": [
+    {
+      "id": "deterministic-gis",
+      "kind": "deterministic",
+      "domain": "gis",
+      "artifact": "reports/evaluation/p2_radar/no_llm_result.json",
+      "failure_semantics": "unreviewed_or_needs_review",
+      "notes": ["No LLM review; deterministic ranking control."]
+    },
+    {
+      "id": "batch-listwise-kg",
+      "kind": "llm_batch",
+      "domain": "kg_llm",
+      "artifact": "reports/evaluation/kg_llm_radar/merge_lw_cap60_3runs_reviewed.json",
+      "configs": [],
+      "failure_semantics": "unreviewed_or_needs_review",
+      "notes": ["Three-run median; parse failures remain needs_review."]
+    },
+    {
+      "id": "deep-layered-gis",
+      "kind": "deep_review",
+      "domain": "gis",
+      "artifact": "reports/evaluation/p2_radar/ab_layered_merged.json",
+      "configs": [
+        "reports/evaluation/p2_radar/ab_layered_1/config.json",
+        "reports/evaluation/p2_radar/ab_layered_2/config.json",
+        "reports/evaluation/p2_radar/ab_layered_3/config.json"
+      ],
+      "failure_semantics": "unreviewed_or_needs_review",
+      "notes": ["Layered review sends boundary candidates to deeper review."]
+    },
+    {
+      "id": "hybrid-pointwise-gis",
+      "kind": "hybrid",
+      "domain": "gis",
+      "artifact": "reports/evaluation/p2_radar/merge_pp_cap40_3runs_final.json",
+      "configs": [],
+      "failure_semantics": "unreviewed_or_needs_review",
+      "notes": ["Deterministic coarse rank plus pointwise LLM review; current default."]
+    }
+  ],
+  "r3": {
+    "artifact": "reports/evaluation/v2_gold/baselines/baseline_comparison.json",
+    "current_v2_v3_path": true
+  },
+  "extensions": [
+    {"id": "example.local-jsonl-source", "type": "data_source", "contract_passed": true},
+    {"id": "example.evidence-coverage-evaluator", "type": "evaluator", "contract_passed": true}
+  ],
+  "debt": {
+    "r3": "included_as_current_path_controlled_replay",
+    "asp_2_asp_6": "validated_live_but_unstable_1_of_3_coverage",
+    "asp_2_asp_6_artifact": "reports/evaluation/v2_gold/m5_live_repeats.json",
+    "m3_persistent_live_interrupt": "passed_controlled_external_process_validation",
+    "m3_persistent_live_interrupt_artifact": "reports/evaluation/m4_live_recovery/result.json"
+  }
+}

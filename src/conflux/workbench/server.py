@@ -37,6 +37,7 @@ from conflux.adapters.sqlite_store import (
     SearchRunStore,
     SQLiteDatabase,
 )
+from conflux.adapters.evidence_ledger_store import EvidenceLedgerRepository
 from conflux.core.runtime_home import database_path
 from conflux.knowledge.paper_indexer import promote_inbox
 from conflux.knowledge.stats import gather_knowledge_stats
@@ -2466,6 +2467,7 @@ def get_project_research_status(project_id: str) -> dict[str, Any]:
     cache = _load_research_cache(project_id)
     schedule = _project_research_schedule(project_id)
     active_job = _latest_project_radar_job(project_id, active_only=True)
+    reviews = get_evidence_reviews(project_id=project_id).get("reviews", [])
     if cache is None:
         if active_job:
             return {
@@ -2474,9 +2476,63 @@ def get_project_research_status(project_id: str) -> dict[str, Any]:
                 "status": active_job["status"],
                 "job": active_job,
                 "schedule": schedule,
+                "evidence_reviews": reviews,
             }
-        return {"ok": False, "error": "尚无雷达运行记录。", "schedule": schedule}
-    return {"ok": True, "project_id": project_id, **cache, "job": active_job, "schedule": schedule}
+        return {"ok": False, "error": "尚无雷达运行记录。", "schedule": schedule, "evidence_reviews": reviews}
+    return {
+        "ok": True,
+        "project_id": project_id,
+        **cache,
+        "job": active_job,
+        "schedule": schedule,
+        "evidence_reviews": reviews,
+    }
+
+
+def get_evidence_reviews(*, project_id: str = "", status: str | None = "pending") -> dict[str, Any]:
+    db = _research_database()
+    try:
+        reviews = EvidenceLedgerRepository(db).list_reviews(status=status)
+    finally:
+        db.close()
+    if project_id:
+        filtered = []
+        for review in reviews:
+            all_impacts = review.get("impacts") or []
+            impacts = [
+                item for item in all_impacts
+                if str(item.get("project_id") or "") == project_id
+            ]
+            if impacts or not all_impacts:
+                filtered.append({**review, "impacts": impacts})
+        reviews = filtered
+    return {"ok": True, "reviews": reviews, "count": len(reviews)}
+
+
+def get_evidence_run(run_id: str) -> dict[str, Any] | None:
+    db = _research_database()
+    try:
+        ledger = EvidenceLedgerRepository(db).run_ledger(run_id)
+    finally:
+        db.close()
+    if not ledger["evidence"] and not ledger["claims"]:
+        return None
+    return {"ok": True, **ledger}
+
+
+def resolve_evidence_review(payload: dict[str, Any]) -> dict[str, Any]:
+    review_id = str(payload.get("review_id") or "").strip()
+    status = str(payload.get("status") or "confirmed").strip()
+    if not review_id:
+        return {"ok": False, "error": "review_id required"}
+    db = _research_database()
+    try:
+        updated = EvidenceLedgerRepository(db).resolve_review(review_id, status=status)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    finally:
+        db.close()
+    return {"ok": updated, "review_id": review_id, "status": status}
 
 
 _research_cache: dict[str, dict[str, Any]] = {}
@@ -3332,6 +3388,21 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json(get_project_research_coverage(project_id))
             return
+        if parsed.path == "/api/evidence/reviews":
+            params = urllib.parse.parse_qs(parsed.query)
+            project_id = params.get("project_id", [""])[0]
+            status_value = params.get("status", ["pending"])[0]
+            status = None if status_value == "all" else status_value
+            self._send_json(get_evidence_reviews(project_id=project_id, status=status))
+            return
+        if parsed.path.startswith("/api/evidence/runs/"):
+            run_id = parsed.path[len("/api/evidence/runs/"):]
+            ledger = get_evidence_run(run_id)
+            if ledger is None:
+                self.send_error(404)
+            else:
+                self._send_json(ledger)
+            return
         if parsed.path.startswith("/api/projects/research/jobs/"):
             job_id = parsed.path[len("/api/projects/research/jobs/"):]
             job = get_project_research_job(job_id)
@@ -3469,6 +3540,10 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/projects/research/papers/action":
                 self._send_json(apply_paper_action(payload))
+                return
+            if parsed.path == "/api/evidence/reviews/resolve":
+                result = resolve_evidence_review(payload)
+                self._send_json(result, status=200 if result.get("ok") else 400)
                 return
             if parsed.path == "/api/query/run":
                 self._send_json(run_query(payload))

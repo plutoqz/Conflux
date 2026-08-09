@@ -636,6 +636,12 @@ input:disabled, select:disabled, textarea:disabled { background: var(--surface-s
 .analysis-item-detail dt { color: var(--muted); }
 .analysis-item-detail dd { margin: 0; overflow-wrap: anywhere; }
 .analysis-item-detail code { font: 9px/1.5 "Cascadia Code", Consolas, monospace; }
+.evidence-review-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 2px; border-bottom: 1px solid var(--line); }
+.evidence-review-main { display: flex; align-items: flex-start; gap: 9px; min-width: 0; }
+.evidence-review-main > div { min-width: 0; }
+.evidence-review-main strong { display: block; overflow-wrap: anywhere; font-size: 11px; }
+.evidence-review-main small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.evidence-review-actions { display: flex; flex: 0 0 auto; gap: 6px; }
 .analysis-warning-list { display: grid; gap: 6px; padding: 9px 0; color: var(--warning); font-size: 10px; }
 .plan-diff-band { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 17px; border-block: 1px solid var(--line); }
 .plan-diff-band > div { min-width: 0; padding: 10px 12px; border-inline-end: 1px solid var(--line); }
@@ -1000,6 +1006,8 @@ iframe { width: 100%; height: calc(100vh - 220px); min-height: 520px; margin-top
   .analysis-confirm-row { align-items: stretch; flex-direction: column; }
   .analysis-confirm-row .button { width: 100%; }
   .analysis-item-title { font-size: 13px; }
+  .evidence-review-row { align-items: stretch; flex-direction: column; }
+  .evidence-review-actions { justify-content: flex-end; }
   .analysis-item-meta .status-pill, .analysis-item details summary, .analysis-item-detail, .confirm-check { font-size: 11px; }
   .charter-status-band > div > span, .analysis-group-heading span, .plan-diff-band span { font-size: 10px; }
   .charter-status-band strong, .charter-status-band small, .analysis-group-heading h4, .plan-diff-band strong { font-size: 11px; }

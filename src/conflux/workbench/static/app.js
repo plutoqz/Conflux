@@ -858,6 +858,7 @@ function renderProjectResearch(overview) {
     .then((r) => r.json())
     .then((data) => {
       renderResearchSchedule(data.schedule || {});
+      renderEvidenceReviews(data.evidence_reviews || []);
       if (!data.ok) {
         $('projectResearchStatus').className = 'status-pill neutral';
         $('projectResearchStatus').textContent = '未运行';
@@ -1059,6 +1060,51 @@ function renderResearchCoverage(data) {
   $('researchCoverageList').innerHTML = coverage.length
     ? coverage.map((c) => '<div class="analysis-item"><span class="analysis-tag">' + escapeHtml(c.key) + '</span><span>' + c.count + ' 篇</span></div>').join('')
     : '<div class="inline-empty">无覆盖数据</div>';
+}
+
+function renderEvidenceReviews(reviews) {
+  const rows = Array.isArray(reviews) ? reviews : [];
+  $('researchEvidenceReviewSummary').textContent = rows.length + ' 项';
+  if (!rows.length) {
+    $('researchEvidenceReviewsList').innerHTML = '<div class="inline-empty compact">没有待确认的来源变化。</div>';
+    return;
+  }
+  $('researchEvidenceReviewsList').innerHTML = rows.map((review) => {
+    const impacts = review.impacts || [];
+    const kinds = Array.from(new Set(impacts.map((item) => item.target_kind).filter(Boolean)));
+    return '<div class="evidence-review-row" data-review-id="' + escapeHtml(review.review_id || '') + '">' +
+      '<div class="evidence-review-main"><span class="analysis-tag warn">待复核</span><div><strong>' + escapeHtml(review.source_identity || '未知来源') + '</strong>' +
+      '<small>' + escapeHtml(review.reason || '来源内容发生变化') + ' · 影响 ' + impacts.length + ' 项' +
+      (kinds.length ? ' · ' + escapeHtml(kinds.join(', ')) : '') + '</small></div></div>' +
+      '<div class="evidence-review-actions">' +
+      '<button class="button secondary compact evidence-review-action" type="button" data-status="dismissed"><i data-lucide="x" aria-hidden="true"></i><span>忽略</span></button>' +
+      '<button class="button primary compact evidence-review-action" type="button" data-status="confirmed"><i data-lucide="check" aria-hidden="true"></i><span>确认复核</span></button>' +
+      '</div></div>';
+  }).join('');
+  document.querySelectorAll('.evidence-review-action').forEach((button) => {
+    button.addEventListener('click', () => resolveEvidenceReview(button));
+  });
+  refreshIcons();
+}
+
+function resolveEvidenceReview(button) {
+  const row = button.closest('.evidence-review-row');
+  if (!row) return;
+  row.querySelectorAll('button').forEach((item) => { item.disabled = true; });
+  api('/api/evidence/reviews/resolve', {
+    review_id: row.dataset.reviewId,
+    status: button.dataset.status,
+  }).then((data) => {
+    if (!data.ok) throw new Error(data.error || '复核状态更新失败');
+    row.remove();
+    const remaining = document.querySelectorAll('#researchEvidenceReviewsList .evidence-review-row').length;
+    $('researchEvidenceReviewSummary').textContent = remaining + ' 项';
+    if (!remaining) renderEvidenceReviews([]);
+    toast(button.dataset.status === 'confirmed' ? '已确认复核任务' : '已忽略复核任务', 'ok');
+  }).catch((error) => {
+    row.querySelectorAll('button').forEach((item) => { item.disabled = false; });
+    toast(error.message, 'err');
+  });
 }
 
 function performPaperAction(paperKey, action, button) {
