@@ -24,9 +24,29 @@
   DO-RAG、GraphRAG Consumer Hardware、AgREE、ConRAG、
   Ontology-grounded KG Construction、MemGraphRAG。
 
+## 初标指标（provisional）
+
+- 初标：`labels_provisional_20260809.jsonl`，136 篇按 title + abstract 标注，
+  分布为 R3=45、R2=22、R1=44、R0=25；相关（R2+）67 篇，强相关 45 篇。
+- 单次运行结果：
+
+| 指标 | 值 |
+|---|---|
+| recall@10 | 0.1493 |
+| precision@10 | 1.0 |
+| nDCG@10 | 0.7838 |
+| MRR | 1.0 |
+| first_strong_rank | 1 |
+| strong_success@1 | True |
+| strong_recall@20 | 0.3333 |
+| success@10 | True |
+
+注意：这是 Codex 代审初标，不是人工金标准；单次运行，未做多次中位数。
+随机按论文 ID 划分 hold-out 对检索排序不成立，本轮不做 paper-level hold-out；
+跨领域验证采用“GIS 调参域 / KG 独立测试域”的方式。
+
 ## 限制
 
-- 本测试是跨领域冒烟，尚未建立 KG 领域人工标注集，因此不给出
-  recall/nDCG 等正式指标。
+- 本测试仍是跨领域冒烟，初标待用户终审。
 - 候选池来自本地知识库而非实时 arXiv，arXiv 当前网络不可达。
 - 下一步应在该领域建立标注集并划分 hold-out 后，再比较跨领域指标。 

@@ -12,5 +12,19 @@
     "chroma_query_2": "retrieval augmented generation evaluation metrics",
     "note": "both queries return relevant paper chunks from conflux_docs"
   },
-  "labels": "not_yet_built"
+  "labels": {
+    "path": "evaluation/kg_llm_radar/labels_provisional_20260809.jsonl",
+    "status": "provisional_codex",
+    "distribution": {"R3": 45, "R2": 22, "R1": 44, "R0": 25},
+    "metrics": {
+      "recall_at_10": 0.1493,
+      "precision_at_10": 1.0,
+      "nDCG_at_10": 0.7838,
+      "mrr": 1.0,
+      "first_strong_rank": 1,
+      "strong_success_at_1": true,
+      "strong_recall_at_20": 0.3333,
+      "success_at_10": true
+    }
+  }
 }
