@@ -1,8 +1,11 @@
 """生产级 RAG 命中率评测兜底。
 
 用 data/rag_eval 三语评测集直接跑当前 HybridRetriever（生产检索参数），
-统计相关来源是否进入 top-k；支持 --top-k/--final-k 覆盖参数，用于对比
-旧配置（top_k=10/final_k=5）与新配置（top_k=60/final_k=10）。
+统计两类命中：
+- 来源命中：相关来源是否进入 top-k；
+- 片段命中：返回片段文本是否包含 must_contain 答案关键词（衡量“捞出来的
+  内容是否真的带答案”）。
+支持 --top-k/--final-k 覆盖参数，用于对比不同检索配置。
 
 用法:
     python scripts/eval_production_rag_hit.py
@@ -32,6 +35,7 @@ def _load_queries() -> list[dict]:
                 "id": f"{name}:{item.get('id')}",
                 "query": str(item.get("query") or ""),
                 "relevant_sources": [str(s) for s in item.get("relevant_sources") or []],
+                "must_contain": [str(s) for s in item.get("must_contain") or []],
                 "language": name,
             })
     return rows
@@ -61,6 +65,27 @@ def _hit_at_k(docs: list, relevant_sources: list[str]) -> dict:
     return {"hit": hit, "first_hit_rank": hit_rank}
 
 
+def _normalize(text: str) -> str:
+    return " ".join(str(text or "").casefold().split())
+
+
+def _fragment_hit(docs: list, must_contain: list[str]) -> dict:
+    if not must_contain:
+        return {"fragment_hit": None, "matched_keywords": []}
+    matched = []
+    for keyword in must_contain:
+        needle = _normalize(keyword)
+        if not needle:
+            continue
+        if any(needle in _normalize(doc.page_content) for doc in docs):
+            matched.append(keyword)
+    return {
+        "fragment_hit": len(matched) == len(must_contain),
+        "matched_keywords": matched,
+        "keyword_total": len(must_contain),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate production RAG hit rate")
     parser.add_argument("--top-k", type=int, default=None, help="override retrieval.top_k")
@@ -85,7 +110,8 @@ def main() -> int:
     for item in rows:
         docs = retriever.search(item["query"])
         hit = _hit_at_k(docs, item["relevant_sources"])
-        results.append({**item, "returned": len(docs), **hit})
+        fragment = _fragment_hit(docs, item["must_contain"])
+        results.append({**item, "returned": len(docs), **hit, **fragment})
 
     by_language: dict[str, dict] = {}
     for language in ("zh_zh", "zh_en", "en_en"):
@@ -98,6 +124,11 @@ def main() -> int:
             "mean_first_hit_rank": (
                 round(sum(r["first_hit_rank"] for r in hits) / len(hits), 2) if hits else None
             ),
+            "fragment_hit_count": sum(1 for r in group if r["fragment_hit"] is True),
+            "fragment_hit_rate": (
+                round(sum(1 for r in group if r["fragment_hit"] is True) / len(group), 4)
+                if group else None
+            ),
         }
     aggregate = {
         "top_k": raw["retrieval"]["top_k"],
@@ -105,6 +136,11 @@ def main() -> int:
         "query_count": len(results),
         "hit_count": sum(1 for r in results if r["hit"]),
         "hit_rate": round(sum(1 for r in results if r["hit"]) / len(results), 4),
+        "fragment_hit_count": sum(1 for r in results if r["fragment_hit"] is True),
+        "fragment_hit_rate": (
+            round(sum(1 for r in results if r["fragment_hit"] is True) / len(results), 4)
+            if results else None
+        ),
         "by_language": by_language,
     }
     payload = {"config": aggregate, "results": results}

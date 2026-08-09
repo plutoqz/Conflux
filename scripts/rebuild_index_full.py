@@ -4,8 +4,9 @@
 - papers/papers/paper-{id}#{scope}.md 全部论文 summary/fulltext chunks（按文件名
   生成 paper_id/content_scope 元数据，不依赖 promotion manifest，避免漏掉
   未入库论文）；
-- data/documents 根目录的 .md/.txt 普通资料（ESRI/NIST/wiki/AI 治理等），整篇截断索引，
-  避免 wiki 长文档产生数万子块和过高 embedding 成本；
+- data/documents 根目录的 .md/.txt 普通资料（ESRI/NIST/wiki/AI 治理等），
+  截断后按 parent=512/child=128 分块并索引 parent 块，保证引用片段紧凑，
+  避免整篇文档作为证据返回；
 - 跳过 papers/pdfs 原始 PDF：对应论文文本已在 papers/papers/*.md 抽取并纳入 manifest。
 
 用法:
@@ -25,7 +26,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from langchain_core.documents import Document  # noqa: E402
 
 from conflux.config import get  # noqa: E402
-from conflux.rag import clear_index, create_vector_store, index_documents  # noqa: E402
+from conflux.rag import chunk_documents, clear_index, create_vector_store, index_documents  # noqa: E402
 
 
 def _load_paper_documents(papers_dir: Path) -> tuple[list[Document], int]:
@@ -64,11 +65,11 @@ def _load_paper_documents(papers_dir: Path) -> tuple[list[Document], int]:
 
 
 def _load_plain_documents(root: Path) -> list[Document]:
-    """Load root-level .md/.txt documents as truncated whole-document vectors.
+    """Load root-level .md/.txt documents, truncated to a bounded prefix.
 
-    ``papers/`` is handled separately through the manifest.  Long wiki files
-    are truncated to a bounded prefix so one document costs one embedding call
-    while still carrying the topic surface needed for retrieval.
+    ``papers/`` is handled separately through papers/papers.  Long wiki files
+    are truncated so chunking cost stays bounded; the caller splits them into
+    512-char parent chunks for fragment-level retrieval.
     """
 
     supported = {".md", ".txt"}
@@ -98,10 +99,17 @@ def main() -> int:
     papers_dir = root / "papers" / "papers"
     paper_docs, skipped_papers = _load_paper_documents(papers_dir)
     plain_docs = _load_plain_documents(root)
+    parent_size = int(get("retrieval", "parent_chunk_size", default=512))
+    child_size = int(get("retrieval", "child_chunk_size", default=128))
+    plain_parents, _ = chunk_documents(
+        plain_docs,
+        parent_size=parent_size,
+        child_size=child_size,
+    )
 
-    all_docs = [*paper_docs, *plain_docs]
+    all_docs = [*paper_docs, *plain_parents]
     print(f"paper chunks: {len(paper_docs)} (skipped {skipped_papers})")
-    print(f"plain documents: {len(plain_docs)} (whole-document, bounded prefix)")
+    print(f"plain documents: {len(plain_docs)} -> {len(plain_parents)} parent chunks")
     print(f"total documents to index: {len(all_docs)}")
 
     if args.dry_run:

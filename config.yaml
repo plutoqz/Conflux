@@ -79,7 +79,7 @@ vector_store:
   collection_name: conflux_docs
 retrieval:
   top_k: 60
-  final_k: 10
+  final_k: 20
   parent_chunk_size: 512
   child_chunk_size: 128
   bm25_weight: 0.3
