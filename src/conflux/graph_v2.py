@@ -3219,6 +3219,7 @@ def create_v2_research_graph(
     query_rewriter = kwargs.get("query_rewriter")
     semantic_reranker = kwargs.get("semantic_reranker")
     reranker_model = kwargs.get("reranker_model")
+    llm_rerank_enabled = bool(kwargs.get("llm_rerank_enabled", False))
     independent_model = kwargs.get("independent_model")
     arbitration_model = kwargs.get("arbitration_model")
     verifier_model = kwargs.get("verifier_model")
@@ -3235,7 +3236,9 @@ def create_v2_research_graph(
     # 的查询改写器（query_rewriter）、语义重排器（semantic_reranker）与 run_id，
     # 否则：LLM 查询改写被静默丢弃、语义重排降级为 "unreviewed"、web 工具的
     # RunScopedCorpusProvider 错配到一个全新的 run_id（污染语料作用域与重放）。
-    if semantic_reranker is None and reranker_model is not None:
+    # R1 检索消融结论：LLM judge rerank 默认不启用；仅显式开启时按 reranker_model
+    # 创建 SemanticReranker，避免生产链路静默回退到负优化路径。
+    if semantic_reranker is None and reranker_model is not None and llm_rerank_enabled:
         try:
             semantic_reranker = SemanticReranker(reranker_model, batch_size=profile.candidate_limit)
         except Exception:

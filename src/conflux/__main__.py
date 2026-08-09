@@ -12,6 +12,7 @@ from langchain_core.documents import Document
 
 from .agent import create_sub_agent
 from .checkpointing import create_checkpointer, graph_config
+from .config import get as config_get
 from .config import load as load_config
 from .graph_v2 import create_v2_research_graph
 from .model_factory import (
@@ -216,7 +217,9 @@ def query_command(
         )
         set_model(role_models["analyst"])
         v2_rewriter = QueryRewriteProvider(role_models["verifier"])
-        v2_semantic_reranker = SemanticReranker(role_models["reranker"], batch_size=research_profile.candidate_limit)
+        # R1 消融结论：LLM judge rerank 默认关闭；graph 按 llm_rerank_enabled
+        # 开关决定是否创建 SemanticReranker。
+        v2_semantic_reranker = None
         rag_tool = create_rag_tool(
             retriever,
             v2_rewriter,
@@ -266,6 +269,12 @@ def query_command(
         retriever=retriever,
         query_rewriter=v2_rewriter,
         semantic_reranker=v2_semantic_reranker,
+        reranker_model=role_models.get("reranker"),
+        llm_rerank_enabled=(
+            bool(config_get("research", "semantic_rerank", default=False))
+            if not replay_bundle
+            else False
+        ),
         run_id=run_id,
         deadline_at=deadline_at,
         commit_reserve_seconds=commit_reserve_seconds,

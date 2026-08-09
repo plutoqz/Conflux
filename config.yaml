@@ -78,8 +78,8 @@ vector_store:
   persist_dir: ./data/chroma_db
   collection_name: conflux_docs
 retrieval:
-  top_k: 10
-  final_k: 5
+  top_k: 60
+  final_k: 10
   parent_chunk_size: 512
   child_chunk_size: 128
   bm25_weight: 0.3
@@ -89,6 +89,8 @@ agent:
 research:
   pipeline: answer_first
   depth: standard
+  # R1 检索消融结论：LLM judge rerank 全面负优化，默认关闭；保留显式开启能力。
+  semantic_rerank: false
   enable_l4: true
   max_deep_questions: 2
   max_rewrite_attempts: 2

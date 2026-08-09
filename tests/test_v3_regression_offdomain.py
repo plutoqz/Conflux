@@ -203,6 +203,60 @@ class TestV2Wiring:
         assert captured["rag"] == (True, True), captured
         assert captured["web"] == (True, "run-wiring-test"), captured
 
+    def test_llm_rerank_disabled_by_default(self, monkeypatch):
+        from conflux import graph_v2 as gv2
+        from conflux.research_modes import resolve_research_profile
+
+        captured: dict[str, tuple] = {}
+
+        def fake_rag_tool(retriever, query_rewriter, semantic_reranker, profile):
+            captured["rag"] = (query_rewriter is not None, semantic_reranker is not None)
+            return object()
+
+        monkeypatch.setattr(gv2, "create_rag_tool", fake_rag_tool)
+        profile = resolve_research_profile("quick")
+        gv2.create_v2_research_graph(
+            None,
+            None,
+            planner_model=object(),
+            synthesizer_model=object(),
+            profile=profile,
+            retriever=object(),
+            query_rewriter=object(),
+            reranker_model=object(),
+            llm_rerank_enabled=False,
+            run_id="run-rerank-off",
+            deadline_at=None,
+        )
+        assert captured["rag"] == (True, False), captured
+
+    def test_llm_rerank_created_when_enabled(self, monkeypatch):
+        from conflux import graph_v2 as gv2
+        from conflux.research_modes import resolve_research_profile
+
+        captured: dict[str, tuple] = {}
+
+        def fake_rag_tool(retriever, query_rewriter, semantic_reranker, profile):
+            captured["rag"] = (query_rewriter is not None, semantic_reranker is not None)
+            return object()
+
+        monkeypatch.setattr(gv2, "create_rag_tool", fake_rag_tool)
+        profile = resolve_research_profile("quick")
+        gv2.create_v2_research_graph(
+            None,
+            None,
+            planner_model=object(),
+            synthesizer_model=object(),
+            profile=profile,
+            retriever=object(),
+            query_rewriter=object(),
+            reranker_model=object(),
+            llm_rerank_enabled=True,
+            run_id="run-rerank-on",
+            deadline_at=None,
+        )
+        assert captured["rag"] == (True, True), captured
+
     def test_graph_falls_back_to_agent_when_no_retriever(self, monkeypatch):
         from conflux import graph_v2 as gv2
         from conflux.research_modes import resolve_research_profile
