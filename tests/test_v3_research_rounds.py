@@ -1,6 +1,7 @@
 """回归测试：EvidenceLedger、按子问题检索和一次纠偏轮。"""
 
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -97,6 +98,59 @@ def test_round0_retrieves_each_subquestion_independently():
         for record in result["_evidence_ledger"]["records"]
         for subquestion_id in record["subquestion_ids"]
     } == {"sq-1", "sq-2"}
+
+
+def test_round0_returns_when_retrieval_stage_budget_expires():
+    class SlowTool:
+        def invoke(self, payload: dict) -> str:
+            time.sleep(0.4)
+            return _result("RAG").to_tool_text()
+
+    state = _new_state("main question")
+    state["_sub_questions"] = [
+        {"id": "sq-1", "question": "slow", "search_queries": ["slow query"]},
+    ]
+    state["_deadline_at"] = time.time() + 0.08
+    state["_commit_reserve_seconds"] = 0
+    state["_budget_timeout_seconds"] = 1
+
+    started = time.perf_counter()
+    result = retrieve_node(state, SlowTool(), None, web_available=False)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.25
+    timed_out = result["_round0_results"]["sq-1"]["RAG"]
+    assert timed_out["status"] == "failed"
+    assert timed_out["metadata"]["deadline_exceeded"] is True
+
+
+def test_round0_commits_evidence_in_job_order_not_completion_order():
+    class DelayedTool:
+        def __init__(self, source: str, delay: float):
+            self.source = source
+            self.delay = delay
+
+        def invoke(self, payload: dict) -> str:
+            time.sleep(self.delay)
+            return _result(self.source).to_tool_text()
+
+    state = _new_state("main question", run_id="run-test")
+    state["_sub_questions"] = [
+        {"id": "sq-1", "question": "ordered", "search_queries": ["ordered query"]},
+    ]
+
+    result = retrieve_node(
+        state,
+        DelayedTool("RAG", 0.05),
+        DelayedTool("Web", 0.0),
+    )
+
+    records = result["_evidence_ledger"]["records"]
+    assert [record["source_type"] for record in records] == ["RAG", "Web"]
+    assert [record["evidence_id"] for record in records] == [
+        "run-test:ev-0001",
+        "run-test:ev-0002",
+    ]
 
 
 def test_barrier_runs_one_bounded_verification_only_correction_round():

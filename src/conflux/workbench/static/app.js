@@ -1874,7 +1874,8 @@ async function runInbox() {
       source: $('paperSource').value,
       fixture: $('fixturePath').value,
       out_dir: $('inboxOut').value,
-      max_results: Number($('maxResults').value || 10),
+      max_results: Number($('maxResults').value || 50),
+      review_limit: 40,
       use_llm_scoring: $('useLlm').checked
     };
     if (mode === 'file') payload.profile = $('profilePath').value;
@@ -1900,7 +1901,7 @@ async function runInbox() {
       $('promoteInbox').value = data.json_path;
       renderPapers(data.papers || []);
       await Promise.all([refreshStatus(), renderDashboard()]);
-      toast('论文收件箱已更新，共 ' + (data.papers || []).length + ' 篇', 'ok');
+      toast(data.message || ('论文收件箱已更新，共 ' + (data.papers || []).length + ' 篇'), 'ok');
     } else {
       showInboxError(data);
     }

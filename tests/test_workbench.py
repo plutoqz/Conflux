@@ -843,7 +843,7 @@ def test_online_discovery_pages_past_seen_arxiv_results(monkeypatch):
 
     def fake_search(query, *, max_results=10, start=0):
         starts.append(start)
-        return [seen] if start == 0 else [fresh]
+        return [seen] * 10 if start == 0 else [fresh]
 
     monkeypatch.setattr(server, "_load_seen_papers", lambda: {"arxiv:seen": {}})
     monkeypatch.setattr(arxiv_source, "profile_arxiv_queries", lambda profile: ["all:agents"])
@@ -854,7 +854,7 @@ def test_online_discovery_pages_past_seen_arxiv_results(monkeypatch):
 
     assert [paper.id for paper in papers] == ["fresh"]
     assert skipped == 1
-    assert starts == [0, 1]
+    assert starts == [0, 10]
 
 
 def test_online_discovery_round_robins_queries_and_preserves_seen_negative_filters(monkeypatch):
@@ -879,12 +879,12 @@ def test_online_discovery_round_robins_queries_and_preserves_seen_negative_filte
     calls = []
 
     pages = {
-        ("q1", 0): [seen_v2],
-        ("q2", 0): [negative],
-        ("q3", 0): [fresh_one],
-        ("q1", 1): [fresh_two],
-        ("q2", 1): [fresh_three],
-        ("q3", 1): [],
+        ("q1", 0): [seen_v2] * 10,
+        ("q2", 0): [negative] * 10,
+        ("q3", 0): [fresh_one] * 10,
+        ("q1", 10): [fresh_two],
+        ("q2", 10): [fresh_three],
+        ("q3", 10): [],
     }
 
     def fake_search(query, *, max_results=10, start=0):
@@ -1021,6 +1021,80 @@ def test_existing_profile_semantic_scholar_uses_online_discovery(tmp_path, monke
     assert result["ok"] is True
     assert captured == {"profile": profile, "source": "semantic_scholar", "max_results": 10}
     assert result["papers"][0]["id"] == "s2-paper"
+
+
+def test_paper_inbox_keeps_candidates_when_review_model_is_unavailable(tmp_path, monkeypatch):
+    from conflux.paper_ingestion.models import PaperRecord
+    from conflux.research_profile import ResearchProfile
+    from conflux.workbench import server
+
+    profile = ResearchProfile(
+        id="saved-profile",
+        name="Saved",
+        fields=["cs.AI"],
+        research_questions=[],
+        keywords=["knowledge graph"],
+    )
+    paper = PaperRecord(
+        id="paper-1",
+        title="Knowledge graph research",
+        abstract="Evidence about knowledge graphs.",
+        source="arxiv",
+    )
+    monkeypatch.setattr(server, "load_profile", lambda path: profile)
+    monkeypatch.setattr(server, "_discover_unseen_papers", lambda *args: ([paper], 0))
+    monkeypatch.setattr(server, "_mark_papers_seen", lambda papers, source: None)
+    monkeypatch.setattr(server, "_feature_model_settings", lambda feature: {
+        "model": "",
+        "base_url": "",
+        "api_key": "",
+        "temperature": 0.0,
+    })
+
+    result = server.run_paper_inbox({
+        "profile": "profiles/example.yaml",
+        "source": "arxiv",
+        "out_dir": str(tmp_path),
+        "use_llm_scoring": True,
+    })
+
+    assert result["ok"] is True
+    assert result["review_status"] == "unreviewed"
+    assert [item["id"] for item in result["papers"]] == ["paper-1"]
+
+
+def test_paper_inbox_treats_all_seen_batch_as_empty_increment(tmp_path, monkeypatch):
+    from conflux.research_profile import ResearchProfile
+    from conflux.workbench import server
+
+    profile = ResearchProfile(
+        id="saved-profile",
+        name="Saved",
+        fields=["cs.AI"],
+        research_questions=[],
+        keywords=["knowledge graph"],
+    )
+    monkeypatch.setattr(server, "load_profile", lambda path: profile)
+    monkeypatch.setattr(server, "_discover_unseen_papers", lambda *args: ([], 17))
+
+    result = server.run_paper_inbox({
+        "profile": "profiles/example.yaml",
+        "source": "arxiv",
+        "out_dir": str(tmp_path),
+    })
+
+    assert result["ok"] is True
+    assert result["papers"] == []
+    assert result["stats"]["previously_seen"] == 17
+    assert "没有新增论文" in result["message"]
+
+
+def test_workbench_exposes_larger_paper_discovery_budget():
+    html = Path("src/conflux/workbench/static/index.html").read_text(encoding="utf-8")
+    app = Path("src/conflux/workbench/static/app.js").read_text(encoding="utf-8")
+
+    assert 'id="maxResults" type="number" min="1" max="500" value="50"' in html
+    assert "review_limit: 40" in app
 
 
 def test_semantic_scholar_normalizes_publication_dates(monkeypatch):
@@ -1582,6 +1656,30 @@ def test_vector_index_rebuild_preserves_old_collection_until_user_deletes(tmp_pa
     assert deleted["ok"] is True
     names = {str(item if isinstance(item, str) else item.name) for item in client.list_collections()}
     assert names == {"conflux_docs__new"}
+
+
+def test_vector_index_rebuild_reports_invalid_front_matter_path(tmp_path):
+    from conflux.workbench import server
+
+    source_dir = tmp_path / "documents"
+    source_dir.mkdir()
+    invalid = source_dir / "invalid.md"
+    invalid.write_text(
+        "---\npaper_section: [8] invalid citation heading\n---\n\n# Paper\n",
+        encoding="utf-8",
+    )
+
+    result = server.rebuild_knowledge_index({"source_dir": str(source_dir)})
+
+    assert result["ok"] is False
+    assert "知识文档解析失败" in result["error"]
+    assert str(invalid) in result["error"]
+
+
+def test_workbench_defaults_full_rebuild_to_all_documents():
+    html = Path("src/conflux/workbench/static/index.html").read_text(encoding="utf-8")
+
+    assert 'id="rebuildSourceDir" value="data/documents"' in html
 
 
 def test_query_model_override_targets_only_selected_user_tier():

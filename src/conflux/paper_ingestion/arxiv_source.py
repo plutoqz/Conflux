@@ -57,9 +57,18 @@ def profile_arxiv_queries(profile: ResearchProfile, *, max_queries: int = 5) -> 
     """Derive focused, category-constrained arXiv queries from a profile."""
 
     categories = _arxiv_categories(profile.fields)
+    keywords = _dedupe_terms(profile.keywords)
     groups = profile_keyword_groups(profile, max_queries=max_queries)
     if groups:
-        return [build_arxiv_query(group, categories, match_all=len(group) > 1) for group in groups]
+        focused_limit = max(0, max_queries - 1)
+        queries = [
+            build_arxiv_query(group, categories, match_all=len(group) > 1)
+            for group in groups[:focused_limit]
+        ]
+        broad = build_arxiv_query(keywords[:6], categories, match_all=False)
+        if broad not in queries:
+            queries.append(broad)
+        return queries[:max_queries]
     return [build_arxiv_query([], categories)]
 
 

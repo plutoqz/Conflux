@@ -106,7 +106,8 @@ def test_profile_arxiv_queries_combine_topic_direction_and_category_constraints(
     assert len(queries) == 3
     assert 'all:"knowledge graph" AND all:"natural disaster"' in queries[0]
     assert 'all:"knowledge graph" AND all:"emergency response"' in queries[1]
-    assert 'all:"knowledge graph" AND all:"knowledge representation"' in queries[2]
+    assert 'all:"knowledge graph" OR all:"knowledge representation"' in queries[2]
+    assert 'all:"natural disaster" OR all:"emergency response"' in queries[2]
     assert "(cat:cs.AI OR cat:physics.geo-ph)" in queries[0]
     assert "knowledge representation" not in queries[0]
 

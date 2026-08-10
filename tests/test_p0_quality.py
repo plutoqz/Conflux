@@ -228,6 +228,40 @@ def test_rag_tool_recalls_english_document_from_chinese_query():
     assert "paper-en" in result.metadata["matched_sources"]
 
 
+def test_rag_tool_calls_injected_query_rewriter_once():
+    from conflux.source_status import parse_source_results
+    from conflux.tools.rag import create_rag_tool
+
+    class CountingRewriter:
+        def __init__(self):
+            self.calls = 0
+
+        def rewrite(self, query, *, target="rag"):
+            self.calls += 1
+            return ["urban flooding limitations"]
+
+    class Retriever:
+        def search(self, query):
+            return [Document(
+                page_content="Urban flooding models have documented limitations under sparse observations.",
+                metadata={
+                    "chunk_id": "paper#limitations",
+                    "source": "paper-en",
+                    "paper_section": "limitations",
+                    "query_dense_score": 0.9,
+                },
+            )]
+
+    rewriter = CountingRewriter()
+    parsed = parse_source_results(str(create_rag_tool(
+        Retriever(),
+        query_rewriter=rewriter,
+    ).invoke({"query": "urban flooding limitations"})))
+
+    assert parsed[-1].status in {"success", "low_relevance"}
+    assert rewriter.calls == 1
+
+
 def test_dense_score_is_current_query_score_and_not_paper_discovery_score():
     from conflux.rag.retriever import HybridRetriever
 

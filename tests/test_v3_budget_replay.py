@@ -12,6 +12,7 @@ from conflux.graph_v2 import (
     _new_state,
     arbitration_node,
     create_v2_research_graph,
+    generate_node,
     independent_analysis_node,
     retrieve_node,
 )
@@ -75,6 +76,34 @@ def test_model_budget_rejection_is_recorded_and_does_not_call_provider():
     assert budget["model_calls"] == 4
     assert model.calls == 4
     assert any("model_call_dropped:independent_analysis" in reason for reason in budget["dropped_reasons"])
+
+
+def test_quick_budget_keeps_capacity_for_one_generated_section():
+    state = _new_state("question", depth="quick")
+    state["_sub_questions"] = [
+        {"id": "sq-1", "question": "answerable section", "importance": "high"},
+    ]
+    state["_budget_state"]["model_calls"] = 2
+    model = _NoopModel(json.dumps({
+        "summary": "Evidence-bound section summary.",
+        "claims": [{
+            "text": "The available evidence supports a bounded conclusion.",
+            "claim_type": "model_analysis",
+            "importance": "high",
+            "evidence_ids": [],
+            "derivation_type": "model_analysis",
+            "derivation_inputs": [],
+            "citation_refs": [],
+        }],
+        "evidence_gaps": ["No external evidence was admitted."],
+    }))
+
+    result = generate_node(state, model, resolve_research_profile("quick"))
+
+    assert len(result["_section_results"]) == 1
+    assert result["_budget_state"]["model_calls"] == 3
+    assert "low_priority_sections_dropped" not in result["_budget_state"]["dropped_reasons"]
+    assert model.calls == 1
 
 
 def _replay_bundle():

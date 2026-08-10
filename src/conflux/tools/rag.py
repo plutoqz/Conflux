@@ -36,8 +36,7 @@ def create_rag_tool(
         """Search the local knowledge base and return chunk-level evidence."""
 
         plan = plan_queries(query, target="rag", rewrite_provider=query_rewriter)
-        rewrite_provider = query_rewriter or QueryRewriteProvider()
-        model_rewrites = rewrite_provider.rewrite(query, target="rag")
+        model_rewrites = list(plan.bilingual_queries or [])
         retrieval_queries = list(plan.subqueries)
         existing_queries = {item.casefold() for item in retrieval_queries}
         for variant in model_rewrites:

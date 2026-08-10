@@ -109,6 +109,7 @@ Rules:
 - evidence_ids may contain only IDs from the allowed evidence records.
 - derivation_inputs must contain the evidence IDs or claim IDs used by derived_analysis.
 - citation_refs may contain only the citation references attached to the allowed evidence records.
+- Match the language of the research question and subquestion.
 - Do not write a report body. Keep each claim self-contained and concise.
 
 Return JSON:
@@ -140,6 +141,7 @@ Subquestion:
 
 No external evidence is available for this subquestion. Return only explicitly marked model_analysis claims.
 Do not invent evidence IDs or citation references. Keep each claim self-contained and state important uncertainty as an evidence gap.
+Match the language of the research question and subquestion.
 
 Return JSON:
 {{
@@ -161,11 +163,11 @@ Return JSON:
 """
 
 CLAIM_SYNTHESIS_SYSTEM = (
-    "You are Conflux's claim selector. Select only existing claim IDs for the report overview. "
-    "Do not introduce new factual content. Return valid JSON only."
+    "You are Conflux's report claim organizer. Select only existing claim IDs for the report overview. "
+    "Do not rewrite claims or introduce new factual content. Return valid JSON only."
 )
 
-CLAIM_SYNTHESIS_PROMPT = """Select existing atomic claims for the report overview.
+CLAIM_SYNTHESIS_PROMPT = """Compose a concise report overview from existing atomic claims.
 
 Research question:
 {core_question}
@@ -173,9 +175,29 @@ Research question:
 Available claims:
 {claims_json}
 
+Rules:
+- direct_answer.text: write a natural 2-4 sentence answer using only the selected claims.
+- direct_answer.claim_ids: select at most four claims that support every statement in the answer.
+- Prefer coverage across distinct subquestions over multiple claims from one subquestion.
+- cross_synthesis.text: write one short paragraph only when the selected claims show a genuine
+  cross-section complementarity, trade-off, conflict, or shared limitation.
+- cross_synthesis.claim_ids: select at most three claims from at least two distinct subquestions.
+- Cross-synthesis claims must come from at least two distinct subquestions and must not
+  repeat direct_answer.claim_ids. Return empty text and an empty list when no genuine
+  cross-section synthesis exists.
+- Do not add facts, numbers, examples, citations, or recommendations that are not already
+  present in the selected claims. Do not copy the claims as a bullet list.
+- Match the language of the research question. Do not add headings.
+
 Return JSON:
 {{
-  "direct_claim_ids": ["claim-id"],
-  "cross_synthesis_claim_ids": ["claim-id"]
+  "direct_answer": {{
+    "text": "...",
+    "claim_ids": ["claim-id"]
+  }},
+  "cross_synthesis": {{
+    "text": "...",
+    "claim_ids": ["claim-id"]
+  }}
 }}
 """

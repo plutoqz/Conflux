@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import yaml
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -344,25 +345,26 @@ def _full_text_documents(
 
 def _document_markdown(doc: Document) -> str:
     metadata = doc.metadata
-    lines = [
-        "---",
-        f"source_type: {metadata.get('source_type', '')}",
-        f"paper_id: {metadata.get('paper_id', '')}",
-        f"chunk_id: {metadata.get('chunk_id', '')}",
-        f"citation_ref: {paper_citation_ref(metadata)}",
-        f"ingestion_action: {metadata.get('ingestion_action', '')}",
-        f"paper_section: {metadata.get('paper_section', '')}",
-        f"full_text_requested: {str(bool(metadata.get('full_text_requested'))).lower()}",
-        f"full_text_downloaded: {str(bool(metadata.get('full_text_downloaded'))).lower()}",
-        f"full_text_extracted: {str(bool(metadata.get('full_text_extracted'))).lower()}",
-        f"full_text_indexed: {str(bool(metadata.get('full_text_indexed'))).lower()}",
-        f"content_hash: {metadata.get('content_hash', '')}",
-        "---",
-        "",
-        doc.page_content.rstrip(),
-        "",
-    ]
-    return "\n".join(lines)
+    front_matter = {
+        "source_type": metadata.get("source_type", ""),
+        "paper_id": metadata.get("paper_id", ""),
+        "chunk_id": metadata.get("chunk_id", ""),
+        "citation_ref": paper_citation_ref(metadata),
+        "ingestion_action": metadata.get("ingestion_action", ""),
+        "paper_section": metadata.get("paper_section", ""),
+        "full_text_requested": bool(metadata.get("full_text_requested")),
+        "full_text_downloaded": bool(metadata.get("full_text_downloaded")),
+        "full_text_extracted": bool(metadata.get("full_text_extracted")),
+        "full_text_indexed": bool(metadata.get("full_text_indexed")),
+        "content_hash": metadata.get("content_hash", ""),
+    }
+    serialized = yaml.safe_dump(
+        front_matter,
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=False,
+    ).rstrip()
+    return f"---\n{serialized}\n---\n\n{doc.page_content.rstrip()}\n"
 
 
 def _index_documents(documents: list[Document]) -> int:

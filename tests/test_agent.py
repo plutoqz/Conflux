@@ -114,6 +114,16 @@ def test_graph_compiles():
     assert "finalize" in nodes
 
 
+def test_quick_profile_allows_realistic_synthesizer_latency():
+    from conflux.research_modes import resolve_research_profile
+
+    profile = resolve_research_profile("quick")
+
+    assert profile.timeout_seconds == 180
+    assert profile.model_timeout_seconds == 60
+    assert profile.role_timeout_seconds["synthesizer"] == 51
+
+
 def test_v2_section_summary_normalizes_citation_ids():
     from conflux.graph_v2 import _parse_section_summary
 

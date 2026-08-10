@@ -256,7 +256,7 @@
               <legend>论文来源</legend>
               <div class="field-grid two">
                 <label>数据源<select id="paperSource"><option value="arxiv">arXiv 在线</option><option value="semantic_scholar">Semantic Scholar</option><option value="fixture">本地测试数据（固定样本）</option></select></label>
-                <label>最大结果数<input id="maxResults" type="number" min="1" max="100" value="10"></label>
+                <label>最大结果数<input id="maxResults" type="number" min="1" max="500" value="50"></label>
                 <label id="fixtureField" hidden>测试数据路径<input id="fixturePath"></label>
                 <label>结果保存位置<input id="inboxOut"></label>
               </div>
@@ -310,7 +310,7 @@
               <legend>向量索引管理</legend>
               <div id="vectorIndexSummary" class="field-hint">正在读取 collection 状态...</div>
               <div class="field-grid two">
-                <label>重建来源目录<input id="rebuildSourceDir" value="data/documents/papers"></label>
+                <label>重建来源目录<input id="rebuildSourceDir" value="data/documents"></label>
                 <label>新 Collection 名称<input id="rebuildCollectionName" placeholder="留空则按模型和时间自动命名"></label>
               </div>
               <div class="form-actions"><button id="rebuildVectorIndex" class="button secondary" type="button"><i data-lucide="refresh-cw" aria-hidden="true"></i><span>完整重建索引</span></button></div>

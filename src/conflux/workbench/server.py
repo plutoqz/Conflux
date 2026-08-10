@@ -81,6 +81,7 @@ PROJECT_ROOT = config.PROJECT_ROOT
 DEFAULT_PROFILE = "profiles/example_gis_agent.yaml"
 DEFAULT_FIXTURE = "tests/fixtures/papers/arxiv_sample.json"
 DEFAULT_INBOX_DIR = "reports/workbench/papers"
+DEFAULT_DOCUMENTS_DIR = "data/documents"
 DEFAULT_PROMOTE_DIR = "data/documents/papers"
 DEFAULT_PROGRESS_DIR = "reports/workbench/progress"
 DEFAULT_PROJECTS_DIR = "projects"
@@ -853,11 +854,14 @@ def build_vector_store_status() -> dict[str, Any]:
 
 
 def rebuild_knowledge_index(payload: dict[str, Any]) -> dict[str, Any]:
-    source_dir = Path(_path_value(payload.get("source_dir"), DEFAULT_PROMOTE_DIR))
+    source_dir = Path(_path_value(payload.get("source_dir"), DEFAULT_DOCUMENTS_DIR))
     if not source_dir.exists():
         return {"ok": False, "error": f"知识文档目录不存在：{source_dir}"}
 
-    documents = _load_knowledge_documents(source_dir)
+    try:
+        documents = _load_knowledge_documents(source_dir)
+    except (OSError, UnicodeError, yaml.YAMLError, ValueError) as exc:
+        return {"ok": False, "error": f"知识文档解析失败：{exc}"}
     if not documents:
         return {"ok": False, "error": f"知识文档目录中没有可重建的 Markdown：{source_dir}"}
 
@@ -930,7 +934,10 @@ def _load_knowledge_documents(source_dir: Path) -> list[Any]:
         if text.startswith("---\n"):
             parts = text.split("---\n", 2)
             if len(parts) == 3:
-                parsed = yaml.safe_load(parts[1]) or {}
+                try:
+                    parsed = yaml.safe_load(parts[1]) or {}
+                except yaml.YAMLError as exc:
+                    raise ValueError(f"{path}: front matter 不是有效 YAML：{exc}") from exc
                 if isinstance(parsed, dict):
                     metadata.update(parsed)
                 content = parts[2].lstrip()
@@ -988,6 +995,7 @@ def _discover_unseen_papers(
     audit = build_paper_ingestion_audit()
     collected = []
     collected_ids: set[str] = set()
+    skipped_ids: set[str] = set()
     skipped_seen = 0
 
     def _collect(batch: list) -> None:
@@ -995,7 +1003,9 @@ def _discover_unseen_papers(
         for paper in batch:
             identity = _paper_identity(source, paper.id)
             if identity in seen_entries and _seen_entry_should_skip(identity, seen_entries[identity], audit):
-                skipped_seen += 1
+                if identity not in skipped_ids:
+                    skipped_ids.add(identity)
+                    skipped_seen += 1
                 continue
             if identity in collected_ids:
                 continue
@@ -1008,7 +1018,7 @@ def _discover_unseen_papers(
         from conflux.paper_ingestion.arxiv_source import profile_arxiv_queries, search_arxiv
 
         queries = profile_arxiv_queries(profile)[:max_results]
-        page_size = max(1, min(20, (max_results + len(queries) - 1) // max(1, len(queries))))
+        page_size = max(10, min(100, (max_results + len(queries) - 1) // max(1, len(queries))))
         active = [True] * len(queries)
         request_count = 0
         first_error = None
@@ -1103,7 +1113,8 @@ def run_paper_inbox(payload: dict[str, Any]) -> dict[str, Any]:
 
     source = str(payload.get("source") or "arxiv")
     out_dir = _path_value(payload.get("out_dir"), DEFAULT_INBOX_DIR)
-    max_results = max(1, min(100, int(payload.get("max_results") or 10)))
+    max_results = max(1, min(500, int(payload.get("max_results") or 50)))
+    review_limit = max(1, min(100, int(payload.get("review_limit") or 40)))
     use_llm = bool(payload.get("use_llm_scoring"))
     inline_mode = str(payload.get("profile_mode") or "file") == "inline"
 
@@ -1120,7 +1131,24 @@ def run_paper_inbox(payload: dict[str, Any]) -> dict[str, Any]:
         except Exception as exc:
             return {"ok": False, "error": f"{source} 搜索失败：{exc}"}
         if not papers:
-            return {"ok": False, "error": "当前检索范围内没有新的论文，请调整画像关键词或稍后重试。"}
+            return {
+                "ok": True,
+                "profile_id": profile.id,
+                "stats": {
+                    "total": 0,
+                    "deep": 0,
+                    "skim": 0,
+                    "skip": 0,
+                    "previously_seen": skipped_seen,
+                },
+                "papers": [],
+                "review_status": "not_requested",
+                "review_error": "",
+                "review_next_action": "",
+                "message": "当前检索批次没有新增论文；已见论文不会重复进入收件箱。",
+                "markdown_path": "",
+                "json_path": "",
+            }
         result = build_inbox(profile, papers, out_dir=out_dir)
         result.stats["previously_seen"] = skipped_seen
         _mark_papers_seen(papers, source)
@@ -1145,38 +1173,44 @@ def run_paper_inbox(payload: dict[str, Any]) -> dict[str, Any]:
 
             settings = _feature_model_settings("paper_review")
             if not settings["model"] or not settings["api_key"]:
-                return {
-                    "ok": False,
-                    "error": "尚未配置可用的论文语义评审模型，请先到“模型与环境”完成配置。",
+                review_status = "unreviewed"
+                review_error = "尚未配置可用的论文语义评审模型。"
+                review_next_action = "请配置论文评审模型后重试；确定性候选已保留。"
+            else:
+                profile_version = hashlib.sha256(
+                    json.dumps(result.profile.to_dict(), ensure_ascii=False, sort_keys=True).encode("utf-8")
+                ).hexdigest()[:16]
+                model_updates = {
+                    "CONFLUX_MODELS__PAPER_REVIEW__PROVIDER": "openai_compatible",
+                    "CONFLUX_MODELS__PAPER_REVIEW__MODEL": settings["model"],
+                    "CONFLUX_MODELS__PAPER_REVIEW__BASE_URL": settings["base_url"],
+                    "CONFLUX_MODELS__PAPER_REVIEW__API_KEY": settings["api_key"],
+                    "CONFLUX_MODELS__PAPER_REVIEW__TEMPERATURE": str(settings["temperature"]),
                 }
-            profile_version = hashlib.sha256(
-                json.dumps(result.profile.to_dict(), ensure_ascii=False, sort_keys=True).encode("utf-8")
-            ).hexdigest()[:16]
-            model_updates = {
-                "CONFLUX_MODELS__PAPER_REVIEW__PROVIDER": "openai_compatible",
-                "CONFLUX_MODELS__PAPER_REVIEW__MODEL": settings["model"],
-                "CONFLUX_MODELS__PAPER_REVIEW__BASE_URL": settings["base_url"],
-                "CONFLUX_MODELS__PAPER_REVIEW__API_KEY": settings["api_key"],
-                "CONFLUX_MODELS__PAPER_REVIEW__TEMPERATURE": str(settings["temperature"]),
-            }
-            with config.override(model_updates):
-                ctx = make_plugin_context(config={"model_preset": "paper_review"})
-                review_result = paper_review(
-                    ctx,
-                    papers=[paper.to_dict() for paper, _ in result.analyzed],
-                    profile_id=result.profile.id,
-                    profile_version=profile_version,
-                    profile_keywords=result.profile.keywords,
-                    profile_questions=result.profile.research_questions,
-                    profile_fields=result.profile.fields,
-                )
-            review_status = review_result.status.value
-            review_error = review_result.error
-            review_next_action = str(review_result.output.get("next_action") or "")
-            for review in review_result.output.get("reviews") or []:
-                paper_id = str(review.get("paper_id") or "")
-                if paper_id:
-                    llm_reviews[paper_id] = review
+                review_candidates = [
+                    paper.to_dict()
+                    for paper, _analysis in result.analyzed[:review_limit]
+                ]
+                result.stats["llm_review_candidates"] = len(review_candidates)
+                result.stats["llm_review_deferred"] = max(0, len(result.analyzed) - len(review_candidates))
+                with config.override(model_updates):
+                    ctx = make_plugin_context(config={"model_preset": "paper_review"})
+                    review_result = paper_review(
+                        ctx,
+                        papers=review_candidates,
+                        profile_id=result.profile.id,
+                        profile_version=profile_version,
+                        profile_keywords=result.profile.keywords,
+                        profile_questions=result.profile.research_questions,
+                        profile_fields=result.profile.fields,
+                    )
+                review_status = review_result.status.value
+                review_error = review_result.error
+                review_next_action = str(review_result.output.get("next_action") or "")
+                for review in review_result.output.get("reviews") or []:
+                    paper_id = str(review.get("paper_id") or "")
+                    if paper_id:
+                        llm_reviews[paper_id] = review
         except Exception as exc:
             review_status = "unreviewed"
             review_error = f"LLM review unavailable: {type(exc).__name__}: {exc}"

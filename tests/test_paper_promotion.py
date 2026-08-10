@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 
 def test_ingestion_policy_thresholds():
     from conflux.paper_ingestion.ingestion_policy import default_policy, decide_ingestion
@@ -183,6 +185,30 @@ def test_promote_inbox_writes_documents_and_manifest(tmp_path):
     assert "citation_ref: LocalPaper:" in text
     manifest = json.loads(result.artifacts.manifest_path.read_text(encoding="utf-8"))
     assert manifest["decisions"][0]["action"] == "summary_only"
+
+
+def test_document_markdown_quotes_yaml_special_section_values():
+    from langchain_core.documents import Document
+    from conflux.knowledge.paper_indexer import _document_markdown
+
+    markdown = _document_markdown(Document(
+        page_content="# Paper\n\nEvidence.",
+        metadata={
+            "source_type": "LocalPaper",
+            "paper_id": "2503.07675v2",
+            "chunk_id": "paper:2503.07675v2#fulltext-15",
+            "paper_section": "[8] citation-like heading",
+            "full_text_requested": True,
+            "full_text_downloaded": True,
+            "full_text_extracted": True,
+            "full_text_indexed": True,
+        },
+    ))
+
+    front_matter = markdown.split("---\n", 2)[1]
+    parsed = yaml.safe_load(front_matter)
+    assert parsed["paper_section"] == "[8] citation-like heading"
+    assert parsed["full_text_indexed"] is True
 
 
 def test_papers_cli_promote_writes_reviewable_outputs(tmp_path):

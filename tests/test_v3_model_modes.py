@@ -334,3 +334,32 @@ def test_critical_claim_failure_blocks_claim_delivery():
 
     assert assessment["status"] == "diagnostic_only"
     assert "critical_claim_not_supported" in assessment["hard_failures"]
+
+
+def test_analysis_only_claims_are_limited_instead_of_diagnostic():
+    from conflux.graph_v2 import _claim_delivery_assessment
+
+    state = _new_state("question")
+    state["_claim_records"] = [{
+        "claim_id": "run-test:claim:sq-1:01",
+        "subquestion_id": "sq-1",
+        "text": "bounded analysis",
+        "claim_type": "model_analysis",
+        "importance": "high",
+        "evidence_ids": [],
+        "derivation_type": "model_analysis",
+        "verification_result": {
+            "verdict": "supports",
+            "confidence": 1.0,
+            "reason": "explicitly marked as model analysis",
+            "verifier_version": "rules-v1",
+        },
+    }]
+    ledger = EvidenceLedger.from_dict(state["_evidence_ledger"])
+    state["_ledger_snapshot"] = ledger.freeze("final").to_dict()
+
+    assessment = _claim_delivery_assessment(state)
+
+    assert assessment["status"] == "limited"
+    assert assessment["hard_failures"] == []
+    assert assessment["limitations"] == ["analysis_only_claims"]

@@ -152,7 +152,7 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
         "synthesizer_max_tokens": 5000,
         "verifier_max_tokens": 600,
         "token_budget": 55000,
-        "model_timeout_seconds": 30,
+        "model_timeout_seconds": 60,
         "max_retries": 0,
         "timeout_seconds": 180,
     },
