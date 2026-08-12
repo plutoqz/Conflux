@@ -206,8 +206,8 @@ def test_radar_llm_review_reranks_links(monkeypatch):
     from conflux.project_registry.models import ProjectDefinition
     from conflux.research_profile import load_profile
 
-    def mock_execute(queries, stats=None):
-        return [PaperRecord(id="2401.00001", title="m", abstract="m", source="arxiv")], []
+    def mock_execute(queries, stats=None, db=None):
+        return [PaperRecord(id="2401.00001", title="m", abstract="m", source="arxiv")], [], set()
 
     monkeypatch.setattr("conflux.paper_radar.radar._execute_queries", mock_execute)
     monkeypatch.setattr(
@@ -237,12 +237,12 @@ def test_layered_review_only_reviews_fuzzy_band(monkeypatch):
     from conflux.project_registry.models import ProjectDefinition
     from conflux.research_profile import load_profile
 
-    def mock_execute(queries, stats=None):
+    def mock_execute(queries, stats=None, db=None):
         return [
             PaperRecord(id="high-1", title="h", abstract="h", source="arxiv"),
             PaperRecord(id="mid-1", title="m", abstract="m", source="arxiv"),
             PaperRecord(id="low-1", title="l", abstract="l", source="arxiv"),
-        ], []
+        ], [], set()
 
     captured = {}
 
@@ -278,12 +278,12 @@ def test_non_layered_review_reviews_top_candidates(monkeypatch):
     from conflux.project_registry.models import ProjectDefinition
     from conflux.research_profile import load_profile
 
-    def mock_execute(queries, stats=None):
+    def mock_execute(queries, stats=None, db=None):
         return [
             PaperRecord(id="high-1", title="h", abstract="h", source="arxiv"),
             PaperRecord(id="mid-1", title="m", abstract="m", source="arxiv"),
             PaperRecord(id="low-1", title="l", abstract="l", source="arxiv"),
-        ], []
+        ], [], set()
 
     captured = {}
 
@@ -319,8 +319,8 @@ def test_radar_semantic_review_failure_marks_needs_review(monkeypatch):
     from conflux.project_registry.models import ProjectDefinition
     from conflux.research_profile import load_profile
 
-    def mock_execute(queries, stats=None):
-        return [PaperRecord(id="2401.00001", title="m", abstract="m", source="arxiv")], []
+    def mock_execute(queries, stats=None, db=None):
+        return [PaperRecord(id="2401.00001", title="m", abstract="m", source="arxiv")], [], set()
 
     monkeypatch.setattr("conflux.paper_radar.radar._execute_queries", mock_execute)
     monkeypatch.setattr(
@@ -342,8 +342,8 @@ def test_radar_listwise_review_failure_marks_needs_review(monkeypatch):
     from conflux.project_registry.models import ProjectDefinition
     from conflux.research_profile import load_profile
 
-    def mock_execute(queries, stats=None):
-        return [PaperRecord(id="2401.00001", title="m", abstract="m", source="arxiv")], []
+    def mock_execute(queries, stats=None, db=None):
+        return [PaperRecord(id="2401.00001", title="m", abstract="m", source="arxiv")], [], set()
 
     monkeypatch.setattr("conflux.paper_radar.radar._execute_queries", mock_execute)
     monkeypatch.setattr(

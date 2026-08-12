@@ -44,6 +44,8 @@ def search_semantic_scholar(
     year_from: int | None = None,
     year_to: int | None = None,
     fields_of_study: list[str] | None = None,
+    sort: str = "relevance",
+    _retries: int = 2,
 ) -> list[PaperRecord]:
     """Search Semantic Scholar by title/abstract keywords.
 
@@ -55,8 +57,24 @@ def search_semantic_scholar(
     year_from: Filter papers published on or after this year.
     year_to: Filter papers published on or before this year.
     fields_of_study: Optional filter, e.g. ['Computer Science'].
+    sort: "relevance" (default) or "citationCount".  The Graph API search
+        endpoint does not expose a sort parameter; ``citationCount`` is
+        implemented client-side by fetching two pages (top-200) and
+        re-sorting by citation count, which is sufficient for the
+        milestone/classic tiers (P2.6).
+    _retries: Internal — remaining retries on HTTP 429 (rate limit).  Bounded
+        so a persistently rate-limited key degrades to [] instead of hanging.
     """
     max_results = max(1, min(100, max_results))
+
+    if sort == "citationCount":
+        return _search_sorted_by_citations(
+            query,
+            max_results=max_results,
+            year_from=year_from,
+            year_to=year_to,
+            fields_of_study=fields_of_study,
+        )
 
     params: dict[str, Any] = {
         "query": query,
@@ -78,12 +96,13 @@ def search_semantic_scholar(
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        if e.code == 429:
+        if e.code == 429 and _retries > 0:
             time.sleep(5)
             return search_semantic_scholar(
                 query, max_results=max_results, offset=offset,
                 year_from=year_from, year_to=year_to,
                 fields_of_study=fields_of_study,
+                _retries=_retries - 1,
             )
         return []
     except Exception:
@@ -109,6 +128,49 @@ def search_semantic_scholar(
             pass
 
     return records
+
+
+def _search_sorted_by_citations(
+    query: str,
+    *,
+    max_results: int,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    fields_of_study: list[str] | None = None,
+) -> list[PaperRecord]:
+    """Fetch two pages (top-200) and re-sort by citation count (desc)."""
+    page_size = min(100, max(1, max_results * 2))
+    records: list[PaperRecord] = []
+    for page_offset in (0, page_size):
+        page = search_semantic_scholar(
+            query,
+            max_results=page_size,
+            offset=page_offset,
+            year_from=year_from,
+            year_to=year_to,
+            fields_of_study=fields_of_study,
+        )
+        records.extend(page)
+    # de-duplicate by S2 paper id, keep the first occurrence
+    seen: set[str] = set()
+    unique: list[PaperRecord] = []
+    for record in records:
+        key = str(record.id or "")
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        unique.append(record)
+
+    def _citations(record: PaperRecord) -> int:
+        meta = record.metadata or {}
+        try:
+            return int(meta.get("citation_count") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    unique.sort(key=_citations, reverse=True)
+    return unique[:max_results]
 
 
 def _normalize_s2_paper(paper: dict[str, Any], *, matched_query: str = "") -> PaperRecord:

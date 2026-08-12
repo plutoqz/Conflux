@@ -269,14 +269,14 @@ class TestRadarPipeline:
         from conflux.research_profile import load_profile
         from conflux.paper_ingestion.models import PaperRecord
 
-        def mock_execute(queries, stats=None):
+        def mock_execute(queries, stats=None, db=None):
             return [PaperRecord(
                 id="2401.00001",
                 title="Test GIS Paper",
                 abstract="A test paper about GIS agents.",
                 source="arxiv",
                 doi="10.1234/test",
-            )], []
+            )], [], set()
 
         monkeypatch.setattr(
             "conflux.paper_radar.radar._execute_queries",
@@ -303,11 +303,11 @@ class TestRadarPipeline:
         from conflux.research_profile import load_profile
         from conflux.paper_ingestion.models import PaperRecord
 
-        def mock_execute(queries, stats=None):
+        def mock_execute(queries, stats=None, db=None):
             return [PaperRecord(
                 id="2401.00001", title="Test",
                 abstract="Test abstract.", source="arxiv",
-            )], []
+            )], [], set()
 
         monkeypatch.setattr(
             "conflux.paper_radar.radar._execute_queries",
@@ -369,12 +369,12 @@ class TestRadarPipeline:
 
         monkeypatch.setattr(
             "conflux.paper_radar.radar._execute_queries",
-            lambda queries, stats=None: ([PaperRecord(
+            lambda queries, stats=None, db=None: ([PaperRecord(
                 id="unrelated",
                 title="Marine biology survey",
                 abstract="Protein folding in marine organisms.",
                 source="arxiv",
-            )], []),
+            )], [], set()),
         )
         captured = {}
         monkeypatch.setattr(
@@ -406,12 +406,12 @@ class TestUnreviewedSemantics:
         from conflux.research_profile import load_profile
         from conflux.paper_ingestion.models import PaperRecord
 
-        def mock_execute(queries, stats=None):
+        def mock_execute(queries, stats=None, db=None):
             return [PaperRecord(
                 id="2401.00001", title="Test GIS Paper",
                 abstract="A test paper about GIS agents.",
                 source="arxiv", doi="10.1234/test",
-            )], []
+            )], [], set()
 
         def fake_links(papers, project_id, intents, context, relevance_scores=None):
             return [ProjectPaperLink(
@@ -459,12 +459,12 @@ class TestProjectSeenState:
         from conflux.research_profile import load_profile
         from conflux.paper_ingestion.models import PaperRecord
 
-        def mock_execute(queries, stats=None):
+        def mock_execute(queries, stats=None, db=None):
             return [PaperRecord(
                 id="2401.00001", title="Test GIS Paper",
                 abstract="A test paper about GIS agents.",
                 source="arxiv", doi="10.1234/test",
-            )], []
+            )], [], set()
 
         def fake_links(papers, project_id, intents, context, relevance_scores=None):
             return [ProjectPaperLink(

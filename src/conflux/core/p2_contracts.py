@@ -17,7 +17,27 @@ from pydantic import BaseModel, Field
 
 # ── protocol versioning ───────────────────────────────────────────
 
-P2_PROTOCOL_VERSION: str = "conflux.dev/p2/v1alpha1"
+P2_PROTOCOL_VERSION: str = "conflux.dev/p2/v1alpha2"
+
+# Coverage tiers for layered paper retrieval (P2.6).
+COVERAGE_TIER = Literal["frontier", "hot", "milestone", "classic"]
+SORT_BY = Literal["submittedDate", "relevance", "citationCount"]
+
+# Default per-tier refresh cadence in days.  0 = refresh every run.
+DEFAULT_TIER_REFRESH_DAYS: dict[str, int] = {
+    "frontier": 0,
+    "hot": 0,
+    "milestone": 30,
+    "classic": 30,
+}
+
+# Tier quota as fraction of a track's total candidate budget.
+DEFAULT_TIER_QUOTA: dict[str, float] = {
+    "frontier": 0.30,
+    "hot": 0.40,
+    "milestone": 0.20,
+    "classic": 0.10,
+}
 
 
 # ── project research config ────────────────────────────────────────
@@ -51,6 +71,22 @@ class ProjectResearchConfig(BaseModel):
         default_factory=list,
         description="List of track ids to override profile defaults; empty = use all profile tracks",
     )
+    # ── P2.6 layered coverage ─────────────────────────────────────
+    coverage_tiers: list[COVERAGE_TIER] | None = Field(
+        default=None,
+        description="Tiers to retrieve per track query; None = all four (frontier/hot/milestone/classic)",
+    )
+    classic_min_citations: int = Field(default=100, ge=0)
+    classic_years: int = Field(default=20, ge=1)
+    milestone_years: int = Field(default=10, ge=1)
+    tier_refresh_days: dict[str, int] = Field(
+        default_factory=lambda: dict(DEFAULT_TIER_REFRESH_DAYS),
+        description="Days between retrievals per tier; 0 = every run",
+    )
+    citation_seed_enabled: bool = Field(default=True)
+    citation_seed_hop: int = Field(default=2, ge=1, le=3)
+    citation_seed_per_paper: int = Field(default=20, ge=1, le=100)
+    citation_seed_budget: int = Field(default=100, ge=1, le=1000)
 
 
 # ── track & query spec ─────────────────────────────────────────────
@@ -69,6 +105,11 @@ class TrackQuery(BaseModel):
     )
     date_window_days: int = Field(default=365, ge=1, description="Look-back window in days")
     priority: int = Field(default=50, ge=0, le=100)
+    # P2.6: explicit tier list overrides the global default (None = use config.coverage_tiers).
+    tiers: list[COVERAGE_TIER] | None = Field(
+        default=None,
+        description="Coverage tiers for this query; None = use config/global default tiers",
+    )
 
 
 class Track(BaseModel):
@@ -100,10 +141,25 @@ class QuerySpec(BaseModel):
     priority: int = Field(default=50, ge=0, le=100)
     provenance: str = Field(
         default="",
-        description="How this query was generated: 'track_manual' | 'intent_auto' | 'gap_fill'",
+        description="How this query was generated: 'track_manual' | 'intent_auto' | 'gap_fill' | 'citation_seed'",
     )
     profile_version: str = Field(default="", description="SHA of profile at generation time")
     context_version: str = Field(default="", description="SHA of project context at generation time")
+    # ── P2.6 layered coverage ─────────────────────────────────────
+    coverage_tier: COVERAGE_TIER = Field(default="hot")
+    year_from: int | None = Field(default=None)
+    year_to: int | None = Field(default=None)
+    sort_by: SORT_BY = Field(default="relevance")
+    offset: int = Field(default=0, ge=0)
+    venue_filters: list[str] = Field(default_factory=list)
+    min_citations: int | None = Field(
+        default=None,
+        description="Citation-count floor for retrieved papers (classic tier)",
+    )
+    skip_ingested: bool = Field(
+        default=True,
+        description="Exclude papers already ingested in the global papers table",
+    )
 
 
 # ── project research context ───────────────────────────────────────
@@ -280,6 +336,14 @@ class RadarRunStats(BaseModel):
     failed_sources: list[str] = Field(default_factory=list)
     intent_count: int = 0
     query_count: int = 0
+    # P2.6 layered coverage telemetry.
+    skipped_cursor_tiers: int = 0
+    citation_seed_added: int = 0
+    excluded_ingested: int = 0
+    no_citation_seeds: bool = Field(
+        default=False,
+        description="True when seed expansion was skipped because no seeds exist",
+    )
     # LLM deep-analysis telemetry (Phase P2 real-API integration)
     llm_calls: int = 0
     llm_total_tokens: int = 0

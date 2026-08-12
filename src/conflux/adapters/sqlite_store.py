@@ -379,6 +379,25 @@ SCHEMA_MIGRATIONS = [
             "CREATE INDEX IF NOT EXISTS idx_evidence_review_impacts_target ON evidence_review_impacts(target_kind, target_id)",
         ],
     ),
+    (
+        "0006_retrieval_cursors",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS retrieval_cursors (
+                profile_id TEXT NOT NULL,
+                track_id TEXT NOT NULL,
+                tier TEXT NOT NULL,
+                last_retrieved_at REAL NOT NULL,
+                last_run_id TEXT NOT NULL DEFAULT '',
+                last_year_from INTEGER,
+                last_year_to INTEGER,
+                candidate_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (profile_id, track_id, tier)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_retrieval_cursors_profile ON retrieval_cursors(profile_id, last_retrieved_at)",
+        ],
+    ),
 ]
 
 
@@ -1717,3 +1736,107 @@ def _event_payload(event: Any) -> dict[str, Any]:
     if is_dataclass(event):
         return asdict(event)
     raise TypeError("event must be a dict, pydantic model, or dataclass")
+
+
+class RetrievalCursorStore:
+    """Per (profile, track, tier) retrieval cursors for layered coverage (P2.6).
+
+    Low-frequency tiers (milestone/classic) skip re-retrieval until the
+    configured refresh window has elapsed.  Cursors are keyed by profile_id
+    (not project_id): the same profile searches the same paper population
+    across projects.
+    """
+
+    def __init__(self, db: SQLiteDatabase) -> None:
+        self.db = db
+
+    def get(
+        self, profile_id: str, track_id: str, tier: str
+    ) -> dict[str, Any] | None:
+        row = self.db.connection.execute(
+            """
+            SELECT * FROM retrieval_cursors
+            WHERE profile_id = ? AND track_id = ? AND tier = ?
+            """,
+            (profile_id, track_id, tier),
+        ).fetchone()
+        return _row_to_dict(row) if row is not None else None
+
+    def upsert(
+        self,
+        profile_id: str,
+        track_id: str,
+        tier: str,
+        *,
+        run_id: str = "",
+        year_from: int | None = None,
+        year_to: int | None = None,
+        candidate_count: int = 0,
+    ) -> None:
+        now = time.time()
+        self.db.connection.execute(
+            """
+            INSERT INTO retrieval_cursors (
+                profile_id, track_id, tier, last_retrieved_at,
+                last_run_id, last_year_from, last_year_to, candidate_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(profile_id, track_id, tier) DO UPDATE SET
+                last_retrieved_at = excluded.last_retrieved_at,
+                last_run_id = excluded.last_run_id,
+                last_year_from = excluded.last_year_from,
+                last_year_to = excluded.last_year_to,
+                candidate_count = excluded.candidate_count
+            """,
+            (profile_id, track_id, tier, now, run_id, year_from, year_to, candidate_count),
+        )
+        self.db.connection.commit()
+
+    def should_refresh(
+        self,
+        profile_id: str,
+        track_id: str,
+        tier: str,
+        refresh_days: int,
+        *,
+        force: bool = False,
+    ) -> bool:
+        """True when this tier must be retrieved on this run."""
+        if force:
+            return True
+        if refresh_days <= 0:
+            return True
+        cursor = self.get(profile_id, track_id, tier)
+        if cursor is None:
+            return True
+        elapsed_days = (time.time() - float(cursor["last_retrieved_at"])) / 86400.0
+        return elapsed_days >= refresh_days
+
+    def list(self, profile_id: str | None = None) -> list[dict[str, Any]]:
+        if profile_id is None:
+            rows = self.db.connection.execute(
+                "SELECT * FROM retrieval_cursors ORDER BY profile_id, track_id, tier"
+            ).fetchall()
+        else:
+            rows = self.db.connection.execute(
+                "SELECT * FROM retrieval_cursors WHERE profile_id = ? ORDER BY track_id, tier",
+                (profile_id,),
+            ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def clear(self, profile_id: str | None = None) -> int:
+        """Delete cursors; None clears all (resets every tier to 'never retrieved')."""
+        if profile_id is None:
+            cursor = self.db.connection.execute("DELETE FROM retrieval_cursors")
+        else:
+            cursor = self.db.connection.execute(
+                "DELETE FROM retrieval_cursors WHERE profile_id = ?", (profile_id,)
+            )
+        self.db.connection.commit()
+        return cursor.rowcount
+
+
+def list_ingested_paper_keys(db: SQLiteDatabase) -> set[str]:
+    """All globally-ingested paper_keys (cross-profile).  Used to exclude
+    already-ingested papers from retrieval candidates (P2.6)."""
+    rows = db.connection.execute("SELECT paper_key FROM papers").fetchall()
+    return {str(row["paper_key"]) for row in rows}

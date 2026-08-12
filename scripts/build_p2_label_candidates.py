@@ -54,11 +54,30 @@ def main() -> int:
     candidates: list[dict] = []
     for index, spec in enumerate(queries):
         try:
-            papers = search_arxiv(
-                spec.query,
-                max_results=args.max_results,
-                categories=list(getattr(spec, "categories", None) or []),
-            )
+            if spec.source == PaperSource.ARXIV:
+                sort_by = (
+                    "submittedDate"
+                    if getattr(spec, "coverage_tier", "") == "frontier"
+                    else "relevance"
+                )
+                papers = search_arxiv(
+                    spec.query,
+                    max_results=args.max_results,
+                    start=int(getattr(spec, "offset", 0) or 0),
+                    categories=list(getattr(spec, "categories", None) or []),
+                    sort_by=sort_by,
+                )
+            else:
+                from conflux.paper_ingestion.semantic_scholar_source import search_semantic_scholar
+
+                papers = search_semantic_scholar(
+                    spec.query,
+                    max_results=args.max_results,
+                    offset=int(getattr(spec, "offset", 0) or 0),
+                    year_from=getattr(spec, "year_from", None),
+                    year_to=getattr(spec, "year_to", None),
+                    sort=str(getattr(spec, "sort_by", "relevance") or "relevance"),
+                )
         except Exception as exc:
             print(f"[warn] query {spec.id} failed: {exc}")
             continue
@@ -66,6 +85,7 @@ def main() -> int:
             candidates.append({
                 "query_id": spec.id,
                 "track_id": spec.track_id,
+                "coverage_tier": str(getattr(spec, "coverage_tier", "") or ""),
                 "query_text": spec.query,
                 "paper_id": paper.id,
                 "title": paper.title,
@@ -74,7 +94,7 @@ def main() -> int:
                 "doi": paper.doi or "",
                 "retrieval_rank": rank,
             })
-        print(f"[info] {spec.track_id} {spec.id}: {len(papers)} candidates")
+        print(f"[info] {spec.track_id} {spec.id} ({spec.coverage_tier}): {len(papers)} candidates")
         if index < len(queries) - 1:
             time.sleep(args.delay)
 

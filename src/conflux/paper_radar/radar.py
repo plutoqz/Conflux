@@ -13,16 +13,19 @@ from pathlib import Path
 from typing import Any
 
 from conflux.core.p2_contracts import (
+    DEFAULT_TIER_REFRESH_DAYS,
     EvidenceUtility,
     PaperIdentity,
     PaperLinkStatus,
     PaperSource,
     ProjectPaperLink,
     ProjectResearchConfig,
+    QuerySpec,
     RadarRunResult,
     RadarRunStats,
 )
 from conflux.model_factory import create_embedding_model
+from conflux.paper_ingestion.dedup import deduplicate_papers
 from conflux.paper_ingestion.models import PaperRecord
 from conflux.paper_ingestion.scorer import score_paper
 from conflux.project_registry.models import ProjectDefinition
@@ -48,6 +51,8 @@ def run_paper_radar_from_profile(
     review_chunk_size: int = 8,
     seen_state: dict[str, Any] | None = None,
     persist_seen_file: bool = True,
+    db: Any = None,
+    force_refresh: bool = False,
 ) -> RadarRunResult:
     """Convenience wrapper that loads a profile and runs the radar."""
     profile = load_profile(profile_path, validate=False)
@@ -64,6 +69,8 @@ def run_paper_radar_from_profile(
         review_chunk_size=review_chunk_size,
         seen_state=seen_state,
         persist_seen_file=persist_seen_file,
+        db=db,
+        force_refresh=force_refresh,
     )
 
 
@@ -82,16 +89,27 @@ def run_paper_radar(
     review_chunk_size: int = 8,
     seen_state: dict[str, Any] | None = None,
     persist_seen_file: bool = True,
+    db: Any = None,
+    force_refresh: bool = False,
+    query_specs: list | None = None,
 ) -> RadarRunResult:
     """Run the full P2 paper radar pipeline for a project.
 
     Steps:
     1. Build ProjectResearchContext from project + profile + audit
     2. Generate SearchIntent list
-    3. Resolve QuerySpec list from profile tracks (or fallback)
-    4. Execute queries against paper sources
-    5. De-duplicate, filter, create ProjectPaperLink entries
+    3. Resolve QuerySpec list from profile tracks (or fallback); when
+       ``query_specs`` is provided it is used instead (programmatic
+       callers / tests can customise specs, e.g. skip_ingested=False)
+    4. Execute queries against paper sources (P2.6 layered coverage, with
+       retrieval cursors when ``db`` is provided; low-frequency tiers skip
+       re-retrieval unless ``force_refresh``)
+    5. De-duplicate, filter (incl. global ingested-paper exclusion),
+       create ProjectPaperLink entries
     6. Produce RadarRunResult
+
+    ``db`` (optional SQLiteDatabase) enables: retrieval cursors for
+    milestone/classic tiers and exclusion of already-ingested papers.
     """
     run_id = uuid.uuid4().hex[:12]
     started_at = time.time()
@@ -106,8 +124,34 @@ def run_paper_radar(
     # Step 2: Generate intents
     intents = generate_search_intents(context, llm_review=llm_review, llm_model=review_model)
 
-    # Step 3: Resolve query specs
-    queries = resolve_query_specs_from_profile(profile, config=config, context=context)
+    # Step 3: Resolve query specs (profile feeds classic-tier venue filters);
+    # programmatic callers may inject pre-built specs instead.
+    queries = query_specs if query_specs is not None else resolve_query_specs_from_profile(
+        profile, config=config, context=context,
+    )
+
+    # P2.6: drop specs whose tier is not due for refresh (retrieval cursors).
+    cursor_store = None
+    if db is not None:
+        from conflux.adapters.sqlite_store import RetrievalCursorStore
+
+        cursor_store = RetrievalCursorStore(db)
+        kept: list = []
+        for spec in queries:
+            tier = str(getattr(spec, "coverage_tier", "") or "hot")
+            refresh_days = int((config.tier_refresh_days or {}).get(tier, 0))
+            if cursor_store.should_refresh(
+                profile.id,
+                str(spec.track_id or ""),
+                tier,
+                refresh_days,
+                force=force_refresh,
+            ):
+                kept.append(spec)
+        skipped_tiers = len(queries) - len(kept)
+        queries = kept
+    else:
+        skipped_tiers = 0
 
     # Stats are created up-front so query execution and deep analysis can
     # record telemetry (query-level results, LLM calls, tokens).
@@ -116,12 +160,55 @@ def run_paper_radar(
         run_id=run_id,
         started_at=__import__("datetime").datetime.utcnow(),
     )
+    stats.query_count = len(queries)
+    stats.skipped_cursor_tiers = skipped_tiers
 
-    # Step 4: Execute queries against sources
-    all_papers, failed_sources = _execute_queries(queries, stats=stats)
+    # Step 4: Execute queries against sources.
+    all_papers, failed_sources, exempt_ids = _execute_queries(queries, stats=stats, db=db)
 
-    # Step 5: De-duplicate and filter
+    # P2.6 citation seeds: expand from known papers when enabled.
+    citation_seed_added = 0
+    no_citation_seeds = False
+    if config.citation_seed_enabled and db is not None:
+        from conflux.paper_radar.seed_expander import collect_citation_seeds
+
+        seed_papers = collect_citation_seeds(
+            db,
+            profile=profile,
+            config=config,
+            seen_keys=_seen_keys(seen_state or {}),
+        )
+        if seed_papers is None:
+            no_citation_seeds = True
+        else:
+            all_papers.extend(seed_papers)
+            citation_seed_added = len(seed_papers)
+    stats.citation_seed_added = citation_seed_added
+    stats.no_citation_seeds = no_citation_seeds
+
+    # Step 5: De-duplicate (incl. cross-source arxiv_id ↔ S2 merges) and
+    # filter.
     unique_papers = _deduplicate_papers(all_papers)
+
+    # P2.6: exclude globally-ingested papers (cross-profile).  Runs on the
+    # canonical pool (after cross-source normalization, so an S2 record with
+    # an arXiv external id matches 'arxiv:<id>'), honoring per-spec
+    # skip_ingested: a paper brought in by at least one skip_ingested=False
+    # spec is kept.  Telemetry counts unique excluded papers.
+    if db is not None:
+        from conflux.adapters.sqlite_store import list_ingested_paper_keys
+
+        ingested_keys = list_ingested_paper_keys(db)
+        exempt = exempt_ids
+        if ingested_keys:
+            before = len(unique_papers)
+            unique_papers = [
+                paper for paper in unique_papers
+                if paper.id in exempt
+                or _paper_record_key(paper) not in ingested_keys
+            ]
+            stats.excluded_ingested = before - len(unique_papers)
+
     filtered_papers = _apply_negative_filters(unique_papers, profile)
     # Embedding coarse rank (planned P2 stage). No silent lexical fallback:
     # an unavailable embedding model fails the run so it can be reported.
@@ -266,6 +353,10 @@ def run_paper_radar(
     stats.finished_at = __import__("datetime").datetime.utcnow()
     stats.elapsed_seconds = elapsed
 
+    # P2.6: persist retrieval cursors for the tiers actually executed.
+    if cursor_store is not None:
+        _record_cursors(cursor_store, profile.id, queries, run_id, stats.query_stats)
+
     return RadarRunResult(
         project_id=project.id,
         context=context,
@@ -279,6 +370,16 @@ def run_paper_radar(
 
 def _parse_config(raw: dict[str, Any], profile: ResearchProfile) -> ProjectResearchConfig:
     """Parse project YAML 'research' section into a ProjectResearchConfig, with defaults."""
+    raw_tiers = raw.get("coverage_tiers")
+    tiers = None
+    if isinstance(raw_tiers, list):
+        valid = {"frontier", "hot", "milestone", "classic"}
+        tiers = [t for t in raw_tiers if t in valid] or None
+    raw_refresh = raw.get("tier_refresh_days") or {}
+    refresh_days = {
+        tier: int(raw_refresh.get(tier, DEFAULT_TIER_REFRESH_DAYS.get(tier, 0)))
+        for tier in ("frontier", "hot", "milestone", "classic")
+    }
     return ProjectResearchConfig(
         profile=raw.get("profile", f"profiles/{profile.id}.yaml"),
         sources=_parse_sources(raw.get("sources", ["arxiv", "semantic_scholar"])),
@@ -290,6 +391,15 @@ def _parse_config(raw: dict[str, Any], profile: ResearchProfile) -> ProjectResea
         require_query_review=bool(raw.get("require_query_review", True)),
         require_plan_writeback_approval=bool(raw.get("require_plan_writeback_approval", True)),
         track_overrides=list(raw.get("track_overrides") or []),
+        coverage_tiers=tiers,
+        classic_min_citations=int(raw.get("classic_min_citations", 100)),
+        classic_years=int(raw.get("classic_years", 20)),
+        milestone_years=int(raw.get("milestone_years", 10)),
+        tier_refresh_days=refresh_days,
+        citation_seed_enabled=bool(raw.get("citation_seed_enabled", True)),
+        citation_seed_hop=int(raw.get("citation_seed_hop", 2)),
+        citation_seed_per_paper=int(raw.get("citation_seed_per_paper", 20)),
+        citation_seed_budget=int(raw.get("citation_seed_budget", 100)),
     )
 
 
@@ -312,12 +422,19 @@ def _parse_sources(raw: list[str] | str | None) -> list[PaperSource]:
 def _execute_queries(
     queries: list,
     stats: RadarRunStats | None = None,
+    db: Any = None,
 ) -> tuple[list[PaperRecord], list[str]]:
     """Execute QuerySpec objects against their paper sources.
 
     Returns (all_papers, failed_sources).
     Falls back gracefully when a source is unavailable.  When ``stats`` is
     provided, per-query results are recorded for query-level reporting.
+    P2.6: each QuerySpec carries tier/year/sort/offset so the sources can
+    serve layered coverage (frontier/hot via arXiv, milestone/classic via S2).
+    After retrieval, spec-level filters are applied: classic venue +
+    citation floor, and ingested-paper exclusion when ``db`` is provided and
+    the spec's ``skip_ingested`` is set (default on).  The counted/kept
+    papers are what enter the tier pool.
     """
     import logging
 
@@ -328,6 +445,12 @@ def _execute_queries(
     all_papers: list[PaperRecord] = []
     failed: set[str] = set()
     per_query: list[dict[str, Any]] = []
+    exempt_ids: set[str] = set()  # papers from skip_ingested=False specs
+
+    if db is not None:
+        from conflux.adapters.sqlite_store import list_ingested_paper_keys
+
+        ingested_keys = list_ingested_paper_keys(db)
 
     for spec in queries:
         query_id = str(spec.id or "")
@@ -335,27 +458,45 @@ def _execute_queries(
             "query_id": query_id,
             "track_id": str(spec.track_id or ""),
             "source": str(spec.source.value if hasattr(spec.source, "value") else spec.source),
+            "coverage_tier": str(getattr(spec, "coverage_tier", "") or ""),
             "candidate_count": 0,
             "failed": False,
         }
         try:
             if spec.source == PaperSource.ARXIV:
+                sort_by = (
+                    "submittedDate"
+                    if getattr(spec, "coverage_tier", "") == "frontier"
+                    else "relevance"
+                )
                 papers = search_arxiv(
                     spec.query,
                     max_results=spec.max_results,
+                    start=int(getattr(spec, "offset", 0) or 0),
                     categories=list(getattr(spec, "categories", None) or []),
+                    sort_by=sort_by,
                 )
             elif spec.source == PaperSource.SEMANTIC_SCHOLAR:
                 papers = search_semantic_scholar(
                     spec.query,
                     max_results=spec.max_results,
+                    offset=int(getattr(spec, "offset", 0) or 0),
+                    year_from=getattr(spec, "year_from", None),
+                    year_to=getattr(spec, "year_to", None),
+                    sort=str(getattr(spec, "sort_by", "relevance") or "relevance"),
                 )
+                papers = _apply_spec_filters(papers, spec)
             else:
                 logger.warning("Unknown source: %s", spec.source)
                 failed.add(str(spec.source.value))
                 entry["failed"] = True
                 per_query.append(entry)
                 continue
+            if db is not None and not getattr(spec, "skip_ingested", True):
+                # Papers from a skip_ingested=False spec are exempt from the
+                # pool-level ingested exclusion.
+                exempt_ids.update(p.id for p in papers)
+            entry["skip_ingested"] = bool(getattr(spec, "skip_ingested", True))
             entry["candidate_count"] = len(papers)
             all_papers.extend(papers)
         except Exception:
@@ -365,13 +506,207 @@ def _execute_queries(
 
     if stats is not None:
         stats.query_stats = per_query
-    return all_papers, sorted(failed)
+    return all_papers, sorted(failed), exempt_ids
+
+
+def _paper_record_key(paper: PaperRecord) -> str:
+    """Global paper_key for a PaperRecord, matching sqlite_store._paper_key."""
+    doi = str(paper.doi or "").strip().casefold()
+    if doi:
+        return f"doi:{doi}"
+    source = str(paper.source or "unknown").strip().casefold()
+    canonical_id = str(paper.id or "").strip()
+    if not canonical_id:
+        raise ValueError("paper record requires id")
+    return f"{source}:{canonical_id}"
+
+
+def _ingest_excluded(
+    paper_key: str,
+    ingested_keys: set[str],
+    excluded: set[str],
+) -> bool:
+    """True when ``paper_key`` is ingested and not yet recorded as excluded.
+
+    Records the key into ``excluded`` so telemetry counts unique papers.
+    """
+    if paper_key not in ingested_keys:
+        return False
+    excluded.add(paper_key)
+    return True
 
 
 def _deduplicate_papers(papers: list[PaperRecord]) -> list[PaperRecord]:
-    """De-duplicate paper records by DOI and title."""
-    from conflux.paper_ingestion.dedup import deduplicate_papers
-    return deduplicate_papers(papers)
+    """Total-pool de-duplication, incl. cross-source arxiv_id ↔ S2 merges.
+
+    Cross-source sharing is folded into the record's canonical arxiv key
+    first so both sources land on one key: S2 records carrying an arXiv
+    external id (``metadata["arxiv_id"]``) are rewritten as the arxiv record
+    (version-stripped on both sides), so ``deduplicate_papers`` merges arXiv +
+    S2 copies of the same paper and ingested exclusion matches
+    'arxiv:<id>'.  Introduced in P2.6.2 to keep the layered frontier/hot
+    double-source pool from counting one paper twice.
+    """
+    canonicalized: list[PaperRecord] = []
+    seen_arxiv: set[str] = set()
+    for paper in papers:
+        meta = paper.metadata or {}
+        arxiv_id = str(meta.get("arxiv_id") or "").strip()
+        existing_key = _paper_record_key(paper)
+        if existing_key.startswith("arxiv:"):
+            # arXiv record: strip the version for canonical arxiv id.
+            bare = _strip_arxiv_version(str(paper.id or ""))
+            if bare not in seen_arxiv:
+                seen_arxiv.add(bare)
+                canonicalized.append(_as_arxiv(paper, bare))
+            continue
+        if arxiv_id:
+            bare = _strip_arxiv_version(arxiv_id)
+            if bare not in seen_arxiv:
+                seen_arxiv.add(bare)
+                canonicalized.append(_as_arxiv(paper, bare))
+            continue
+        canonicalized.append(paper)
+    return deduplicate_papers(canonicalized)
+
+
+def _strip_arxiv_version(arxiv_id: str) -> str:
+    """'2401.00010v1' -> '2401.00010' (also handles URLs/'.pdf')."""
+    text = str(arxiv_id or "").strip()
+    if "/abs/" in text:
+        text = text.rsplit("/abs/", 1)[1]
+    if "/pdf/" in text:
+        text = text.rsplit("/pdf/", 1)[1]
+    if text.endswith(".pdf"):
+        text = text[:-4]
+    if "v" in text:
+        head, tail = text.rsplit("v", 1)
+        if tail.isdigit():
+            return head
+    return text
+
+
+def _as_arxiv(paper: PaperRecord, arxiv_id: str) -> PaperRecord:
+    """Rewrite a paper record to the arXiv identity (source='arxiv')."""
+    return PaperRecord(
+        id=arxiv_id,
+        title=paper.title,
+        abstract=paper.abstract,
+        authors=paper.authors,
+        published_at=paper.published_at,
+        source="arxiv",
+        url=paper.url,
+        pdf_url=paper.pdf_url,
+        doi=paper.doi,
+        venue=paper.venue,
+        categories=paper.categories,
+        matched_queries=paper.matched_queries,
+        metadata=dict(paper.metadata or {}),
+    )
+
+
+def _apply_spec_filters(papers: list[PaperRecord], spec: QuerySpec) -> list[PaperRecord]:
+    """Apply per-spec post-retrieval filters (venue, citation floor).
+
+    Venue matching handles year-qualified venue names (e.g. "SIGSPATIAL
+    2015") via token overlap with the target name; the citation floor is
+    read from ``metadata["citation_count"]``.  Filtered (non-classic, or
+    classic that fails the floor) papers are excluded from the tier pool.
+    """
+    if not spec.venue_filters and not spec.min_citations:
+        return papers
+    if not spec.venue_filters:
+        return [
+            p for p in papers
+            if _citation_count(p) >= int(spec.min_citations)
+        ]
+    if not spec.min_citations:
+        return [
+            p for p in papers
+            if _venue_matches_any(p, spec.venue_filters)
+        ]
+    return [
+        p for p in papers
+        if _venue_matches_any(p, spec.venue_filters)
+        and _citation_count(p) >= int(spec.min_citations)
+    ]
+
+
+def _citation_count(paper: PaperRecord) -> int:
+    meta = paper.metadata or {}
+    try:
+        return int(meta.get("citation_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _venue_matches_any(paper: PaperRecord, targets: list[str]) -> bool:
+    """Token-overlap match of a paper venue against target venue names.
+
+    ``venue_filters`` come from ``profile.target_venues`` (potentially
+    year-qualified like "SIGSPATIAL 2015"), while S2 ``publicationVenue`` may
+    be the bare conference name — match on shared meaningful tokens (len>=4,
+    not all-digits) to avoid dropping valid classic-layer results.
+    """
+    venue = str(paper.venue or "").strip()
+    if not venue:
+        return False
+    venue_tokens = {
+        t for t in _tokens(venue)
+        if len(t) >= 4 and not t.isdigit()
+    }
+    if not venue_tokens:
+        return False
+    for target in targets:
+        target_tokens = {
+            t for t in _tokens(str(target))
+            if len(t) >= 4 and not t.isdigit()
+        }
+        if target_tokens and target_tokens <= venue_tokens:
+            return True
+    return False
+
+
+def _tokens(text: str) -> list[str]:
+    import re
+    return re.findall(r"[a-z0-9]+", str(text).casefold())
+
+
+def _seen_keys(seen_state: dict[str, Any] | None) -> set[str]:
+    """Project seen-state keys (stable rejects) used to skip seed expansion."""
+    return {str(key) for key in (seen_state or {}).keys() if str(key).strip()}
+
+
+def _record_cursors(
+    cursor_store: Any,
+    profile_id: str,
+    queries: list,
+    run_id: str,
+    per_query: list[dict[str, Any]] | None,
+) -> None:
+    """Persist retrieval cursors for executed specs after a successful run.
+
+    Failed queries (candidate_count == 0 with failed=True) do NOT advance the
+    cursor, so a transient source outage does not mark a tier as 'retrieved'.
+    """
+    if cursor_store is None:
+        return
+    per_query = per_query or []
+    by_query_id = {str(item.get("query_id") or ""): item for item in per_query}
+    for spec in queries:
+        tier = str(getattr(spec, "coverage_tier", "") or "hot")
+        entry = by_query_id.get(str(spec.id or "")) or {}
+        if entry.get("failed"):
+            continue
+        cursor_store.upsert(
+            profile_id,
+            str(spec.track_id or ""),
+            tier,
+            run_id=run_id,
+            year_from=getattr(spec, "year_from", None),
+            year_to=getattr(spec, "year_to", None),
+            candidate_count=int(entry.get("candidate_count") or 0),
+        )
 
 
 def _apply_negative_filters(papers: list[PaperRecord], profile: ResearchProfile) -> list[PaperRecord]:

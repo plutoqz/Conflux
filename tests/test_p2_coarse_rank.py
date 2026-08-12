@@ -111,9 +111,10 @@ def test_radar_run_fails_when_embedding_unavailable(monkeypatch):
     monkeypatch.setattr("conflux.paper_radar.radar.create_embedding_model", boom)
     monkeypatch.setattr(
         "conflux.paper_radar.radar._execute_queries",
-        lambda queries, stats=None: (
+        lambda queries, stats=None, db=None: (
             [PaperRecord(id="2401.00001", title="GIS agent paper", abstract="verification", source="arxiv")],
             [],
+            set(),
         ),
     )
     proj = ProjectDefinition(id="test", name="Test", path=".")

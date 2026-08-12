@@ -21,6 +21,37 @@ from conflux.research_profile.models import ResearchProfile
 
 DENSE_WEIGHT = 0.7
 LEXICAL_WEIGHT = 0.3
+# P2.6 down-sampling signals: citation and venue boosts lift milestone/classic
+# papers in the coarse rank without LLM cost, so the bounded review pool can
+# include high-impact papers outside the recent window.
+CITATION_BOOST_WEIGHT = 0.25
+VENUE_BOOST_WEIGHT = 0.15
+
+
+def _citation_boost(paper: PaperRecord) -> float:
+    """Bucketed citation-count boost: 0/1-10/11-50/51-200/200+ -> 0/0.1/0.2/0.35/0.5."""
+    meta = paper.metadata or {}
+    try:
+        count = int(meta.get("citation_count") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if count <= 0:
+        return 0.0
+    if count <= 10:
+        return 0.1
+    if count <= 50:
+        return 0.2
+    if count <= 200:
+        return 0.35
+    return 0.5
+
+
+def _venue_boost(paper: PaperRecord, profile: ResearchProfile) -> float:
+    venue = str(paper.venue or "").strip().casefold()
+    if not venue:
+        return 0.0
+    targets = {str(item).casefold() for item in (profile.target_venues or []) if str(item).strip()}
+    return 0.15 if venue in targets else 0.0
 
 
 def _paper_text(paper: PaperRecord) -> str:
@@ -104,8 +135,21 @@ def embedding_coarse_rank(
             default=0.0,
         )
         lexical = score_paper(paper, profile).score
-        combined = round(DENSE_WEIGHT * dense + LEXICAL_WEIGHT * lexical, 4)
-        ranked.append((paper, combined, {"dense": dense, "lexical": lexical}))
+        citation_boost = _citation_boost(paper)
+        venue_boost = _venue_boost(paper, profile)
+        combined = round(
+            DENSE_WEIGHT * dense
+            + LEXICAL_WEIGHT * lexical
+            + CITATION_BOOST_WEIGHT * citation_boost
+            + VENUE_BOOST_WEIGHT * venue_boost,
+            4,
+        )
+        ranked.append((paper, combined, {
+            "dense": dense,
+            "lexical": lexical,
+            "citation_boost": citation_boost,
+            "venue_boost": venue_boost,
+        }))
 
     ranked.sort(key=lambda item: item[1], reverse=True)
     return ranked

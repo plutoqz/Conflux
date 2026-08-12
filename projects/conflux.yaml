@@ -118,3 +118,23 @@ research:
   auto_generate_queries: true
   require_query_review: true
   require_plan_writeback_approval: true
+  # P2.6 分层覆盖：frontier 1年 / hot 3年 / milestone 10年 / classic 20年
+  coverage_tiers:
+  - frontier
+  - hot
+  - milestone
+  - classic
+  classic_min_citations: 100
+  classic_years: 20
+  milestone_years: 10
+  # 低频层（milestone/classic）默认 30 天重检索一次，避免经典论文每次运行全量重查
+  tier_refresh_days:
+    frontier: 0
+    hot: 0
+    milestone: 30
+    classic: 30
+  # 引用种子：从已入库论文扩展引用/被引 1-2 跳，覆盖无查询词可达的领域骨架论文
+  citation_seed_enabled: true
+  citation_seed_hop: 2
+  citation_seed_per_paper: 20
+  citation_seed_budget: 100

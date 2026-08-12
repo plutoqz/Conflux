@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from conflux.adapters.evidence_ledger_store import EvidenceLedgerRepository, persist_final_state
-from conflux.adapters.sqlite_store import SQLiteDatabase
+from conflux.adapters.sqlite_store import SQLiteDatabase, SCHEMA_MIGRATIONS
 from conflux.research_protocol import ClaimRecord, EvidenceRecord, LedgerSnapshot
 
 
@@ -64,7 +64,7 @@ def _repository(tmp_path: Path) -> tuple[SQLiteDatabase, EvidenceLedgerRepositor
 def test_migration_and_run_round_trip_are_idempotent(tmp_path: Path) -> None:
     db, repository = _repository(tmp_path)
     try:
-        assert db.schema_version() == 5
+        assert db.schema_version() == len(SCHEMA_MIGRATIONS)
         result = repository.persist_run(
             _snapshot("run-1", content_hash="hash-v1"),
             [_claim("run-1")],

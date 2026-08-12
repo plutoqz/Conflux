@@ -17,6 +17,23 @@ ARXIV_API_URL = "https://export.arxiv.org/api/query"
 ATOM = "{http://www.w3.org/2005/Atom}"
 ARXIV = "{http://arxiv.org/schemas/atom}"
 
+# arXiv API asks for no more than 1 request every 3 seconds; layered
+# retrieval issues many queries back-to-back, so enforce the interval and
+# bound HTTP 429 retries (rate-limited requests return [] instead of hanging).
+_MIN_REQUEST_INTERVAL_S = 3.0
+_last_request_time: float = 0.0
+
+
+def _rate_limit() -> None:
+    global _last_request_time
+    import time
+
+    now = time.time()
+    wait = _MIN_REQUEST_INTERVAL_S - (now - _last_request_time)
+    if wait > 0:
+        time.sleep(wait)
+    _last_request_time = time.time()
+
 
 def build_arxiv_query(
     keywords: list[str],
@@ -114,11 +131,17 @@ def search_arxiv(
     max_results: int = 10,
     start: int = 0,
     categories: list[str] | None = None,
+    sort_by: str = "submittedDate",
+    _retries: int = 2,
 ) -> list[PaperRecord]:
     """Run a real arXiv API search. This is intentionally not used by offline tests.
 
     ``categories`` constrains results with ``cat:`` terms (e.g. cs.AI, cs.CV)
     to cut cross-domain noise from broad profile queries.
+
+    ``sort_by`` supports the arXiv API sort fields: ``submittedDate``,
+    ``lastUpdatedDate``, or ``relevance``.  arXiv has no citation count, so
+    milestone/classic tiers are served by Semantic Scholar only (P2.6).
     """
 
     search_query = query
@@ -129,11 +152,29 @@ def search_arxiv(
         "search_query": search_query,
         "start": max(0, start),
         "max_results": max_results,
-        "sortBy": "submittedDate",
+        "sortBy": sort_by,
         "sortOrder": "descending",
     })
-    with urllib.request.urlopen(f"{ARXIV_API_URL}?{params}", timeout=30) as response:
-        feed = response.read()
+    _rate_limit()
+    try:
+        with urllib.request.urlopen(f"{ARXIV_API_URL}?{params}", timeout=30) as response:
+            feed = response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429 and _retries > 0:
+            import time
+
+            time.sleep(5)
+            return search_arxiv(
+                query,
+                max_results=max_results,
+                start=start,
+                categories=categories,
+                sort_by=sort_by,
+                _retries=_retries - 1,
+            )
+        return []
+    except Exception:
+        return []
     return parse_arxiv_feed(feed, matched_query=query)
 
 

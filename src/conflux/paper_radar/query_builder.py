@@ -13,13 +13,15 @@ from typing import Any
 
 from conflux.core.p2_contracts import (
     PaperSource,
-    ProjectResearchContext,
     ProjectResearchConfig,
+    ProjectResearchContext,
     QuerySpec,
     Track,
     TrackQuery,
 )
 from conflux.research_profile.models import ResearchProfile
+
+from .tier_expander import expand_tier_specs
 
 
 def resolve_query_specs_from_profile(
@@ -31,55 +33,41 @@ def resolve_query_specs_from_profile(
     tracks = profile.get_tracks()
     if not tracks:
         return _fallback_query_specs(profile, config, context)
-    return resolve_query_specs(tracks, config=config, context=context)
+    return resolve_query_specs(tracks, config=config, context=context, profile=profile)
 
 
 def resolve_query_specs(
     tracks: list[Track],
     config: ProjectResearchConfig | None = None,
     context: ProjectResearchContext | None = None,
+    profile: Any = None,
 ) -> list[QuerySpec]:
     """Expand a list of Tracks into executable QuerySpec objects.
 
-    Each TrackQuery in a Track becomes one QuerySpec per enabled source.
+    Each TrackQuery in a Track becomes one QuerySpec per coverage tier and
+    per enabled source (P2.6 layered coverage).  When ``config`` is None a
+    default ProjectResearchConfig (arXiv + Semantic Scholar, four tiers) is
+    used.  ``profile`` (optional) supplies target venues for the classic
+    tier's venue filters.
     """
-    sources: list[PaperSource] = (
-        config.sources if config
-        else [PaperSource.ARXIV, PaperSource.SEMANTIC_SCHOLAR]
+    effective_config = config or ProjectResearchConfig(
+        profile="",
+        sources=[PaperSource.ARXIV, PaperSource.SEMANTIC_SCHOLAR],
     )
-    max_results = config.max_candidates if config else 100
-
     profile_version = context.profile_version if context else ""
     context_version = context.project_revision if context else ""
 
     specs: list[QuerySpec] = []
-
     for track in tracks:
-        track_budget = max(1, int(max_results * track.budget_ratio))
-        query_count = max(1, len(track.queries))
-        per_query_max = max(1, track_budget // query_count)
-
         for tq in track.queries:
-            final_query = tq.terms
-            if tq.suffix:
-                final_query = f"({tq.terms}) AND ({tq.suffix})"
-
-            for source in sources:
-                spec = QuerySpec(
-                    id=_spec_id(source.value, final_query),
-                    track_id=track.id,
-                    source=source,
-                    query=final_query,
-                    categories=tq.categories,
-                    date_window_days=tq.date_window_days,
-                    max_results=min(per_query_max, 50),
-                    priority=tq.priority,
-                    provenance="track_manual",
-                    profile_version=profile_version,
-                    context_version=context_version,
-                )
-                specs.append(spec)
-
+            specs.extend(expand_tier_specs(
+                track,
+                tq,
+                effective_config,
+                profile_version=profile_version,
+                context_version=context_version,
+                profile=profile,
+            ))
     return specs
 
 

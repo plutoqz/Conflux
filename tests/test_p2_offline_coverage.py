@@ -28,10 +28,11 @@ def _spec(source: PaperSource, query: str, max_results: int = 5) -> QuerySpec:
 
 class TestSourceResilience:
     def test_source_failure_marks_failed_and_other_source_completes(self, monkeypatch):
-        def boom(query, *, max_results=10, start=0, categories=None):
+        def boom(query, *, max_results=10, start=0, categories=None, sort_by="submittedDate"):
             raise RuntimeError("arxiv down")
 
-        def ok(query, *, max_results=10, offset=0, categories=None):
+        def ok(query, *, max_results=10, offset=0, categories=None, year_from=None,
+               year_to=None, sort="relevance"):
             return [PaperRecord(id="s2-1", title="T", abstract="A", source="semantic_scholar")]
 
         monkeypatch.setattr("conflux.paper_ingestion.arxiv_source.search_arxiv", boom)
@@ -39,7 +40,7 @@ class TestSourceResilience:
             "conflux.paper_ingestion.semantic_scholar_source.search_semantic_scholar", ok
         )
         stats = RadarRunStats(project_id="test", run_id="r")
-        papers, failed = _execute_queries([
+        papers, failed, _ = _execute_queries([
             _spec(PaperSource.ARXIV, "gis agent"),
             _spec(PaperSource.SEMANTIC_SCHOLAR, "gis agent"),
         ], stats=stats)
@@ -50,10 +51,11 @@ class TestSourceResilience:
         assert stats.query_stats[1]["candidate_count"] == 1
 
     def test_multi_source_queries_merge_results(self, monkeypatch):
-        def arxiv(query, *, max_results=10, start=0, categories=None):
+        def arxiv(query, *, max_results=10, start=0, categories=None, sort_by="submittedDate"):
             return [PaperRecord(id="a-1", title="A", abstract="a", source="arxiv")]
 
-        def s2(query, *, max_results=10, offset=0, categories=None):
+        def s2(query, *, max_results=10, offset=0, categories=None, year_from=None,
+               year_to=None, sort="relevance"):
             return [PaperRecord(id="b-1", title="B", abstract="b", source="semantic_scholar")]
 
         monkeypatch.setattr("conflux.paper_ingestion.arxiv_source.search_arxiv", arxiv)
@@ -61,7 +63,7 @@ class TestSourceResilience:
             "conflux.paper_ingestion.semantic_scholar_source.search_semantic_scholar", s2
         )
         stats = RadarRunStats(project_id="test", run_id="r")
-        papers, failed = _execute_queries([
+        papers, failed, _ = _execute_queries([
             _spec(PaperSource.ARXIV, "q1"),
             _spec(PaperSource.ARXIV, "q2"),
             _spec(PaperSource.SEMANTIC_SCHOLAR, "q1"),
@@ -148,12 +150,12 @@ class TestNoAutoPromotion:
         from conflux.project_registry.models import ProjectDefinition
         from conflux.research_profile import load_profile
 
-        def mock_execute(queries, stats=None):
+        def mock_execute(queries, stats=None, db=None):
             return [PaperRecord(
                 id="2401.00001", title="Test GIS Paper",
                 abstract="A test paper about GIS agents.",
                 source="arxiv", doi="10.1234/test",
-            )], []
+            )], [], set()
 
         monkeypatch.setattr("conflux.paper_radar.radar._execute_queries", mock_execute)
         proj = ProjectDefinition(id="test", name="Test", path=".")
