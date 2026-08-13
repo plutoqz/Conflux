@@ -616,6 +616,16 @@ def _budget_update(budget_state: BudgetState) -> dict[str, Any]:
     return {"_budget_state": budget_state.to_dict()}
 
 
+def memory_banner(state: dict[str, Any]) -> str:
+    """P4.0 A：运行开始时由入口（recall_for_query）准备好的用户记忆前缀。
+
+    放在系统提示词之前（稳定前缀位置）；空串时不改变任何既有提示词行为。
+    """
+
+    banner = state.get("_memory_banner")
+    return str(banner) if banner else ""
+
+
 def _budgeted_model_invoke(
     model: Any,
     messages: list[Any],
@@ -647,12 +657,15 @@ def _invoke_json(
     status: str = "",
     budget_state: BudgetState | None = None,
     role: str = "model",
+    state: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    # P4.0 A：用户记忆前缀（稳定前缀位置）；state 为 None 的既有调用方零变化。
+    banner = memory_banner(state) if state is not None else ""
     try:
         response = _budgeted_model_invoke(
             model,
             [
-                SystemMessage(content=system + status),
+                SystemMessage(content=banner + system + status),
                 HumanMessage(content=prompt),
             ],
             budget_state,
@@ -679,12 +692,14 @@ def _invoke_text(
     status: str = "",
     budget_state: BudgetState | None = None,
     role: str = "model",
+    state: dict[str, Any] | None = None,
 ) -> str:
+    banner = memory_banner(state) if state is not None else ""
     try:
         response = _budgeted_model_invoke(
             model,
             [
-                SystemMessage(content=system + status),
+                SystemMessage(content=banner + system + status),
                 HumanMessage(content=prompt),
             ],
             budget_state,
@@ -711,6 +726,7 @@ def _run_independent_analysis(
         status=status_bar(state, model),
         budget_state=budget_state,
         role="independent_analysis",
+        state=state,
     )
     return payload if isinstance(payload, dict) else {}
 
@@ -955,6 +971,7 @@ def _verification_payload(
     state: dict[str, Any],
     model: Any,
     budget_state: BudgetState | None = None,
+    panel: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if model is None or not _model_available(state, minimum=15.0):
         return {}
@@ -981,6 +998,29 @@ def _verification_payload(
     ):
         budget_state.add_drop("verification_pairs_dropped")
         return {}
+
+    # P4-B 评审团路径：panel 成员并行单轮评审 + 确定性分歧规则 + 裁判叙事。
+    # quick 档不传 panel → 走原单 verifier 路径（零回归）。
+    if panel:
+        from .panel import run_panel
+
+        review = run_panel(
+            [(str(label), member) for label, member in (panel.get("members") or [])],
+            input_snapshot={
+                "claims": claims,
+                "ledger_snapshot": state.get("_ledger_snapshot") or {},
+            },
+            referee=panel.get("referee"),
+            budget_state=budget_state,
+        )
+        payload = dict(review.result or {})
+        if payload:
+            payload["panel"] = {
+                "members": review.members,
+                "referee": review.referee,
+            }
+        return payload
+
     prompt = VERIFICATION_PROMPT.format(
         claims_json=json.dumps(claims, ensure_ascii=False),
         snapshot_json=json.dumps(state.get("_ledger_snapshot") or {}, ensure_ascii=False),
@@ -996,9 +1036,15 @@ def _verification_payload(
     return payload if isinstance(payload, dict) else {}
 
 
-def verification_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
+def verification_node(
+    state: dict[str, Any],
+    model: Any,
+    panel: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     budget_state = _budget_state_for(state)
-    payload = _verification_payload(state, model, budget_state)
+    payload = _verification_payload(state, model, budget_state, panel=panel)
+    panel_meta = payload.get("panel") or {}
+    dissent = list(payload.get("dissent") or [])
     ledger = EvidenceLedger.from_dict(state.get("_evidence_ledger") or {})
     snapshot = LedgerSnapshot.from_dict(state.get("_ledger_snapshot") or {})
     snapshot_id = snapshot.snapshot_id
@@ -1045,6 +1091,8 @@ def verification_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
                 "verifier_version": "model-v1",
                 "evidence_ids": model_ids,
             }
+            # P3 确定性优先约束（panel 版本断言同样适用）：任何模型（含评审团
+            # 成员/裁判）的 supports 都不能推翻确定性的 insufficient/uncertain。
             if deterministic["verdict"] in {"insufficient", "uncertain"} and model_verdict == "supports":
                 result = {
                     **deterministic,
@@ -1053,6 +1101,25 @@ def verification_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
                 }
         else:
             result = {**deterministic, "evidence_ids": list(record.evidence_ids)}
+
+        if panel_meta or item.get("panel_votes"):
+            claim_dissent = [
+                entry for entry in dissent
+                if any(
+                    str(entry.get("claim_ref") or "").endswith(suffix)
+                    for suffix in (record.claim_id, record.text)
+                    if suffix
+                )
+            ]
+            result = {
+                **result,
+                # B4.3：panel sidecar 进 JudgmentRecord payload，异议可追溯。
+                "panel": {
+                    "members": item.get("panel_votes") or [],
+                    "dissent": claim_dissent,
+                    "referee": panel_meta.get("referee"),
+                },
+            }
 
         record.verification_result = result
         judgments.append(result)
@@ -1442,6 +1509,7 @@ def decompose_node(state: dict[str, Any], model: Any, profile: ResearchModeProfi
         status=status,
         budget_state=budget_state,
         role="decompose",
+        state=state,
     )
 
     core_question = str(payload.get("core_question") or "").strip() or query
@@ -2854,6 +2922,7 @@ def synthesize_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
                 status=status_bar(state, model),
                 budget_state=budget_state,
                 role="claim_synthesis",
+                state=state,
             )
         by_id = {record.claim_id: record for record in claim_records}
         direct_payload = selected.get("direct_answer")
@@ -2997,6 +3066,7 @@ def synthesize_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
                 status=status_bar(state, model),
                 budget_state=budget_state,
                 role="synthesis_fallback",
+                state=state,
             )
             except Exception:
                 pass
@@ -3059,6 +3129,7 @@ def synthesize_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
                 status=status_bar(state, model),
                 budget_state=budget_state,
                 role="global_synthesis",
+                state=state,
             )
             direct_answer = str(payload.get("direct_answer") or "").strip()
             cross_synthesis = str(payload.get("cross_synthesis") or "").strip()
@@ -3739,6 +3810,9 @@ def create_v2_research_graph(
     round0_independent_model = None if profile.depth == "quick" else independent_model
     arbitration_model = kwargs.get("arbitration_model")
     verifier_model = kwargs.get("verifier_model")
+    # P4-B：panel_models = {"verification": {"members": [...], "referee": ...}, ...}；
+    # 未启用/quick 档为 None/空 → verification 走原单模型路径。
+    verification_panel = (kwargs.get("panel_models") or {}).get("verification")
     run_id = kwargs.get("run_id")
     baseline_variant = _normalize_baseline_variant(kwargs.get("baseline_variant"))
     replay_parallelism = kwargs.get("max_parallel_subquestions")
@@ -3799,7 +3873,10 @@ def create_v2_research_graph(
             max_parallel_subquestions=replay_parallelism,
         ),
     )
-    graph.add_node("verification", lambda s: verification_node(s, verifier_model))
+    graph.add_node(
+        "verification",
+        lambda s: verification_node(s, verifier_model, panel=verification_panel),
+    )
     graph.add_node("attribution_audit", attribution_audit_node)
     graph.add_node("synthesize", lambda s: synthesize_node(s, synthesizer_model))
     graph.add_node("audit", lambda s: audit_node(s, synthesizer_model))

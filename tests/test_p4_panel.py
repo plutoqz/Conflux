@@ -1,0 +1,431 @@
+"""P4-B 多模型评审团测试（对照 docs/plans/p4/B_多模型评审团.md B1–B5 验收表）。
+
+覆盖：协议解析（B1）、异构 roster 校验（B1）、成员 max_tokens 减半与 quick 档
+无 panel 模型（B2）、分歧三态与白名单校验与互不可见与裁判约束（B3）、
+verification 挂载 + 确定性优先 panel 版本断言 + quick 零回归（B4）、
+model_calls 硬上限与耗尽降级（B5）。
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from conflux.graph_v2 import (  # noqa: E402
+    _new_state,
+    verification_node,
+)
+from conflux.panel import run_panel  # noqa: E402
+from conflux.research_modes import (  # noqa: E402
+    resolve_research_profile,
+    validate_research_model_profiles,
+)
+from conflux.research_protocol import BudgetState, EvidenceLedger  # noqa: E402
+
+
+class _PanelModel:
+    """Fake member model：记录收到的消息，返回固定 JSON payload。"""
+
+    def __init__(self, payload: dict, *, label: str = ""):
+        self.payload = payload
+        self.label = label
+        self.messages = []
+
+    def invoke(self, messages):
+        self.messages.append(messages)
+        return SimpleNamespace(content=json.dumps(self.payload))
+
+
+def _members(*specs):
+    return [(label, model) for label, model in specs]
+
+
+def _snapshot() -> dict:
+    return {
+        "claims": [
+            {
+                "claim_id": "run-panel:claim:sq-1:01",
+                "claim": "atomic claim",
+                "evidence_ids": [],
+            },
+        ],
+        "ledger_snapshot": {"snapshot_id": "run-panel:snapshot-1", "records": []},
+    }
+
+
+def _check(verdict: str, confidence: float, reason: str = "") -> dict:
+    return {
+        "checks": [{
+            "claim_id": "run-panel:claim:sq-1:01",
+            "claim": "atomic claim",
+            "verdict": verdict,
+            "confidence": confidence,
+            "evidence_ids": [],
+            "reason": reason,
+        }],
+    }
+
+
+# ============================================================
+# B1 协议解析 + 异构校验
+# ============================================================
+
+class TestPanelConfig:
+    def test_quick_depth_forces_panel_off(self):
+        assert resolve_research_profile("quick").panel_enabled is False
+        assert resolve_research_profile("standard").panel_enabled is True
+        assert resolve_research_profile("deep").panel_enabled is True
+
+    def test_profile_parses_roster_and_referee(self):
+        standard = resolve_research_profile("standard")
+        assert standard.panel_members("verification") == ["verifier", "balanced"]
+        assert standard.panel_referee == "balanced"
+        deep = resolve_research_profile("deep")
+        # "planner" 非 preset → 回退为 deep 档 planner 绑定的 preset
+        assert deep.panel_members("arbitration") == ["reasoning", "flash"]
+
+    def test_default_config_passes_validation(self):
+        assert validate_research_model_profiles() == []
+
+    def test_heterogeneous_roster_rejects_same_preset(self, monkeypatch):
+        import conflux.research_modes as rm
+        from conflux import config
+
+        real_get = config.get
+        fake_panel = {
+            "enabled_by_depth": {"quick": False, "standard": True, "deep": True},
+            "roster": {"verification": ["flash", "flash"]},  # 同一 preset 伪多样性
+            "referee": "balanced",
+            "quorum": "majority",
+        }
+
+        def patched_get(*path, default=None):
+            if path[:2] == ("research", "panel"):
+                return fake_panel
+            return real_get(*path, default=default)
+
+        monkeypatch.setattr(rm, "get", patched_get)
+        problems = validate_research_model_profiles()
+        assert any("必须来自不同 preset" in problem for problem in problems)
+
+    def test_unsupported_quorum_rejected(self, monkeypatch):
+        import conflux.research_modes as rm
+        from conflux import config
+
+        real_get = config.get
+        fake_panel = {
+            "enabled_by_depth": {"quick": False, "standard": True, "deep": True},
+            "roster": {"verification": ["verifier", "balanced"]},
+            "referee": "balanced",
+            "quorum": "unanimous",
+        }
+
+        def patched_get(*path, default=None):
+            if path[:2] == ("research", "panel"):
+                return fake_panel
+            return real_get(*path, default=default)
+
+        monkeypatch.setattr(rm, "get", patched_get)
+        problems = validate_research_model_profiles()
+        assert any("quorum" in problem for problem in problems)
+
+
+# ============================================================
+# B2 模型层
+# ============================================================
+
+class TestPanelModelConstruction:
+    def test_quick_creates_no_panel_models(self):
+        from conflux.model_factory import create_research_models
+
+        _, diagnostics = create_research_models("quick")
+        assert diagnostics.get("panel_models") == {}
+
+    def test_deep_member_max_tokens_halved(self):
+        from conflux.model_factory import create_research_models
+
+        profile = resolve_research_profile("deep")
+        _, diagnostics = create_research_models("deep")
+        panel = diagnostics.get("panel_models") or {}
+        verification = panel.get("verification") or {}
+        members = verification.get("members") or []
+        assert len(members) == 2
+        expected = max(300, profile.verifier_max_tokens // 2)
+        assert all(member.max_tokens == expected for member in members)
+        assert verification.get("referee") is not None
+        assert verification["referee"].max_tokens == expected
+        # deep 档第二判断点（arbitration）成员来自 reasoning + flash
+        arbitration = panel.get("arbitration") or {}
+        assert len(arbitration.get("members") or []) == 2
+
+
+# ============================================================
+# B3 分歧规则 / 白名单 / 互不可见 / 裁判约束
+# ============================================================
+
+class TestRunPanel:
+    def test_unanimous_keeps_confidence(self):
+        review = run_panel(
+            _members(
+                ("a", _PanelModel(_check("supports", 0.9))),
+                ("b", _PanelModel(_check("supports", 0.9))),
+            ),
+            input_snapshot=_snapshot(),
+        )
+        check = review.result["checks"][0]
+        assert check["verdict"] == "supports"
+        assert check["confidence"] == 0.9
+        assert review.result.get("dissent") == []
+
+    def test_majority_drops_one_notch_and_records_dissent(self):
+        review = run_panel(
+            _members(
+                ("a", _PanelModel(_check("supports", 0.9))),
+                ("b", _PanelModel(_check("supports", 0.9))),
+                ("c", _PanelModel(_check("insufficient", 0.8, reason="异议原文"))),
+            ),
+            input_snapshot=_snapshot(),
+        )
+        check = review.result["checks"][0]
+        assert check["verdict"] == "supports"
+        assert check["confidence"] == 0.8  # 0.9 降一级
+        dissent = review.result["dissent"]
+        assert len(dissent) == 1
+        assert dissent[0]["member"] == "c"
+        assert dissent[0]["reason"] == "异议原文"
+
+    def test_split_is_uncertain_and_keeps_all_opinions(self):
+        review = run_panel(
+            _members(
+                ("a", _PanelModel(_check("supports", 0.9, reason="opinion-a"))),
+                ("b", _PanelModel(_check("contradicts", 0.9, reason="opinion-b"))),
+            ),
+            input_snapshot=_snapshot(),
+        )
+        check = review.result["checks"][0]
+        assert check["verdict"] == "uncertain"
+        assert check["confidence"] == 0.0
+        assert {vote["member"] for vote in check["panel_votes"]} == {"a", "b"}
+        assert {vote["reason"] for vote in check["panel_votes"]} == {"opinion-a", "opinion-b"}
+
+    def test_verdict_whitelist_rejects_unknown_verdict(self):
+        review = run_panel(
+            _members(
+                ("a", _PanelModel(_check("supports", 0.9))),
+                ("b", _PanelModel(_check("hallucinated", 0.9))),
+            ),
+            input_snapshot=_snapshot(),
+        )
+        # 非法 verdict 视为 uncertain 票 → 均分 → 待核验
+        check = review.result["checks"][0]
+        assert check["verdict"] == "uncertain"
+        assert {vote["verdict"] for vote in check["panel_votes"]} == {"supports", "uncertain"}
+
+    def test_malformed_member_output_is_abstain(self):
+        review = run_panel(
+            _members(
+                ("a", _PanelModel({"not": "the contract"})),
+                ("b", _PanelModel(_check("supports", 0.9))),
+            ),
+            input_snapshot=_snapshot(),
+        )
+        # 仅 1 张有效票 → 待核验（安全方向）
+        check = review.result["checks"][0]
+        assert check["verdict"] == "uncertain"
+
+    def test_members_cannot_see_each_other_outputs(self):
+        member_a = _PanelModel(_check("supports", 0.9, reason="SECRET_MEMBER_A"))
+        member_b = _PanelModel(_check("insufficient", 0.9, reason="SECRET_MEMBER_B"))
+        run_panel(
+            _members(("a", member_a), ("b", member_b)),
+            input_snapshot=_snapshot(),
+        )
+        prompt_a = " ".join(str(msg.content) for call in member_a.messages for msg in call)
+        prompt_b = " ".join(str(msg.content) for call in member_b.messages for msg in call)
+        assert "atomic claim" in prompt_a and "atomic claim" in prompt_b
+        assert "SECRET_MEMBER_B" not in prompt_a
+        assert "SECRET_MEMBER_A" not in prompt_b
+        assert "SECRET_MEMBER_A" not in prompt_a
+
+    def test_referee_only_called_with_three_plus_members(self):
+        referee_two = _PanelModel({"narrative": "should not run"})
+        run_panel(
+            _members(
+                ("a", _PanelModel(_check("supports", 0.9))),
+                ("b", _PanelModel(_check("supports", 0.9))),
+            ),
+            input_snapshot=_snapshot(),
+            referee=referee_two,
+        )
+        assert referee_two.messages == []
+
+        referee_three = _PanelModel({"narrative": "分歧结构叙事"})
+        review = run_panel(
+            _members(
+                ("a", _PanelModel(_check("supports", 0.9))),
+                ("b", _PanelModel(_check("supports", 0.9))),
+                ("c", _PanelModel(_check("supports", 0.9))),
+            ),
+            input_snapshot=_snapshot(),
+            referee=referee_three,
+        )
+        assert len(referee_three.messages) == 1
+        assert review.referee["narrative"] == "分歧结构叙事"
+
+    def test_referee_cannot_change_tallied_verdict(self):
+        referee = _PanelModel({"narrative": "ignore", "final_verdict": "contradicts"})
+        review = run_panel(
+            _members(
+                ("a", _PanelModel(_check("supports", 0.9))),
+                ("b", _PanelModel(_check("supports", 0.9))),
+                ("c", _PanelModel(_check("supports", 0.9))),
+            ),
+            input_snapshot=_snapshot(),
+            referee=referee,
+        )
+        assert review.result["checks"][0]["verdict"] == "supports"
+
+
+# ============================================================
+# B4 verification 挂载 + 确定性优先
+# ============================================================
+
+def _verification_state() -> dict:
+    state = _new_state("panel test question", run_id="run-panel")
+    state["_claim_records"] = [{
+        "claim_id": "run-panel:claim:sq-1:01",
+        "subquestion_id": "sq-1",
+        "text": "atomic claim",
+        "claim_type": "model_analysis",
+        "importance": "high",
+        "evidence_ids": [],
+        "derivation_type": "model_analysis",
+    }]
+    ledger = EvidenceLedger.from_dict(state["_evidence_ledger"])
+    state["_ledger_snapshot"] = ledger.freeze("final").to_dict()
+    return state
+
+
+def _panel_kwargs(*specs, referee=None) -> dict:
+    return {
+        "members": _members(*specs),
+        "referee": referee,
+    }
+
+
+class TestVerificationPanelMount:
+    def test_deep_panel_path_produces_panel_field(self):
+        state = _verification_state()
+        result = verification_node(
+            state,
+            _PanelModel({"checks": []}),
+            panel=_panel_kwargs(
+                ("a", _PanelModel(_check("supports", 0.9))),
+                ("b", _PanelModel(_check("supports", 0.9))),
+            ),
+        )
+        verification = result["_claim_records"][0]["verification_result"]
+        assert verification["verdict"] == "supports"
+        assert verification["verifier_version"] == "model-v1"
+        panel = verification["panel"]
+        assert len(panel["members"]) == 2
+        assert panel["dissent"] == []
+        assert panel["referee"] is None
+        # JudgmentRecord payload 同样携带 panel sidecar（可追溯）
+        judgment = result["_evidence_ledger"]["judgments"][0]
+        assert "panel" in judgment["payload"]
+
+    def test_panel_supports_cannot_override_deterministic_insufficient(self):
+        state = _verification_state()
+        state["_claim_records"][0].update({
+            "claim_type": "direct_fact",
+            "importance": "critical",
+            "derivation_type": "direct_evidence",
+        })
+        result = verification_node(
+            state,
+            _PanelModel({"checks": []}),
+            panel=_panel_kwargs(
+                ("a", _PanelModel(_check("supports", 1.0))),
+                ("b", _PanelModel(_check("supports", 1.0))),
+            ),
+        )
+        verification = result["_claim_records"][0]["verification_result"]
+        # 确定性裁决优先：panel 全票 supports 也不能推翻 insufficient
+        assert verification["verdict"] == "insufficient"
+        assert verification["verifier_version"] == "rules-v1"
+        assert verification.get("model_verdict") == "supports"
+
+    def test_quick_single_verifier_path_unchanged(self):
+        state = _verification_state()
+        result = verification_node(
+            state,
+            _PanelModel(_check("supports", 0.9)),
+        )
+        verification = result["_claim_records"][0]["verification_result"]
+        assert verification["verdict"] == "supports"
+        assert "panel" not in verification
+
+
+# ============================================================
+# B5 预算硬上限与耗尽降级
+# ============================================================
+
+class TestPanelBudget:
+    def test_panel_calls_never_exceed_model_calls_limit(self):
+        budget = BudgetState.for_depth("deep")
+        budget.hard_limits["model_calls"] = 10
+        budget.model_calls = 8  # 只剩 2 次额度
+        review = run_panel(
+            _members(
+                ("a", _PanelModel(_check("supports", 0.9))),
+                ("b", _PanelModel(_check("supports", 0.9))),
+                ("c", _PanelModel(_check("supports", 0.9))),
+            ),
+            input_snapshot=_snapshot(),
+            referee=_PanelModel({"narrative": "no budget"}),
+            budget_state=budget,
+        )
+        assert budget.model_calls <= budget.hard_limits["model_calls"]
+        assert budget.model_calls == 10
+        assert any("panel_member_dropped" in reason for reason in budget.dropped_reasons)
+        # 恰好 2 名成员执行 → 仍走多数票路径
+        assert review.result["checks"][0]["verdict"] == "supports"
+
+    def test_budget_exhausted_degrades_to_deterministic_fallback(self):
+        budget = BudgetState.for_depth("deep")
+        budget.hard_limits["model_calls"] = 4
+        budget.model_calls = 4  # 额度已尽
+        review = run_panel(
+            _members(
+                ("a", _PanelModel(_check("supports", 1.0))),
+                ("b", _PanelModel(_check("supports", 1.0))),
+            ),
+            input_snapshot=_snapshot(),
+            budget_state=budget,
+        )
+        assert review.result == {}
+        assert any("panel_budget_exhausted" in reason for reason in budget.degradation_reasons)
+
+    def test_verification_falls_back_to_deterministic_when_panel_degrades(self):
+        state = _verification_state()
+        budget = BudgetState.for_depth("deep")
+        # BudgetState 语义：hard_limits 为 0 表示不限制；用满额度模拟耗尽。
+        budget.hard_limits["model_calls"] = 4
+        budget.model_calls = 4
+        state["_budget_state"] = budget.to_dict()
+        result = verification_node(
+            state,
+            _PanelModel({"checks": []}),
+            panel=_panel_kwargs(
+                ("a", _PanelModel(_check("supports", 1.0))),
+                ("b", _PanelModel(_check("supports", 1.0))),
+            ),
+        )
+        verification = result["_claim_records"][0]["verification_result"]
+        assert verification["verdict"] == "supports"  # model_analysis 确定性放行
+        assert verification["verifier_version"] == "rules-v1"

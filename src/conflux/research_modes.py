@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 from .config import get
@@ -18,6 +18,20 @@ _DEPTH_ALIASES = {
     "high": "deep",
     "deep": "deep",
 }
+
+# P4-B 评审团：roster 条目先按 models.<entry> 字面 preset 解释；若该 preset 不存在
+# 且条目恰好是研究角色名（如 "planner"），则回退为该角色在当前档位绑定的 preset。
+# 例：arbitration: [planner, flash] 在 deep 档解析为 [reasoning, flash]。
+_PANEL_ROLE_ALIASES = {"planner", "analyst", "reranker", "synthesizer", "verifier"}
+
+
+def _resolve_panel_preset(entry: str, profile: "ResearchModeProfile") -> str:
+    entry = str(entry or "").strip()
+    if not entry:
+        return ""
+    if entry in _PANEL_ROLE_ALIASES and get("models", entry, default=None) is None:
+        return str(getattr(profile, f"{entry}_model"))
+    return entry
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +64,11 @@ class ResearchModeProfile:
     model_timeout_seconds: int
     max_retries: int
     timeout_seconds: int
+    # P4-B 多模型评审团（panel）：quick 档强制关闭；成员按判断点分组，
+    # 同一判断点成员必须来自不同 preset（config 校验防伪多样性）。
+    panel_enabled: bool = False
+    panel_roster: dict[str, list[str]] = field(default_factory=dict)
+    panel_referee: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -115,7 +134,33 @@ class ResearchModeProfile:
             self.reranker_model,
             self.synthesizer_model,
             self.verifier_model,
+            *self.panel_presets,
         )))
+
+    @property
+    def panel_presets(self) -> tuple[str, ...]:
+        """All presets a panel run may touch: members per judgment point + referee."""
+
+        if not self.panel_enabled:
+            return ()
+        presets: list[str] = []
+        for entries in (self.panel_roster or {}).values():
+            for entry in entries:
+                preset = _resolve_panel_preset(entry, self)
+                if preset:
+                    presets.append(preset)
+        if self.panel_referee:
+            presets.append(_resolve_panel_preset(self.panel_referee, self))
+        return tuple(dict.fromkeys(presets))
+
+    def panel_members(self, judgment_point: str) -> list[str]:
+        """Resolved member presets for one judgment point (order-preserving, deduped)."""
+
+        entries = (self.panel_roster or {}).get(judgment_point) or []
+        return list(dict.fromkeys(
+            preset for entry in entries
+            if (preset := _resolve_panel_preset(entry, self))
+        ))
 
     @property
     def role_max_tokens(self) -> dict[str, int]:
@@ -230,6 +275,15 @@ def resolve_research_profile(depth: str | None = None) -> ResearchModeProfile:
     configured = get("research", "profiles", resolved_depth, default={}) or {}
     if isinstance(configured, dict):
         payload.update({key: value for key, value in configured.items() if value is not None})
+
+    # P4-B panel：quick 档强制关闭（config 不可打开）；其余档位按 enabled_by_depth。
+    panel_cfg = get("research", "panel", default={}) or {}
+    enabled_by_depth = panel_cfg.get("enabled_by_depth") or {} if isinstance(panel_cfg, dict) else {}
+    panel_roster_raw = panel_cfg.get("roster") or {} if isinstance(panel_cfg, dict) else {}
+    panel_roster = {
+        str(point): [str(entry) for entry in (entries or []) if str(entry or "").strip()]
+        for point, entries in (panel_roster_raw.items() if isinstance(panel_roster_raw, dict) else [])
+    }
     return ResearchModeProfile(
         depth=resolved_depth,
         planner_model=str(payload["planner_model"]),
@@ -257,6 +311,12 @@ def resolve_research_profile(depth: str | None = None) -> ResearchModeProfile:
         model_timeout_seconds=max(1, int(payload["model_timeout_seconds"])),
         max_retries=max(0, int(payload["max_retries"])),
         timeout_seconds=max(1, int(payload["timeout_seconds"])),
+        panel_enabled=(
+            resolved_depth != "quick"
+            and bool(enabled_by_depth.get(resolved_depth, False))
+        ),
+        panel_roster=panel_roster,
+        panel_referee=str(panel_cfg.get("referee") or "") if isinstance(panel_cfg, dict) else "",
     )
 
 
@@ -337,4 +397,49 @@ def validate_research_model_profiles() -> list[str]:
             "quick/standard/deep 必须配置不同的研究循环、检索或预算策略；"
             "具体 provider/model 可由用户按需复用"
         )
+
+    # P4-B panel 校验：同一判断点成员必须来自不同 preset（防"同一模型多采样"
+    # 伪多样性）；quick 档强制关闭；arbitration 评审团仅 deep 档挂载。
+    panel_cfg = get("research", "panel", default={}) or {}
+    if isinstance(panel_cfg, dict):
+        quorum = str(panel_cfg.get("quorum") or "majority")
+        if quorum != "majority":
+            problems.append(f"research.panel.quorum={quorum!r} 不受支持；仅支持 majority")
+    for depth, profile in profiles.items():
+        if depth == "quick":
+            if profile.panel_enabled:
+                problems.append("quick 档评审团被强制关闭；research.panel.enabled_by_depth.quick 必须为 false")
+            continue
+        if not profile.panel_enabled:
+            continue
+        mounted_points = ["verification"] + (["arbitration"] if depth == "deep" else [])
+        for point in mounted_points:
+            raw_members = [
+                preset for entry in (profile.panel_roster or {}).get(point) or []
+                if (preset := _resolve_panel_preset(entry, profile))
+            ]
+            members = list(dict.fromkeys(raw_members))
+            if len(members) < 2:
+                problems.append(
+                    f"research.panel.roster.{point} 需要至少 2 个成员 preset（depth={depth}）"
+                )
+            if len(set(raw_members)) != len(raw_members):
+                problems.append(
+                    f"research.panel.roster.{point} 成员必须来自不同 preset（depth={depth}）：{raw_members}"
+                )
+            for preset in members:
+                cfg = get("models", preset, default={}) or {}
+                if not isinstance(cfg, dict) or not cfg.get("provider") or not cfg.get("model"):
+                    problems.append(
+                        f"research.panel.roster.{point} 引用的 models.{preset} 缺少 provider/model 配置"
+                    )
+        referee = profile.panel_referee
+        if not referee:
+            problems.append(f"research.panel.referee 未配置（depth={depth}）")
+        else:
+            cfg = get("models", referee, default={}) or {}
+            if not isinstance(cfg, dict) or not cfg.get("provider") or not cfg.get("model"):
+                problems.append(
+                    f"research.panel.referee 引用的 models.{referee} 缺少 provider/model 配置"
+                )
     return problems

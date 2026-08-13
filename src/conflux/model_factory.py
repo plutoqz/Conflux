@@ -594,7 +594,68 @@ def create_research_models(
                 commit_reserve_seconds=adjusted,
                 role="planner",
             )
+
+    # P4-B 评审团：每个判断点成员构建独立模型实例（成员 max_tokens 减半，共用
+    # run 级 token budget；下游时间预留按判断点所处阶段计算），裁判单独构建。
+    # arbitration 评审团仅 deep 档挂载；quick 档为空（panel_enabled=False）。
+    panel_models: dict[str, dict[str, Any]] = {}
+    if profile.panel_enabled:
+        panel_anchor_roles = {"verification": "verifier", "arbitration": "planner"}
+        panel_point_downstream = {
+            "verification": stage["commit"],
+            "arbitration": stage["verification"] + stage["commit"],
+        }
+        for point in ("verification", "arbitration"):
+            if point == "arbitration" and profile.depth != "deep":
+                continue
+            anchor_role = panel_anchor_roles[point]
+            member_presets = profile.panel_members(point)
+            if len(member_presets) < 2:
+                continue
+            member_tokens = max(300, profile.role_max_tokens[anchor_role] // 2)
+            anchor_timeout = profile.role_timeout_seconds[anchor_role]
+            members = [
+                BudgetedChatModel(
+                    BoundedChatModel(
+                        create_chat_model(
+                            preset,
+                            max_tokens=member_tokens,
+                            timeout=anchor_timeout,
+                            max_retries=profile.max_retries,
+                        ),
+                        anchor_timeout,
+                        deadline_at=deadline_at,
+                        commit_reserve_seconds=panel_point_downstream[point],
+                        role=f"panel_{point}",
+                    ),
+                    budget,
+                    output_reserve=member_tokens,
+                    role=f"panel_{point}",
+                )
+                for preset in member_presets
+            ]
+            referee = None
+            if profile.panel_referee:
+                referee = BudgetedChatModel(
+                    BoundedChatModel(
+                        create_chat_model(
+                            profile.panel_referee,
+                            max_tokens=member_tokens,
+                            timeout=anchor_timeout,
+                            max_retries=profile.max_retries,
+                        ),
+                        anchor_timeout,
+                        deadline_at=deadline_at,
+                        commit_reserve_seconds=panel_point_downstream[point],
+                        role="panel_referee",
+                    ),
+                    budget,
+                    output_reserve=member_tokens,
+                    role="panel_referee",
+                )
+            panel_models[point] = {"members": members, "referee": referee}
     diagnostics = research_model_diagnostics(profile.depth)
+    diagnostics["panel_models"] = panel_models
     diagnostics["role_downstream_reserve_seconds"] = role_reserves
     diagnostics["planner_reserve_reclaimed_seconds"] = round(
         max(0.0, planner_reserve_reclaimed), 3

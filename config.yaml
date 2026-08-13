@@ -96,6 +96,18 @@ research:
   max_rewrite_attempts: 2
   # Legacy: P1/P1.5 only. V2 does not inject hardcoded seed URLs into search results.
   deterministic_seeds: false
+  # P4-B 多模型评审团：quick 档强制关闭（不可打开）。成员按判断点分组，同一判断点
+  # 成员必须来自不同 preset（防"同一模型多采样"伪多样性）；roster 条目为 models.*
+  # preset 名，或角色名（如 planner）回退到该角色当前档位绑定的 preset。
+  # 2 成员 = 多数票（无裁判调用）；≥3 成员时裁判汇总（裁判仅叙事，不改变票数结论）。
+  # arbitration 评审团仅 deep 档挂载（第二判断点）。
+  panel:
+    enabled_by_depth: {quick: false, standard: true, deep: true}
+    roster:
+      verification: [verifier, balanced]
+      arbitration: [planner, flash]
+    referee: balanced
+    quorum: majority
   generalization:
     enabled: true
     min_external_evidence_per_dimension: 1

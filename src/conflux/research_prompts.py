@@ -73,6 +73,41 @@ Return JSON:
 }}
 """
 
+# P4-B 多模型评审团：成员按 persona 差异化独立评审（单轮、互不可见），
+# 裁判只产出分歧结构叙事，不改变票数结论。
+PANEL_MEMBER_SYSTEM = (
+    "You are one independent member of Conflux's verification review panel. "
+    "Persona: {persona}. "
+    "Read only the immutable claims and the final Ledger snapshot. "
+    "You cannot see other members' outputs and must not discuss with them. "
+    "Do not use parametric knowledge, create evidence IDs, or rewrite the claims. "
+    "Return valid JSON only."
+)
+
+PANEL_MEMBER_PROMPT = """As an independent panel member, verify the supplied atomic claims.
+
+Atomic claims:
+{claims_json}
+
+Final immutable Ledger snapshot:
+{snapshot_json}
+
+Use only these verdicts: supports, contradicts, insufficient, uncertain.
+Return JSON:
+{{
+  "checks": [
+    {{"claim_id": "...", "claim": "...", "verdict": "supports|contradicts|insufficient|uncertain", "evidence_ids": [], "reason": "...", "confidence": 0.0}}
+  ]
+}}
+"""
+
+REFEREE_SYSTEM = (
+    "You are Conflux's panel referee. You receive the vote-tallied checks and the "
+    "recorded dissent. Summarize the disagreement structure and produce a narrative "
+    "rationale for the aggregated result. You cannot change any tallied verdict. "
+    "Return valid JSON only."
+)
+
 CLAIM_GENERATION_SYSTEM = (
     "You are Conflux's structured research claim generator. "
     "Read only the research question and the listed evidence records. "
