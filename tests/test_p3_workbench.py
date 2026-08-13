@@ -409,6 +409,40 @@ def _job_public_project(manager, run_id: str) -> str:
     return str(_public_status(manager._jobs[run_id])["project_id"])
 
 
+# ── U1: registration establishes the first snapshot ───────────────────
+
+
+def test_save_registered_project_establishes_first_snapshot(p3_server, tmp_path):
+    """U1 acceptance: saving a project creates a reviewable snapshot
+    immediately, without a manual "检查状态" (plan §6.1)."""
+    project_dir = tmp_path / "newproj"
+    project_dir.mkdir()
+    (project_dir / "README.md").write_text("# New project\n", encoding="utf-8")
+
+    result = p3_server.save_registered_project({
+        "id": "newproj",
+        "name": "New Project",
+        "path": str(project_dir),
+        "overall_goal": "Ship a baseline",
+        "milestones": [{"id": "m1", "title": "First milestone", "status": "in_progress"}],
+        "next_actions": "first action",
+        "document_dirs": "docs",
+        "result_dirs": "results",
+        "report_dirs": "reports",
+    })
+
+    assert result["ok"] is True
+    assert result["project_id"] == "newproj"
+    assert result["revision"] == 1
+
+    state = p3_server.build_p3_project_state("newproj")
+    assert state["ok"] is True
+    assert state["snapshot"]["revision"] == 1
+    assert state["documents"]["total"] >= 1
+    items = state["snapshot"]["work_items"]
+    assert any(item["kind"] == "milestone" and item["title"] == "First milestone" for item in items)
+
+
 # ── snapshot summary ─────────────────────────────────────────────────
 
 

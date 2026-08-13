@@ -197,6 +197,30 @@ def _resolved_feature_model_config(raw: dict[str, Any], feature: str) -> dict[st
     return resolved
 
 
+# TTL cache for expensive /api/status sub-queries (Chroma audits).  The rest
+# of build_status stays fresh so config changes surface immediately; the
+# heavy local checks amortize across reloads (P3 §13.1 first-screen target).
+_AUDIT_CACHE_LOCK = threading.Lock()
+_AUDIT_CACHE: dict[str, tuple[float, Any]] = {}
+
+
+def _cached_expensive(key: str, ttl_seconds: float, producer: Any) -> Any:
+    with _AUDIT_CACHE_LOCK:
+        cached = _AUDIT_CACHE.get(key)
+        if cached and time.monotonic() - cached[0] < ttl_seconds:
+            return cached[1]
+    value = producer()
+    with _AUDIT_CACHE_LOCK:
+        _AUDIT_CACHE[key] = (time.monotonic(), value)
+    return value
+
+
+def _invalidate_expensive_cache(*keys: str) -> None:
+    with _AUDIT_CACHE_LOCK:
+        for key in keys:
+            _AUDIT_CACHE.pop(key, None)
+
+
 def build_status() -> dict[str, Any]:
     """Return sanitized local workbench status."""
 
@@ -232,7 +256,9 @@ def build_status() -> dict[str, Any]:
         "profiles": [_enrich_profile(p) for p in _list_files(PROJECT_ROOT / "profiles", {".yaml", ".yml"})],
         "reports": _list_report_files(PROJECT_ROOT / "reports"),
         "paper_outputs": _list_files(PROJECT_ROOT / "data" / "documents" / "papers", {".md", ".json"}),
-        "paper_ingestion_audit": build_paper_ingestion_audit(),
+        "paper_ingestion_audit": _cached_expensive(
+            "paper_ingestion_audit", 30.0, build_paper_ingestion_audit
+        ),
         "defaults": {
             "profile": DEFAULT_PROFILE,
             "fixture": DEFAULT_FIXTURE,
@@ -244,7 +270,9 @@ def build_status() -> dict[str, Any]:
             "tier_models": tier_models,
             "feature_models": feature_models,
             "embedding": _sanitize_model_config(embedding, "OPENAI_API_KEY"),
-            "vector_store": build_vector_store_status(),
+            "vector_store": _cached_expensive(
+                "vector_store", 30.0, build_vector_store_status
+            ),
             "web_search": {
                 "provider": web_provider,
                 "max_results": int(web_search.get("max_results") or 5),
@@ -919,6 +947,7 @@ def rebuild_knowledge_index(payload: dict[str, Any]) -> dict[str, Any]:
         embedding_model=str(payload.get("embedding_model") or "").strip(),
         vector_collection_name=new_name,
     )
+    _invalidate_expensive_cache("vector_store", "paper_ingestion_audit")
     return {
         "ok": True,
         "previous_collection": current_name,
@@ -940,6 +969,7 @@ def delete_knowledge_index(payload: dict[str, Any]) -> dict[str, Any]:
     if not any(item["name"] == collection_name for item in status["collections"]):
         return {"ok": False, "error": f"Collection 不存在：{collection_name}"}
     _delete_vector_collection(collection_name)
+    _invalidate_expensive_cache("vector_store")
     return {"ok": True, "deleted": collection_name, "vector_store": build_vector_store_status()}
 
 
@@ -1458,6 +1488,7 @@ def run_paper_promotion(payload: dict[str, Any]) -> dict[str, Any]:
         out_dir=out_dir,
     )
     _update_seen_after_promotion(result, inbox=inbox, indexed=do_index)
+    _invalidate_expensive_cache("paper_ingestion_audit", "vector_store")
     return {
         "ok": True,
         "documents": len(result.documents),
@@ -1967,6 +1998,16 @@ def save_registered_project(payload: dict[str, Any]) -> dict[str, Any]:
     saved = _project_registry().get(project.id)
     if saved is None:
         raise RuntimeError("项目配置已写入，但无法重新读取")
+    if _p3_overview_enabled():
+        # New page (U1 acceptance): establish the first snapshot immediately.
+        p3_result = _refresh_p3_project_local(saved)
+        return {
+            "ok": True,
+            "path": str(path),
+            "project_id": saved.id,
+            "revision": p3_result["revision"],
+            "p3": p3_result,
+        }
     overview = monitor_project(
         saved,
         audit_root=PROJECT_ROOT / DEFAULT_PROGRESS_DIR,
@@ -3515,18 +3556,16 @@ def build_p3_project_state(project_id: str) -> dict[str, Any]:
         intelligence.db.close()
 
 
-def refresh_p3_project(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """User-triggered local check: collect + discover + seed reviews + snapshot.
+def _refresh_p3_project_local(project: ProjectDefinition, *, force: bool = False) -> dict[str, Any]:
+    """Shared local refresh: collect + discover + seed reviews + snapshot.
 
-    No remote checks and no model calls (plan §P3.3 acceptance).
+    No remote checks and no model calls (plan §P3.3 acceptance).  Used by the
+    explicit refresh route and by project registration (U1: the first
+    snapshot exists as soon as the project is saved).
     """
-    project = _p3_project_or_none(project_id)
-    if project is None:
-        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
-    force = bool(payload.get("force"))
     intelligence = _project_intelligence()
     try:
-        previous = intelligence.snapshots.latest(project_id)
+        previous = intelligence.snapshots.latest(project.id)
         events = collect_all_events(project, intelligence.db, since=0.0, check_remote=False)
         added = ingest_events(intelligence, events)
         discovery = scan_project_documents(intelligence, project, force=force)
@@ -3538,7 +3577,7 @@ def refresh_p3_project(project_id: str, payload: dict[str, Any]) -> dict[str, An
         snapshot = build_snapshot(intelligence, project, trigger=SnapshotTrigger.MANUAL)
         return {
             "ok": True,
-            "project_id": project_id,
+            "project_id": project.id,
             "snapshot_id": snapshot.snapshot_id,
             "revision": snapshot.revision,
             "new_events": added,
@@ -3549,6 +3588,17 @@ def refresh_p3_project(project_id: str, payload: dict[str, Any]) -> dict[str, An
         }
     finally:
         intelligence.db.close()
+
+
+def refresh_p3_project(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """User-triggered local check: collect + discover + seed reviews + snapshot.
+
+    No remote checks and no model calls (plan §P3.3 acceptance).
+    """
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    return _refresh_p3_project_local(project, force=bool(payload.get("force")))
 
 
 def build_p3_documents(project_id: str) -> dict[str, Any]:

@@ -1808,11 +1808,15 @@ async function saveRegisteredProject() {
       report_dirs: $('registeredReportDirs').value.trim()
     });
     if (!data.ok) throw new Error(data.error || '项目保存失败');
-    selectedProjectId = data.project.project.id;
+    selectedProjectId = data.project_id || (data.project && data.project.project && data.project.project.id) || '';
     $('projectRegisterPanel').open = false;
     $('projectRegisterForm').hidden = true;
     await loadProjects();
-    toast('项目已登记', 'ok');
+    if (p3Enabled() && data.p3) {
+      toast('项目已登记，首次快照已建立（发现 ' + ((data.p3.discovery || {}).new || 0) + ' 份文档）', 'ok');
+    } else {
+      toast('项目已登记', 'ok');
+    }
   } catch (error) {
     $('projectRegisterErrorMessage').textContent = error.message;
     $('projectRegisterError').hidden = false;
