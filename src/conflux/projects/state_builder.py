@@ -23,7 +23,8 @@ from .contracts import (
     SnapshotTrigger,
     new_snapshot,
 )
-from .projections import knowledge_state, work_item_projection
+from .link_service import persist_links
+from .projections import knowledge_state
 from .repository import ProjectIntelligence
 
 
@@ -39,6 +40,8 @@ def _apply_event_to_snapshot(
             root=str(payload.get("root") or ""),
             branch=str(payload.get("branch") or ""),
             head=str(payload.get("head") or ""),
+            ahead=payload.get("ahead") if payload.get("ahead") is not None else None,
+            behind=payload.get("behind") if payload.get("behind") is not None else None,
             checked_at=float(payload.get("checked_at") or 0),
         )
     elif kind == "git.worktree_changed":
@@ -53,6 +56,12 @@ def _apply_event_to_snapshot(
         source_id = str(payload.get("source_id") or "")
         if source_id and all(str(s.get("source_id") or "") != source_id for s in sources):
             sources.append(payload)
+    elif kind == "paper_radar.completed":
+        snapshot.research_state["radar"] = {
+            "run_id": str(payload.get("run_id") or ""),
+            "status": str(payload.get("status") or ""),
+            "tokens": int(payload.get("tokens") or 0),
+        }
     elif kind == "document.discovered" or kind == "document.changed":
         snapshot.document_index_version = str(
             payload.get("index_version") or snapshot.document_index_version
@@ -113,8 +122,13 @@ def build_snapshot(
     *,
     trigger: SnapshotTrigger = SnapshotTrigger.SCHEDULED,
     force: bool = False,
+    rag: dict[str, Any] | None = None,
 ) -> ProjectContextSnapshot:
-    """Build the next snapshot from the latest one + new events."""
+    """Build the next snapshot from the latest one + new events.
+
+    ``rag`` is the P3.4 RAG-coverage result computed during refresh; it is
+    materialized into knowledge_state so page reads never touch Chroma.
+    """
     latest = intelligence.snapshots.latest(project.id)
     if latest is None:
         snapshot = new_snapshot(project.id, revision=1, trigger=trigger)
@@ -149,10 +163,13 @@ def build_snapshot(
     for event in events:
         _apply_event_to_snapshot(snapshot, event)
 
-    # Deterministic projections (P3.3): declared plan -> work items,
+    # Deterministic projections + links (P3.3/P3.4): declared plan ->
+    # work items, cross-feature runs/claims/papers -> link fields,
     # document index -> knowledge state.  No model, no scan.
-    snapshot.work_items = work_item_projection(project)
+    snapshot.work_items = persist_links(intelligence, project)
     snapshot.knowledge_state = knowledge_state(intelligence, project.id)
+    if rag is not None:
+        snapshot.knowledge_state["rag"] = dict(rag)
 
     pending_reviews = intelligence.reviews.list(project.id, status="pending")
     snapshot.summary = _summary_from_snapshot(

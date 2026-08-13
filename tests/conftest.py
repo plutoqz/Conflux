@@ -51,3 +51,22 @@ def _fake_p2_embedding(monkeypatch):
         "conflux.paper_radar.radar.create_embedding_model",
         lambda: FakeEmbedding(),
     )
+
+
+@pytest.fixture(autouse=True)
+def _clear_p3_ttl_caches():
+    """Clear module-level TTL caches so tests never see another test's data."""
+    try:
+        from conflux.workbench import server
+
+        server._invalidate_expensive_cache("vector_store", "paper_ingestion_audit")
+    except Exception:
+        pass
+    try:
+        from conflux.projects import rag_coverage
+
+        rag_coverage._COLLECTION_CACHE["payload"] = None
+        rag_coverage._COLLECTION_CACHE["at"] = 0.0
+    except Exception:
+        pass
+    yield

@@ -83,6 +83,7 @@ class ResearchJob:
     deadline_at: float = 0.0
     commit_reserve_seconds: float = 20.0
     project_id: str = ""
+    work_item_id: str = ""
     final_answer: str = ""
     has_report: bool = False
     source_statuses: dict[str, str] = field(default_factory=dict)
@@ -257,6 +258,7 @@ def _job_metadata(job: ResearchJob) -> dict[str, Any]:
         "deadline_at": job.deadline_at,
         "commit_reserve_seconds": job.commit_reserve_seconds,
         "project_id": job.project_id,
+        "work_item_id": job.work_item_id,
         "final_answer": job.final_answer,
         "source_statuses": job.source_statuses,
         "factcheck_status": job.factcheck_status,
@@ -284,6 +286,7 @@ def _job_from_metadata(run_id: str, metadata: dict[str, Any]) -> ResearchJob:
         deadline_at=float(metadata.get("deadline_at") or 0.0),
         commit_reserve_seconds=float(metadata.get("commit_reserve_seconds") or 20.0),
         project_id=str(metadata.get("project_id") or ""),
+        work_item_id=str(metadata.get("work_item_id") or ""),
         final_answer=str(metadata.get("final_answer") or ""),
         has_report=bool(metadata.get("has_report")),
         source_statuses=dict(metadata.get("source_statuses") or {}),
@@ -313,6 +316,7 @@ def _public_status(job: ResearchJob) -> dict[str, Any]:
         "deadline_at": job.deadline_at,
         "commit_reserve_seconds": job.commit_reserve_seconds,
         "project_id": job.project_id,
+        "work_item_id": job.work_item_id,
         "final_answer": full_answer[:4000],
         "final_answer_truncated": answer_len > 4000,
         "final_answer_total_length": answer_len,
@@ -396,6 +400,7 @@ class JobManager:
             deadline_at=started_at + timeout_seconds,
             commit_reserve_seconds=commit_reserve_seconds,
             project_id=str(payload.get("project_id") or ""),
+            work_item_id=str(payload.get("work_item_id") or ""),
         )
         persisted_payload = _sanitize_payload(dict(payload))
         secrets = {
@@ -534,6 +539,7 @@ class JobManager:
                     "started_at": metadata.get("started_at", item["created_at"]),
                     "ended_at": metadata.get("ended_at"),
                     "project_id": str(metadata.get("project_id") or ""),
+                    "work_item_id": str(metadata.get("work_item_id") or ""),
                 }
             )
         return result

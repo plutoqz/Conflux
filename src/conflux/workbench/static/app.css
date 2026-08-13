@@ -1091,3 +1091,7 @@ iframe { width: 100%; height: calc(100vh - 220px); min-height: 520px; margin-top
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* P3.4 RAG 覆盖 */
+.p3-rag-band { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+.p3-rag-band .field-hint { margin-right: auto; }

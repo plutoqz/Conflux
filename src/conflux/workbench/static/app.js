@@ -1122,20 +1122,44 @@ function renderP3WorkItems(data) {
   body.innerHTML = items.map((item) => {
     const kind = item.kind || 'action';
     const editable = kind === 'milestone' || kind === 'action';
+    const evidence = item.evidence_refs || [];
+    const negative = evidence.filter((ref) => ref.includes(':contradicts:') || ref.includes(':insufficient:')).length;
+    const runs = item.linked_run_ids || [];
+    const papers = item.linked_paper_keys || [];
+    const links = [];
+    if (evidence.length) {
+      links.push('<span class="p3-kind-tag ' + (negative ? 'risk' : '') + '">证据 ' + evidence.length + (negative ? '（' + negative + ' 不支持）' : '') + '</span>');
+    }
+    if (runs.length) links.push('<span class="p3-kind-tag">运行 ' + runs.length + '</span>');
+    if (papers.length) links.push('<span class="p3-kind-tag plan">论文 ' + papers.length + '</span>');
+    if (item.linked_branch) links.push('<span class="p3-kind-tag plan">分支 ' + escapeHtml(item.linked_branch) + '</span>');
+    const actions = [];
+    actions.push('<button class="button secondary compact p3-item-research" type="button" data-wi-id="' + escapeHtml(item.work_item_id) + '" data-title="' + escapeHtml(item.title) + '"><i data-lucide="flask-conical" aria-hidden="true"></i><span>发起研究</span></button>');
+    actions.push('<button class="button secondary compact p3-item-radar" type="button" data-wi-id="' + escapeHtml(item.work_item_id) + '" data-title="' + escapeHtml(item.title) + '"><i data-lucide="radar" aria-hidden="true"></i><span>雷达</span></button>');
+    if (editable) {
+      actions.push('<button class="button secondary compact" type="button" data-p3-status-edit="' + escapeHtml(item.work_item_id) + '"><i data-lucide="pencil" aria-hidden="true"></i><span>变更状态</span></button>');
+    }
     return '<tr>' +
-      '<td><div class="p3-workitem-title">' + escapeHtml(item.title) + '</div></td>' +
+      '<td><div class="p3-workitem-title">' + escapeHtml(item.title) + '</div>' +
+      (item.acceptance_criteria && item.acceptance_criteria.length
+        ? '<div class="p3-workitem-criteria">' + escapeHtml(item.acceptance_criteria.join('；')) + '</div>' : '') + '</td>' +
       '<td><span class="p3-kind-tag ' + (kind === 'milestone' ? 'plan' : '') + '">' + escapeHtml(P3_KIND_LABELS[kind] || kind) + '</span></td>' +
       '<td>' + p3DeclaredPill(item.declared_status) + '</td>' +
       '<td>' + p3ObservedPill(item.observed_status) + '</td>' +
       '<td>' + p3InferredPill(item.inferred_status) + '</td>' +
-      '<td><div class="p3-workitem-criteria">' + escapeHtml((item.acceptance_criteria || []).join('；') || '未给出验收标准') + '</div></td>' +
-      '<td><div class="p3-workitem-actions">' + (editable
-        ? '<button class="button secondary compact" type="button" data-p3-status-edit="' + escapeHtml(item.work_item_id) + '"><i data-lucide="pencil" aria-hidden="true"></i><span>变更状态</span></button>'
-        : '<span class="field-hint">只读</span>') + '</div></td>' +
+      '<td><div class="p3-workitem-actions" style="flex-wrap:wrap">' + (links.join(' ') || '<span class="field-hint">无</span>') + '</div></td>' +
+      '<td><div class="p3-workitem-actions">' + actions.join(' ') + '</div></td>' +
       '</tr>';
   }).join('');
   document.querySelectorAll('[data-p3-status-edit]').forEach((button) => button.addEventListener('click', () => {
     openP3Confirm(button.dataset.p3StatusEdit);
+  }));
+  document.querySelectorAll('.p3-item-research').forEach((button) => button.addEventListener('click', () => {
+    const item = items.find((candidate) => candidate.work_item_id === button.dataset.wiId);
+    startResearchForItem(button.dataset.wiId, button.dataset.title, (item && item.acceptance_criteria) || []);
+  }));
+  document.querySelectorAll('.p3-item-radar').forEach((button) => button.addEventListener('click', () => {
+    runP3RadarForItem(button.dataset.wiId, button.dataset.title, button);
   }));
 
   const radar = data.radar || {};
@@ -1168,15 +1192,23 @@ function p3DocRow(doc) {
   } else if (doc.authority === 'excluded') {
     actions += '<button class="button secondary compact p3-doc-authority" type="button" data-doc-id="' + escapeHtml(doc.document_id) + '" data-authority="candidate"><i data-lucide="undo-2" aria-hidden="true"></i><span>恢复候选</span></button>';
   }
+  const ragStatus = doc.rag_status || '';
+  const ragLabel = ragStatus === 'indexed' ? ' · 已索引' : ragStatus === 'stale' ? ' · 索引过期' : '';
   return '<div class="p3-doc-row">' +
     '<span class="p3-kind-tag ' + (doc.kind === 'charter' || doc.kind === 'plan' ? 'plan' : '') + '">' + escapeHtml(kindLabel) + '</span>' +
-    '<span class="doc-main"><span class="doc-path">' + escapeHtml(doc.path) + '</span><span class="doc-meta">' + escapeHtml((doc.title || '无标题') + (failed ? ' · 解析失败' : '')) + '</span></span>' +
+    '<span class="doc-main"><span class="doc-path">' + escapeHtml(doc.path) + '</span><span class="doc-meta">' + escapeHtml((doc.title || '无标题') + (failed ? ' · 解析失败' : '') + ragLabel) + '</span></span>' +
     '<span class="p3-doc-actions">' + actions + '</span></div>';
 }
 
 function renderP3Evidence(data) {
   const documents = data.documents || null;
   const all = p3AllDocuments(documents);
+  const snapshot = data.snapshot || null;
+  const knowledge = (snapshot && snapshot.knowledge_state) || {};
+  const rag = knowledge.rag || null;
+  if (rag && rag.by_document) {
+    all.forEach((doc) => { doc.rag_status = rag.by_document[doc.path] || ''; });
+  }
   const stats = { confirmed: 0, candidate: 0, excluded: 0, failed: 0 };
   all.forEach((doc) => {
     stats[doc.authority] = (stats[doc.authority] || 0) + 1;
@@ -1191,13 +1223,18 @@ function renderP3Evidence(data) {
     setP3DocumentAuthority(button.dataset.docId, button.dataset.authority, button);
   }));
 
-  const snapshot = data.snapshot || null;
-  const knowledge = (snapshot && snapshot.knowledge_state) || {};
   const knowledgeDocs = knowledge.documents || {};
   $('p3KnowledgeDocs').textContent = knowledgeDocs.total != null ? String(knowledgeDocs.total) : '-';
-  $('p3KnowledgeKinds').textContent = Object.keys(knowledgeDocs.by_kind || {}).length ? Object.keys(knowledgeDocs.by_kind).join('、') : '-';
-  $('p3KnowledgeFailed').textContent = knowledgeDocs.parse_failed != null ? String(knowledgeDocs.parse_failed) : '-';
-  $('p3KnowledgeIndex').textContent = (snapshot && snapshot.document_index_version) || '尚未建立索引';
+  $('p3RagIndexed').textContent = rag && rag.indexed != null ? String(rag.indexed) : '-';
+  $('p3RagStale').textContent = rag && rag.stale != null ? String(rag.stale) : '-';
+  $('p3RagMissing').textContent = rag && rag.missing != null ? String(rag.missing) : '-';
+  if (rag && rag.collection) {
+    $('p3RagModel').textContent = 'Collection: ' + rag.collection + (rag.model ? ' · ' + rag.model : '') + (rag.error ? ' · ' + rag.error : '');
+  } else if (rag && rag.error) {
+    $('p3RagModel').textContent = '无法读取知识库：' + rag.error;
+  } else {
+    $('p3RagModel').textContent = '尚未计算覆盖状态（点击“检查状态”）';
+  }
 
   const sources = (snapshot && snapshot.evidence_state && snapshot.evidence_state.sources) || [];
   const evidenceReviews = (data.reviews || []).filter((item) => item.kind === 'evidence_change');
@@ -1243,11 +1280,12 @@ function renderP3Activity(data) {
 function p3ReviewRow(review) {
   const kindLabel = P3_REVIEW_KIND_LABELS[review.kind] || review.kind;
   const sourceLabel = review.source === 'evidence_ledger' ? '证据台账' : '项目状态';
+  const workItemNames = (review.work_items || []).map((item) => item.title).join('、');
   return '<div class="p3-inbox-row" data-review-id="' + escapeHtml(review.review_id) + '">' +
     '<div class="p3-inbox-main">' +
     '<span class="p3-kind-tag ' + (review.kind === 'run_failure' || review.kind === 'plan_drift' ? 'risk' : '') + '">' + escapeHtml(kindLabel) + '</span>' +
     '<div><strong>' + escapeHtml(review.summary) + '</strong>' +
-    '<small>' + escapeHtml(review.proposed_action || '') + ' · ' + escapeHtml(sourceLabel) + (review.priority ? ' · 优先级 ' + review.priority : '') + '</small></div></div>' +
+    '<small>' + escapeHtml(review.proposed_action || '') + ' · ' + escapeHtml(sourceLabel) + (review.priority ? ' · 优先级 ' + review.priority : '') + (workItemNames ? ' · 影响工作项：' + escapeHtml(workItemNames) : '') + '</small></div></div>' +
     '<div class="p3-inbox-actions">' +
     '<button class="button secondary compact p3-review-action" type="button" data-status="dismissed"><i data-lucide="x" aria-hidden="true"></i><span>忽略</span></button>' +
     '<button class="button primary compact p3-review-action" type="button" data-status="confirmed"><i data-lucide="check" aria-hidden="true"></i><span>确认</span></button>' +
@@ -1422,11 +1460,65 @@ function startResearchFromP3() {
   nav('query', { focus: true });
 }
 
+function startResearchForItem(workItemId, title, criteria) {
+  queryProjectContext = { project_id: selectedProjectId, work_item_id: workItemId, focus: title };
+  const gapText = criteria && criteria.length
+    ? '验收标准：' + criteria.join('；')
+    : '找出该工作的证据缺口和验证方式';
+  $('queryText').value = '围绕研究重点“' + title + '”，' + gapText;
+  nav('query', { focus: true });
+}
+
+async function runP3RadarForItem(workItemId, title, button) {
+  if (!selectedProjectId) return;
+  if (button) enterBusy(button, '雷达中');
+  try {
+    const data = await api('/api/projects/research/run', {
+      project_id: selectedProjectId,
+      work_item_id: workItemId,
+      gap_source: title
+    });
+    if (data.ok && data.job_id) {
+      await waitForProjectRadarJob(data.job_id, selectedProjectId);
+      toast('论文雷达已运行，关联按搜索意图确定性匹配', 'ok');
+    }
+  } catch (error) {
+    toast('雷达运行失败：' + error.message, 'err');
+  } finally {
+    if (button) leaveBusy(button);
+  }
+  loadP3State();
+}
+
 async function runP3Radar() {
   const button = $('p3RunRadar');
   enterBusy(button, '运行中');
   try {
     await runProjectRadar();
+  } finally {
+    leaveBusy(button);
+  }
+  loadP3State();
+}
+
+async function indexP3KnowledgeDocs() {
+  if (!selectedProjectId) return;
+  const button = $('p3IndexDocs');
+  enterBusy(button, '索引中');
+  $('p3IndexDocsState').textContent = '';
+  try {
+    const data = await api('/api/v1/projects/' + encodeURIComponent(selectedProjectId) + '/knowledge/index', {});
+    if (data.ok) {
+      const failedCount = (data.failed || []).length;
+      $('p3IndexDocsState').textContent = '已索引 ' + data.indexed + ' 块 / ' + data.documents + ' 份文档' + (failedCount ? '，失败 ' + failedCount : '');
+      toast('项目文档已加入知识库', 'ok');
+    } else {
+      $('p3IndexDocsState').textContent = data.error || '';
+      toast('索引失败：' + (data.error || '未知错误'), 'err');
+    }
+  } catch (error) {
+    $('p3IndexDocsState').textContent = error.message;
+    toast('索引失败：' + error.message, 'err');
   } finally {
     leaveBusy(button);
   }
@@ -1442,6 +1534,7 @@ function bindP3Events() {
   $('p3OpenSettings').addEventListener('click', () => openP3Settings());
   $('p3StartResearch').addEventListener('click', () => startResearchFromP3());
   $('p3RunRadar').addEventListener('click', () => runP3Radar());
+  $('p3IndexDocs').addEventListener('click', () => indexP3KnowledgeDocs());
   $('p3SettingsForm').addEventListener('submit', saveP3Settings);
   $('p3SettingsCancel').addEventListener('click', () => $('p3SettingsDialog').close());
   $('p3ConfirmForm').addEventListener('submit', runP3Confirm);
@@ -2740,7 +2833,8 @@ async function runQuery() {
         embedding_api_key: $('embeddingApiKey').value,
         embedding_model: $('embeddingModel').value,
         depth: queryDepth,
-        project_id: projectContext ? (projectContext.project_id || '') : ''
+        project_id: projectContext ? (projectContext.project_id || '') : '',
+        work_item_id: projectContext ? (projectContext.work_item_id || '') : ''
       }))
     });
     const submitData = await submitRes.json();

@@ -48,7 +48,15 @@ def collect_git_events(
         events.append(new_event(
             project.id,
             EventKind.GIT_HEAD_CHANGED,
-            payload={"root": root, "branch": branch, "head": head, "checked_at": time.time()},
+            payload={
+                "root": root,
+                "branch": branch,
+                "head": head,
+                "ahead": inspection.ahead,
+                "behind": inspection.behind,
+                "recent_subjects": [str(commit.subject) for commit in (inspection.recent_commits or [])[:10]],
+                "checked_at": time.time(),
+            },
             dedup_key=_git_head_key(root, branch, head),
         ))
     if dirty:
@@ -67,33 +75,51 @@ def collect_run_events(
     *,
     since: float = 0.0,
 ) -> list[ProjectEvent]:
-    """Recent search runs -> research_query.completed events (P3 §5.5)."""
-    from conflux.adapters.sqlite_store import SearchRunStore
-
+    """Query jobs (RunStore metadata) + latest radar run -> completed events."""
     events: list[ProjectEvent] = []
     try:
-        store = SearchRunStore(db)
-        runs = store.list(project_id=project.id, limit=20)
+        from conflux.adapters.sqlite_store import RunStore, SearchRunStore
+
+        # Research query jobs: project scoped via run metadata.
+        for run in RunStore(db).list(limit=100) or []:
+            metadata = run.get("metadata") or {}
+            if str(metadata.get("project_id") or "") != project.id:
+                continue
+            run_id = str(run.get("run_id") or "")
+            status = str(run.get("status") or "")
+            if not run_id or status not in {"completed", "completed_with_warnings", "failed"}:
+                continue
+            budget = metadata.get("budget_consumed") or {}
+            events.append(new_event(
+                project.id,
+                EventKind.RESEARCH_QUERY_COMPLETED,
+                payload={
+                    "run_id": run_id,
+                    "status": "failed" if status == "failed" else "completed",
+                    "work_item_id": str(metadata.get("work_item_id") or ""),
+                    "elapsed_seconds": float(budget.get("elapsed_ms") or 0) / 1000.0,
+                    "tokens": {
+                        "input": int(budget.get("input_tokens") or 0),
+                        "output": int(budget.get("output_tokens") or 0),
+                    },
+                },
+                dedup_key=f"run-{run_id}",
+            ))
+        # Paper radar: one latest run per project.
+        latest = SearchRunStore(db).latest(project.id)
+        if latest and latest.get("run_id"):
+            events.append(new_event(
+                project.id,
+                EventKind.PAPER_RADAR_COMPLETED,
+                payload={
+                    "run_id": str(latest["run_id"]),
+                    "status": str(latest.get("status") or "completed"),
+                    "tokens": int((latest.get("stats") or {}).get("llm_total_tokens") or 0),
+                },
+                dedup_key=f"radar-{latest['run_id']}",
+            ))
     except Exception:
         return events
-    for run in runs or []:
-        run_id = str(run.get("run_id") or "")
-        if not run_id:
-            continue
-        created = float(run.get("created_at") or 0)
-        if created < since:
-            continue
-        events.append(new_event(
-            project.id,
-            EventKind.RESEARCH_QUERY_COMPLETED,
-            payload={
-                "run_id": run_id,
-                "status": str(run.get("status") or ""),
-                "query_count": int(run.get("query_count") or 0),
-                "elapsed_seconds": float(run.get("elapsed_seconds") or 0),
-            },
-            dedup_key=f"run-{run_id}",
-        ))
     return events
 
 
@@ -103,17 +129,18 @@ def collect_evidence_events(
     *,
     since: float = 0.0,
 ) -> list[ProjectEvent]:
-    """Evidence ledger source changes -> evidence.source_changed (P3 §5.5)."""
+    """Evidence ledger source snapshots -> evidence.source_changed (P3 §5.5)."""
     from conflux.adapters.evidence_ledger_store import EvidenceLedgerRepository
 
     events: list[ProjectEvent] = []
     try:
         repository = EvidenceLedgerRepository(db)
-        rows = repository.list_recent(project_id=project.id, limit=20)
+        rows = repository.list_source_snapshots(limit=200)
     except Exception:
         return events
     for row in rows or []:
-        source_id = str(row.get("source_id") or row.get("id") or "")
+        source_id = str(row.get("source_identity") or "")
+        content_hash = str(row.get("content_hash") or "")
         if not source_id:
             continue
         created = float(row.get("created_at") or 0)
@@ -124,10 +151,11 @@ def collect_evidence_events(
             EventKind.EVIDENCE_SOURCE_CHANGED,
             payload={
                 "source_id": source_id,
+                "content_hash": content_hash,
                 "status": str(row.get("status") or ""),
                 "created_at": created,
             },
-            dedup_key=f"evidence-{source_id}-{int(created)}",
+            dedup_key=f"evidence-{source_id}-{content_hash[:16]}",
         ))
     return events
 

@@ -61,6 +61,7 @@ from conflux.projects import (
     work_item_projection,
 )
 from conflux.projects.discovery_service import document_map, scan_project_documents
+from conflux.projects.rag_coverage import compute_coverage, index_project_documents
 from conflux.project_registry import (
     Milestone,
     ProjectDefinition,
@@ -2431,7 +2432,13 @@ def run_project_research_radar(payload: dict[str, Any]) -> dict[str, Any]:
         queue = JobQueue(db)
         job = queue.enqueue(
             "paper_radar",
-            {"project_id": project_id, "periodic": False, "context_version": context_version},
+            {
+                "project_id": project_id,
+                "periodic": False,
+                "context_version": context_version,
+                "work_item_id": str(payload.get("work_item_id") or ""),
+                "gap_source": str(payload.get("gap_source") or ""),
+            },
             idempotency_key=f"paper-radar:{project_id}:manual:{time.time_ns()}",
             max_attempts=2,
         )
@@ -2520,6 +2527,8 @@ def _execute_project_research_radar(payload: dict[str, Any], *, job_id: str = ""
 
         cache = {
             "project_id": result.project_id,
+            "work_item_id": str(payload.get("work_item_id") or ""),
+            "gap_source": str(payload.get("gap_source") or ""),
             "usable": usable,
             "status": radar_status,
             "reason": radar_reason,
@@ -3457,10 +3466,29 @@ def _unified_reviews(
         evidence = get_evidence_reviews(project_id=project_id, status=status)
     except Exception:
         evidence = {"ok": False, "reviews": []}
+    # Map ledger impacts (claims) to the work items whose evidence refs
+    # reference those claims (P3.4: evidence ledger -> work items).
+    claim_to_item: dict[str, tuple[str, str]] = {}
+    current = intelligence.snapshots.current(project_id)
+    for item in (current or {}).get("work_items") or []:
+        for ref in (item.get("evidence_refs") or []):
+            if ref.startswith("claim:"):
+                claim_id = ref[len("claim:"):].split(":", 1)[0]
+                claim_to_item[claim_id] = (
+                    str(item.get("work_item_id") or ""),
+                    str(item.get("title") or ""),
+                )
     for review in (evidence or {}).get("reviews") or []:
         rid = str(review.get("review_id") or "")
         if not rid:
             continue
+        linked_items: set[tuple[str, str]] = set()
+        for impact in (review.get("impacts") or []):
+            if str(impact.get("target_kind") or "") != "claim":
+                continue
+            target = str(impact.get("target_id") or "")
+            if target in claim_to_item:
+                linked_items.add(claim_to_item[target])
         merged.append({
             "review_id": f"ev:{rid}",
             "source": "evidence_ledger",
@@ -3477,6 +3505,10 @@ def _unified_reviews(
             "input_snapshot_id": "",
             "created_at": 0.0,
             "resolved_at": 0.0,
+            "work_items": [
+                {"work_item_id": item_id, "title": title}
+                for item_id, title in sorted(linked_items)
+            ],
             "detail": {
                 "source_identity": review.get("source_identity"),
                 "reason": review.get("reason"),
@@ -3569,12 +3601,17 @@ def _refresh_p3_project_local(project: ProjectDefinition, *, force: bool = False
         events = collect_all_events(project, intelligence.db, since=0.0, check_remote=False)
         added = ingest_events(intelligence, events)
         discovery = scan_project_documents(intelligence, project, force=force)
+        try:
+            rag = compute_coverage(intelligence, project)
+        except Exception as exc:
+            rag = {"error": str(exc), "by_document": {}}
         seeded = seed_reviews(
             intelligence,
             project,
             input_snapshot_id=previous.snapshot_id if previous else "",
+            rag=rag,
         )
-        snapshot = build_snapshot(intelligence, project, trigger=SnapshotTrigger.MANUAL)
+        snapshot = build_snapshot(intelligence, project, trigger=SnapshotTrigger.MANUAL, rag=rag)
         return {
             "ok": True,
             "project_id": project.id,
@@ -3585,6 +3622,11 @@ def _refresh_p3_project_local(project: ProjectDefinition, *, force: bool = False
             "reviews_added": len(seeded),
             "health": snapshot.health,
             "pending_reviews": snapshot.summary.get("pending_review_count", 0),
+            "rag": {
+                "indexed": rag.get("indexed", 0),
+                "stale": rag.get("stale", 0),
+                "missing": rag.get("missing", 0),
+            },
         }
     finally:
         intelligence.db.close()
@@ -3747,6 +3789,20 @@ def resolve_p3_review(project_id: str, review_id: str, payload: dict[str, Any]) 
                 intelligence.documents.upsert(document)
                 intelligence.documents.set_authority(document_id, "confirmed")
                 supersede_document_reviews(intelligence, project_id, document_id)
+        if status == "confirmed" and review.kind.value == "branch_divergence":
+            # Confirming a branch-suggest review links the current branch to
+            # the work item (persisted on the store row; YAML stays untouched).
+            work_item_id = (review.impact_refs or [""])[0]
+            if work_item_id:
+                branch = ""
+                for event in reversed(intelligence.events.list(project_id, limit=200)):
+                    if str(event.get("kind") or "") == "git.head_changed":
+                        branch = str((event.get("payload") or {}).get("branch") or "")
+                        break
+                item = intelligence.work_items.get(work_item_id)
+                if item is not None and branch:
+                    item.linked_branch = branch
+                    intelligence.work_items.upsert(item)
         intelligence.reviews.resolve(review_id, status)
         intelligence.events.append(new_event(
             project_id,
@@ -3757,6 +3813,39 @@ def resolve_p3_review(project_id: str, review_id: str, payload: dict[str, Any]) 
         project = _p3_project_or_none(project_id)
         build_snapshot(intelligence, project, trigger=SnapshotTrigger.MANUAL)
         return {"ok": True, "review_id": review_id, "status": status}
+    finally:
+        intelligence.db.close()
+
+
+def index_p3_project_knowledge(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Index confirmed project documents into the knowledge base (P3 §10.3)."""
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    document_ids = [str(item) for item in (payload.get("document_ids") or [])] or None
+    intelligence = _project_intelligence()
+    try:
+        result = index_project_documents(intelligence, project, document_ids=document_ids)
+        if result.get("ok"):
+            intelligence.events.append(new_event(
+                project_id,
+                EventKind.KNOWLEDGE_INDEX_CHANGED,
+                payload={
+                    "documents": int(result.get("documents") or 0),
+                    "indexed": int(result.get("indexed") or 0),
+                    "index_version": "project-doc-20260813",
+                },
+                dedup_key=f"knowledge-index-{project_id}-{int(time.time())}",
+            ))
+            rag = compute_coverage(intelligence, project)
+            seed_reviews(intelligence, project, rag=rag)
+            build_snapshot(intelligence, project, trigger=SnapshotTrigger.MANUAL, rag=rag)
+            result["rag"] = {
+                "indexed": rag.get("indexed", 0),
+                "stale": rag.get("stale", 0),
+                "missing": rag.get("missing", 0),
+            }
+        return result
     finally:
         intelligence.db.close()
 
@@ -3788,8 +3877,9 @@ def save_p3_project_settings(payload: dict[str, Any]) -> dict[str, Any]:
         events = collect_all_events(saved, intelligence.db, since=0.0, check_remote=False)
         ingest_events(intelligence, events)
         scan_project_documents(intelligence, saved)
-        seed_reviews(intelligence, saved)
-        snapshot = build_snapshot(intelligence, saved, trigger=SnapshotTrigger.MANUAL)
+        rag = compute_coverage(intelligence, saved)
+        seed_reviews(intelligence, saved, rag=rag)
+        snapshot = build_snapshot(intelligence, saved, trigger=SnapshotTrigger.MANUAL, rag=rag)
     finally:
         intelligence.db.close()
     return {"ok": True, "path": str(config_path), "revision": snapshot.revision}
@@ -4194,6 +4284,10 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             return
         if len(parts) == 2 and parts[1] == "settings":
             result = save_p3_project_settings(payload)
+            self._send_json(result, status=200 if result.get("ok") else 400)
+            return
+        if len(parts) == 3 and parts[1] == "knowledge" and parts[2] == "index":
+            result = index_p3_project_knowledge(project_id, payload)
             self._send_json(result, status=200 if result.get("ok") else 400)
             return
         if len(parts) == 4 and parts[1] == "documents" and parts[3] == "authority":

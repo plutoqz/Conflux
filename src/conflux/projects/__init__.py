@@ -48,6 +48,12 @@ from .projections import (
     parse_work_item_ref,
     work_item_projection,
 )
+from .link_service import (
+    intent_work_item_map,
+    materialize_links,
+    persist_links,
+)
+from .rag_coverage import compute_coverage, index_project_documents
 from .review_service import seed_reviews, supersede_document_reviews
 from .state_builder import build_snapshot
 
@@ -78,12 +84,17 @@ __all__ = [
     "WorkItemKind",
     "build_snapshot",
     "collect_all_events",
+    "compute_coverage",
+    "index_project_documents",
     "ingest_events",
+    "intent_work_item_map",
     "knowledge_state",
     "legacy_overview_adapter",
+    "materialize_links",
     "new_event",
     "new_snapshot",
     "parse_work_item_ref",
+    "persist_links",
     "record_project_event",
     "register_project_intelligence_migration",
     "seed_reviews",

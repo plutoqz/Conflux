@@ -664,7 +664,7 @@
                 </div>
                 <div class="table-wrap compact-table">
                   <table id="p3WorkItemsTable">
-                    <thead><tr><th>工作项</th><th>类型</th><th>人工状态</th><th>观察状态</th><th>系统建议</th><th>验收标准</th><th>操作</th></tr></thead>
+                    <thead><tr><th>工作项</th><th>类型</th><th>人工状态</th><th>观察状态</th><th>系统建议</th><th>证据与关联</th><th>操作</th></tr></thead>
                     <tbody id="p3WorkItemsBody"></tbody>
                   </table>
                 </div>
@@ -702,13 +702,18 @@
                 </div>
               </section>
               <section class="project-detail-section" aria-labelledby="p3KnowledgeTitle">
-                <div class="project-section-heading"><div><h3 id="p3KnowledgeTitle">知识库覆盖</h3><p>RAG 索引与项目文档的覆盖关系（P3.4 完整接入）。</p></div></div>
+                <div class="project-section-heading"><div><h3 id="p3KnowledgeTitle">知识库覆盖</h3><p>已确权文档可加入知识库；内容变化后覆盖标记为过期。</p></div></div>
                 <dl class="evidence-metrics">
                   <div><dt>项目文档</dt><dd id="p3KnowledgeDocs">-</dd></div>
-                  <div><dt>文档类型</dt><dd id="p3KnowledgeKinds">-</dd></div>
-                  <div><dt>解析失败</dt><dd id="p3KnowledgeFailed">-</dd></div>
-                  <div><dt>索引版本</dt><dd id="p3KnowledgeIndex">-</dd></div>
+                  <div><dt>已索引</dt><dd id="p3RagIndexed">-</dd></div>
+                  <div><dt>过期</dt><dd id="p3RagStale">-</dd></div>
+                  <div><dt>未索引</dt><dd id="p3RagMissing">-</dd></div>
                 </dl>
+                <div class="p3-rag-band">
+                  <span id="p3RagModel" class="field-hint">尚未计算覆盖状态</span>
+                  <button id="p3IndexDocs" class="button primary compact" type="button"><i data-lucide="database-zap" aria-hidden="true"></i><span>索引已确权文档</span></button>
+                  <span id="p3IndexDocsState" class="field-hint" role="status" aria-live="polite"></span>
+                </div>
               </section>
               <section class="project-detail-section" aria-labelledby="p3EvidenceTitle">
                 <div class="project-section-heading"><div><h3 id="p3EvidenceTitle">证据来源变化</h3><p>Evidence Ledger 的来源变化映射到待处理队列，确认前不改变计划。</p></div></div>

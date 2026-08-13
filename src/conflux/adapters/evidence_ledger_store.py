@@ -214,6 +214,14 @@ class EvidenceLedgerRepository:
         ).fetchall()
         return [_row(item, {"metadata_json": {}}) for item in rows]
 
+    def list_source_snapshots(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Recent source snapshots across all sources (P3.4 event collector)."""
+        rows = self.db.connection.execute(
+            "SELECT * FROM source_snapshots ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_row(item, {"metadata_json": {}}) for item in rows]
+
     def run_ledger(self, run_id: str) -> dict[str, Any]:
         evidence = self.db.connection.execute(
             """
