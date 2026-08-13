@@ -1,8 +1,9 @@
-"""P3 project intelligence — SQLite migration 0007 and repositories (P3.1).
+"""P3 project intelligence — SQLite migrations 0007/0008 and repositories.
 
 Storage layer for the versioned project state: project_documents,
 project_work_items, project_events, project_snapshots, project_current_state,
-project_reviews, project_review_impacts, project_discovery_cursors.
+project_reviews, project_review_impacts, project_discovery_cursors and
+(P3.5) project_cycle_summaries.
 
 Design rules from P3 §5/§9:
 - YAML stays the authority for declared state; SQLite stores observed facts,
@@ -153,6 +154,25 @@ PROJECT_INTELLIGENCE_STATEMENTS: list[str] = [
     """,
 ]
 
+# 0008 (P3.5): confirmed cycle summaries double as the next audit baseline.
+CYCLE_SUMMARY_STATEMENTS: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS project_cycle_summaries (
+        summary_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        baseline_revision INTEGER NOT NULL,
+        current_revision INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'confirmed',
+        period_start REAL NOT NULL,
+        period_end REAL NOT NULL,
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        created_at REAL NOT NULL,
+        confirmed_at REAL NOT NULL DEFAULT 0
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_project_cycle_summaries_project ON project_cycle_summaries(project_id, current_revision)",
+]
+
 
 def _json_dumps(value: Any) -> str:
     """Serialize for SQLite JSON columns; replace unpaired surrogates.
@@ -187,6 +207,10 @@ def register_project_intelligence_migration() -> None:
     if "0007_project_intelligence" not in versions:
         store.SCHEMA_MIGRATIONS.append(
             ("0007_project_intelligence", list(PROJECT_INTELLIGENCE_STATEMENTS))
+        )
+    if "0008_project_cycles" not in versions:
+        store.SCHEMA_MIGRATIONS.append(
+            ("0008_project_cycles", list(CYCLE_SUMMARY_STATEMENTS))
         )
 
 
@@ -537,6 +561,85 @@ def _review_from_row(row: Any) -> ReviewItem:
     )
 
 
+class ProjectCycleSummaryStore:
+    """Confirmed cycle summaries (P3.5 §6.3) — the next audit's baseline.
+
+    The latest confirmed summary's ``current_revision`` is the baseline for
+    the next cycle audit; ``baseline_revision`` 0 marks a legacy
+    (directory-scan) baseline imported from ``project_snapshot.json``.
+    """
+
+    def __init__(self, db: SQLiteDatabase) -> None:
+        self.db = db
+
+    def save(self, summary: dict[str, Any], *, status: str = "confirmed") -> str:
+        summary_id = str(summary["summary_id"])
+        self.db.connection.execute(
+            """
+            INSERT OR REPLACE INTO project_cycle_summaries (
+                summary_id, project_id, baseline_revision, current_revision,
+                status, period_start, period_end, summary_json, created_at, confirmed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                summary_id, str(summary["project_id"]),
+                int(summary.get("baseline_revision") or 0),
+                int(summary.get("current_revision") or 0),
+                status,
+                float(summary.get("period_start") or 0),
+                float(summary.get("period_end") or 0),
+                _json_dumps(summary),
+                time.time(),
+                time.time() if status == "confirmed" else 0,
+            ),
+        )
+        self.db.connection.commit()
+        return summary_id
+
+    def latest_confirmed(self, project_id: str) -> dict[str, Any] | None:
+        row = self.db.connection.execute(
+            """
+            SELECT * FROM project_cycle_summaries
+            WHERE project_id = ? AND status = 'confirmed'
+            ORDER BY current_revision DESC, created_at DESC LIMIT 1
+            """,
+            (project_id,),
+        ).fetchone()
+        return self._row_summary(row) if row else None
+
+    def get(self, summary_id: str) -> dict[str, Any] | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM project_cycle_summaries WHERE summary_id = ?",
+            (summary_id,),
+        ).fetchone()
+        return self._row_summary(row) if row else None
+
+    def list(self, project_id: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.db.connection.execute(
+            """
+            SELECT * FROM project_cycle_summaries WHERE project_id = ?
+            ORDER BY current_revision DESC, created_at DESC LIMIT ?
+            """,
+            (project_id, limit),
+        ).fetchall()
+        return [self._row_summary(row) for row in rows]
+
+    @staticmethod
+    def _row_summary(row: Any) -> dict[str, Any]:
+        return {
+            "summary_id": str(row["summary_id"]),
+            "project_id": str(row["project_id"]),
+            "baseline_revision": int(row["baseline_revision"]),
+            "current_revision": int(row["current_revision"]),
+            "status": str(row["status"]),
+            "period_start": float(row["period_start"]),
+            "period_end": float(row["period_end"]),
+            "created_at": float(row["created_at"]),
+            "confirmed_at": float(row["confirmed_at"]),
+            "summary": _json_loads(row["summary_json"], {}),
+        }
+
+
 class ProjectIntelligence:
     """Facade over the P3.1 stores; one entry point for the Application API."""
 
@@ -547,9 +650,12 @@ class ProjectIntelligence:
         self.documents = ProjectDocumentStore(db)
         self.work_items = ProjectWorkItemStore(db)
         self.reviews = ProjectReviewStore(db)
+        self.cycles = ProjectCycleSummaryStore(db)
         self.protocol_version = P3_PROTOCOL_VERSION
 
     def ensure_schema(self) -> None:
         for statement in PROJECT_INTELLIGENCE_STATEMENTS:
+            self.db.connection.execute(statement)
+        for statement in CYCLE_SUMMARY_STATEMENTS:
             self.db.connection.execute(statement)
         self.db.connection.commit()

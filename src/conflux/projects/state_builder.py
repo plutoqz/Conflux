@@ -51,6 +51,23 @@ def _apply_event_to_snapshot(
         run_id = str(payload.get("run_id") or "")
         if run_id and all(str(r.get("run_id") or "") != run_id for r in runs):
             runs.append(payload)
+    elif kind == "test.completed":
+        # Append-only observation; the cycle audit compares per-period entries.
+        # Keyed like the event dedup key so full replay never duplicates.
+        tests = snapshot.run_state.setdefault("tests", [])
+        key = (
+            str(payload.get("command") or ""),
+            str(payload.get("head") or ""),
+            str(payload.get("status") or ""),
+            payload.get("exit_code"),
+        )
+        if all((
+            str(t.get("command") or ""),
+            str(t.get("head") or ""),
+            str(t.get("status") or ""),
+            t.get("exit_code"),
+        ) != key for t in tests):
+            tests.append(payload)
     elif kind == "evidence.source_changed":
         sources = snapshot.evidence_state.setdefault("sources", [])
         source_id = str(payload.get("source_id") or "")

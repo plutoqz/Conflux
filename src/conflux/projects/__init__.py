@@ -12,7 +12,7 @@ from .application import (
     legacy_overview_adapter,
     record_project_event,
 )
-from .collectors import collect_all_events, ingest_events
+from .collectors import collect_all_events, collect_test_events, ingest_events
 from .contracts import (
     P3_PROTOCOL_VERSION,
     DeclaredStatus,
@@ -35,6 +35,7 @@ from .contracts import (
 )
 from .repository import (
     PROJECT_INTELLIGENCE_STATEMENTS,
+    ProjectCycleSummaryStore,
     ProjectDocumentStore,
     ProjectEventStore,
     ProjectIntelligence,
@@ -42,6 +43,14 @@ from .repository import (
     ProjectSnapshotStore,
     ProjectWorkItemStore,
     register_project_intelligence_migration,
+)
+from .cycle_audit import (
+    baseline_revision_for,
+    build_cycle_audit,
+    build_cycle_markdown,
+    confirm_cycle_summary,
+    latest_confirmed_summary,
+    write_cycle_artifacts,
 )
 from .projections import (
     knowledge_state,
@@ -67,6 +76,7 @@ __all__ = [
     "ObservedStatus",
     "PROJECT_INTELLIGENCE_STATEMENTS",
     "ProjectContextSnapshot",
+    "ProjectCycleSummaryStore",
     "ProjectDocument",
     "ProjectDocumentStore",
     "ProjectEvent",
@@ -82,13 +92,19 @@ __all__ = [
     "ReviewStatus",
     "SnapshotTrigger",
     "WorkItemKind",
+    "baseline_revision_for",
+    "build_cycle_audit",
+    "build_cycle_markdown",
     "build_snapshot",
     "collect_all_events",
+    "collect_test_events",
     "compute_coverage",
+    "confirm_cycle_summary",
     "index_project_documents",
     "ingest_events",
     "intent_work_item_map",
     "knowledge_state",
+    "latest_confirmed_summary",
     "legacy_overview_adapter",
     "materialize_links",
     "new_event",
@@ -100,4 +116,5 @@ __all__ = [
     "seed_reviews",
     "supersede_document_reviews",
     "work_item_projection",
+    "write_cycle_artifacts",
 ]

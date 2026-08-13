@@ -51,9 +51,13 @@ from conflux.projects import (
     ProjectIntelligence,
     ReviewStatus,
     SnapshotTrigger,
+    build_cycle_audit,
     build_snapshot,
     collect_all_events,
+    collect_test_events,
+    confirm_cycle_summary,
     ingest_events,
+    latest_confirmed_summary,
     new_event,
     parse_work_item_ref,
     seed_reviews,
@@ -3564,6 +3568,111 @@ def build_p3_activity(project_id: str, intelligence: ProjectIntelligence) -> dic
     }
 
 
+# ── P3.5 cycle audit ─────────────────────────────────────────────────
+
+
+def _p3_legacy_audit_dir(project_id: str) -> Path:
+    """Where the legacy directory-scan audit wrote its project_snapshot.json."""
+    return PROJECT_ROOT / DEFAULT_PROGRESS_DIR / project_id
+
+
+def _cycle_summary_light(confirmed: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not confirmed:
+        return None
+    summary = confirmed.get("summary") or {}
+    return {
+        "summary_id": confirmed.get("summary_id", ""),
+        "baseline_revision": confirmed.get("baseline_revision", 0),
+        "current_revision": confirmed.get("current_revision", 0),
+        "confirmed_at": confirmed.get("confirmed_at", 0.0),
+        "period": summary.get("period", ""),
+        "real_progress": len(summary.get("real_progress") or []),
+        "failed_experiments": len(summary.get("failed_experiments") or []),
+        "risks": len(summary.get("risks") or []),
+        "next_cycle_candidates": len(summary.get("next_cycle_candidates") or []),
+    }
+
+
+def _p3_audit_payload(project_id: str, intelligence: ProjectIntelligence) -> dict[str, Any]:
+    """Read-only audit payload: draft comparison + confirmed summary + revisions."""
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    draft = build_cycle_audit(
+        intelligence,
+        project,
+        legacy_out_dir=_p3_legacy_audit_dir(project_id),
+    )
+    confirmed = latest_confirmed_summary(intelligence, project_id)
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "draft": draft,
+        "confirmed_latest": confirmed,
+        "confirmed_light": _cycle_summary_light(confirmed),
+        "revisions": intelligence.snapshots.list_revisions(project_id, limit=20),
+    }
+
+
+def build_p3_audit(project_id: str) -> dict[str, Any]:
+    """GET /api/v1/projects/{id}/audit — snapshot-driven read, no side effects."""
+    intelligence = _project_intelligence()
+    try:
+        return _p3_audit_payload(project_id, intelligence)
+    finally:
+        intelligence.db.close()
+
+
+def run_p3_audit(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /api/v1/projects/{id}/audit — collect + optional test + compare.
+
+    Local observation only (no remote checks, no model); the configured test
+    command runs once per distinct (command, head, status) outcome and is
+    skipped when the project has no test command.
+    """
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    intelligence = _project_intelligence()
+    try:
+        events = collect_all_events(project, intelligence.db, since=0.0, check_remote=False)
+        if bool(payload.get("run_tests", True)) and (project.test_command or "").strip():
+            events.extend(collect_test_events(project))
+        added = ingest_events(intelligence, events)
+        if added or intelligence.snapshots.latest(project_id) is None:
+            build_snapshot(intelligence, project, trigger=SnapshotTrigger.MANUAL)
+        result = _p3_audit_payload(project_id, intelligence)
+        result["new_events"] = added
+        return result
+    finally:
+        intelligence.db.close()
+
+
+def confirm_p3_audit(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /api/v1/projects/{id}/audit/confirm — persist the confirmed summary.
+
+    The current revision becomes the next audit's baseline (plan §6.3).
+    Artifacts are exported as Markdown/JSON next to the legacy audit outputs.
+    """
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    intelligence = _project_intelligence()
+    try:
+        baseline_raw = payload.get("baseline_revision")
+        current_raw = payload.get("current_revision")
+        return confirm_cycle_summary(
+            intelligence,
+            project,
+            baseline_revision=int(baseline_raw) if baseline_raw not in (None, "") else None,
+            current_revision=int(current_raw) if current_raw not in (None, "") else None,
+            legacy_out_dir=_p3_legacy_audit_dir(project_id),
+            out_dir=PROJECT_ROOT / DEFAULT_PROGRESS_DIR,
+        )
+    finally:
+        intelligence.db.close()
+
+
 def build_p3_project_state(project_id: str) -> dict[str, Any]:
     """Page payload: one materialized read (snapshot + documents + inbox)."""
     project = _p3_project_or_none(project_id)
@@ -3582,6 +3691,9 @@ def build_p3_project_state(project_id: str) -> dict[str, Any]:
             "activity": build_p3_activity(project_id, intelligence),
             "radar": _p3_radar_summary(project_id),
             "revisions": intelligence.snapshots.list_revisions(project_id, limit=20),
+            "audit": _cycle_summary_light(
+                latest_confirmed_summary(intelligence, project_id)
+            ),
             "protocol_version": P3_PROTOCOL_VERSION,
         }
     finally:
@@ -4266,6 +4378,10 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             finally:
                 intelligence.db.close()
             return
+        if len(parts) == 2 and parts[1] == "audit":
+            result = build_p3_audit(project_id)
+            self._send_json(result, status=200 if result.get("ok") else 404)
+            return
         if len(parts) == 2 and parts[1] == "events":
             self._send_project_sse(project_id)
             return
@@ -4300,6 +4416,14 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             return
         if len(parts) == 4 and parts[1] == "reviews" and parts[3] == "resolve":
             result = resolve_p3_review(project_id, parts[2], payload)
+            self._send_json(result, status=200 if result.get("ok") else 400)
+            return
+        if len(parts) == 2 and parts[1] == "audit":
+            result = run_p3_audit(project_id, payload)
+            self._send_json(result, status=200 if result.get("ok") else 404)
+            return
+        if len(parts) == 3 and parts[1] == "audit" and parts[2] == "confirm":
+            result = confirm_p3_audit(project_id, payload)
             self._send_json(result, status=200 if result.get("ok") else 400)
             return
         self.send_error(404)

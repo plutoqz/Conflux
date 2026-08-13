@@ -635,6 +635,15 @@
                 <div class="project-section-heading"><h3 id="p3ProgressTitle">最近验证进展</h3><p>进展必须来自提交、测试、实验或报告等可定位证据。</p></div>
                 <div id="p3RecentProgress" class="audit-list"></div>
               </section>
+              <section class="project-detail-section" aria-labelledby="p3AuditTitle">
+                <div class="project-section-heading">
+                  <div><h3 id="p3AuditTitle">周期审计与摘要</h3><p>对比已确认基线生成带证据的周期摘要；摘要确认后成为下一周期基线。</p></div>
+                  <div class="project-section-actions">
+                    <button id="p3RunAudit" class="button secondary compact" type="button"><i data-lucide="scan-line" aria-hidden="true"></i><span>生成周期摘要</span></button>
+                  </div>
+                </div>
+                <div id="p3AuditBody" class="audit-list"></div>
+              </section>
               <section class="project-detail-section" aria-labelledby="p3RunningTitle">
                 <div class="project-section-heading"><h3 id="p3RunningTitle">运行中</h3></div>
                 <div id="p3Running" class="audit-list"></div>

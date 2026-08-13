@@ -999,6 +999,7 @@ async function loadP3State() {
     renderP3Evidence(data);
     renderP3Activity(data);
     renderP3Inbox(data);
+    renderP3Audit(data);
     refreshIcons();
     openP3Sse(projectId);
   } catch (error) {
@@ -1111,6 +1112,135 @@ function renderP3Overview(data) {
 
   $('p3FocusMeta').textContent = snapshot ? ('快照 v' + snapshot.revision) : '-';
   document.querySelectorAll('[data-p3-goto="inbox"]').forEach((button) => button.addEventListener('click', () => selectP3Tab('inbox')));
+}
+
+// ── P3.5 周期审计与摘要 ──────────────────────────────────────────────
+
+const P3_AUDIT_STATUS_LABELS = {
+  created: '首次基线',
+  compared: '对比基线',
+  unchanged: '与基线相同',
+  legacy: '旧基线（仅 Git 头）',
+  incomparable: '旧基线不可比较'
+};
+
+const P3_AUDIT_STATUS_CLASS = {
+  created: 'neutral',
+  compared: 'progress',
+  unchanged: 'neutral',
+  legacy: 'warn',
+  incomparable: 'risk'
+};
+
+let p3AuditDraft = null;
+
+function renderP3Audit(data) {
+  const body = $('p3AuditBody');
+  if (!body) return;
+  const audit = data.audit || null;
+  if (p3AuditDraft && p3AuditDraft.project_id === selectedProjectId) {
+    renderP3AuditDraft(p3AuditDraft);
+    return;
+  }
+  if (!audit) {
+    body.innerHTML = '<div class="p3-inbox-empty-row">尚无已确认的周期摘要。运行一次检查状态后点击“生成周期摘要”建立首个基线。</div>';
+    return;
+  }
+  const period = audit.period || ('v' + audit.baseline_revision + ' → v' + audit.current_revision);
+  body.innerHTML =
+    '<div class="audit-item progress"><span class="audit-item-icon"><i data-lucide="history" aria-hidden="true"></i></span>' +
+    '<div><p>上一已确认周期：' + escapeHtml(period) + '</p>' +
+    '<div class="audit-evidence"><code>进展 ' + audit.real_progress + ' · 失败 ' + audit.failed_experiments +
+    ' · 风险 ' + audit.risks + ' · 下一周期候选 ' + audit.next_cycle_candidates + '</code></div></div></div>';
+  refreshIcons();
+}
+
+function renderP3AuditDraft(draft) {
+  const body = $('p3AuditBody');
+  if (!body) return;
+  if (!draft.ok) {
+    body.innerHTML = '<div class="audit-item risk"><span class="audit-item-icon"><i data-lucide="triangle-alert" aria-hidden="true"></i></span>' +
+      '<div><p>' + escapeHtml(draft.error || '周期摘要生成失败') + '</p></div></div>';
+    refreshIcons();
+    return;
+  }
+  const statusLabel = P3_AUDIT_STATUS_LABELS[draft.baseline_status] || draft.baseline_status;
+  const statusClass = P3_AUDIT_STATUS_CLASS[draft.baseline_status] || 'neutral';
+  const rows = [];
+  rows.push('<div class="audit-item progress"><span class="audit-item-icon"><i data-lucide="scale" aria-hidden="true"></i></span>' +
+    '<div><p>基线 <code>v' + (draft.baseline.revision || 0) + '</code> → 当前 <code>v' + (draft.current.revision || 0) + '</code> · ' + escapeHtml(draft.period) + '</p>' +
+    '<div class="audit-evidence"><code>' + escapeHtml(statusLabel) + '</code><span class="status-pill ' + statusClass + '" style="margin-left:6px">' + escapeHtml(statusLabel) + '</span></div></div></div>');
+  (draft.real_progress || []).forEach((claim) => {
+    const icons = { work_item: 'check', commit: 'git-commit', test: 'flask-conical', experiment: 'beaker', paper: 'book-open', evidence: 'file-warning' };
+    rows.push('<div class="audit-item progress"><span class="audit-item-icon"><i data-lucide="' + (icons[claim.category] || 'check') + '" aria-hidden="true"></i></span>' +
+      '<div><p>' + escapeHtml(claim.summary) + '</p>' +
+      '<div class="audit-evidence">' + (claim.evidence_refs || []).map((ref) => '<code>' + escapeHtml(ref) + '</code>').join(' ') + '</div>' +
+      ((claim.acceptance_criteria && claim.acceptance_criteria.length) ? '<div class="audit-evidence"><small>验收标准：' + escapeHtml(claim.acceptance_criteria.join('；')) + '</small></div>' : '') +
+      '</div></div>');
+  });
+  if (!(draft.real_progress || []).length) {
+    rows.push('<div class="p3-inbox-empty-row">本周期尚无可验证的真实进展。</div>');
+  }
+  (draft.failed_experiments || []).forEach((entry) => {
+    rows.push('<div class="audit-item risk"><span class="audit-item-icon"><i data-lucide="circle-x" aria-hidden="true"></i></span>' +
+      '<div><p>失败实验：' + escapeHtml(entry.summary) + '</p></div></div>');
+  });
+  (draft.risks || []).slice(0, 3).forEach((risk) => {
+    rows.push('<div class="audit-item risk"><span class="audit-item-icon"><i data-lucide="triangle-alert" aria-hidden="true"></i></span>' +
+      '<div><p>' + escapeHtml(risk) + '</p></div></div>');
+  });
+  (draft.next_cycle_candidates || []).slice(0, 3).forEach((candidate) => {
+    rows.push('<div class="audit-item action"><span class="audit-item-icon"><i data-lucide="arrow-right" aria-hidden="true"></i></span>' +
+      '<div><p>下一周期：' + escapeHtml(candidate.summary) + '</p></div></div>');
+  });
+  if (!draft.confirmed && draft.baseline_status !== 'unchanged') {
+    rows.push('<div class="project-section-actions" style="margin-top:8px">' +
+      '<button id="p3ConfirmAudit" class="button primary compact" type="button"><i data-lucide="stamp" aria-hidden="true"></i><span>确认本期摘要为新基线</span></button>' +
+      '</div>');
+  }
+  body.innerHTML = rows.join('');
+  const confirmButton = $('p3ConfirmAudit');
+  if (confirmButton) confirmButton.addEventListener('click', () => confirmP3Audit());
+  refreshIcons();
+}
+
+async function runP3Audit() {
+  const projectId = selectedProjectId;
+  const button = $('p3RunAudit');
+  if (!projectId || !button) return;
+  enterBusy(button, '生成中');
+  try {
+    const data = await api('/api/v1/projects/' + encodeURIComponent(projectId) + '/audit', {});
+    if (!data.ok) throw new Error(data.error || '生成失败');
+    p3AuditDraft = data.draft;
+    renderP3AuditDraft(p3AuditDraft);
+    loadP3State();
+  } catch (error) {
+    toast('周期摘要生成失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+async function confirmP3Audit() {
+  const projectId = selectedProjectId;
+  if (!projectId || !p3AuditDraft) return;
+  const button = $('p3ConfirmAudit');
+  if (button) enterBusy(button, '确认中');
+  try {
+    const data = await api('/api/v1/projects/' + encodeURIComponent(projectId) + '/audit/confirm', {
+      baseline_revision: p3AuditDraft.baseline ? p3AuditDraft.baseline.revision : null,
+      current_revision: p3AuditDraft.current ? p3AuditDraft.current.revision : null
+    });
+    if (!data.ok) throw new Error(data.error || '确认失败');
+    p3AuditDraft = null;
+    toast('周期摘要已确认，新基线为 v' + (data.current ? data.current.revision : '?'));
+    loadP3State();
+  } catch (error) {
+    toast('确认失败：' + error.message, 'err');
+  } finally {
+    if (button) leaveBusy(button);
+  }
 }
 
 function renderP3WorkItems(data) {
@@ -1535,6 +1665,7 @@ function bindP3Events() {
   $('p3StartResearch').addEventListener('click', () => startResearchFromP3());
   $('p3RunRadar').addEventListener('click', () => runP3Radar());
   $('p3IndexDocs').addEventListener('click', () => indexP3KnowledgeDocs());
+  $('p3RunAudit').addEventListener('click', () => runP3Audit());
   $('p3SettingsForm').addEventListener('submit', saveP3Settings);
   $('p3SettingsCancel').addEventListener('click', () => $('p3SettingsDialog').close());
   $('p3ConfirmForm').addEventListener('submit', runP3Confirm);

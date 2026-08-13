@@ -78,7 +78,8 @@ def test_migration_registered_globally():
 
     versions = {item[0] for item in store.SCHEMA_MIGRATIONS}
     assert "0007_project_intelligence" in versions
-    assert store.SCHEMA_MIGRATIONS[-1][0] == "0007_project_intelligence"
+    assert "0008_project_cycles" in versions
+    assert store.SCHEMA_MIGRATIONS[-1][0] == "0008_project_cycles"
 
 
 def test_bootstrap_applies_project_intelligence(tmp_path: Path):

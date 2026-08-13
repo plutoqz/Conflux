@@ -123,6 +123,47 @@ def collect_run_events(
     return events
 
 
+def collect_test_events(
+    project: ProjectDefinition,
+    *,
+    since: float = 0.0,
+) -> list[ProjectEvent]:
+    """Run the configured test command once and emit test.completed (P3.5).
+
+    Tests are an explicit, user-triggered observation: never part of
+    ``collect_all_events`` so routine refreshes stay fast.  The dedup key
+    covers (command, head, status) so re-running the same failing/passing
+    command records once per distinct outcome.
+    """
+    if not (project.test_command or "").strip():
+        return []
+    from conflux.progress_audit.git_inspector import inspect_git
+    from conflux.progress_audit.test_inspector import inspect_tests
+
+    inspection = inspect_git(str(project.path))
+    head = str(inspection.head or "")
+    result = inspect_tests(
+        str(project.path),
+        project.test_command,
+        timeout_seconds=project.test_timeout_seconds,
+    )
+    command = str(result.command or project.test_command)
+    return [new_event(
+        project.id,
+        EventKind.TEST_COMPLETED,
+        payload={
+            "command": command,
+            "status": result.status,
+            "exit_code": result.exit_code,
+            "elapsed_ms": result.elapsed_ms,
+            "head": head,
+            "checked_at": time.time(),
+        },
+        dedup_key=f"test-{hashlib.sha256(command.encode('utf-8')).hexdigest()[:16]}"
+                  f"-{head[:12]}-{result.status}-{result.exit_code}",
+    )]
+
+
 def collect_evidence_events(
     project: ProjectDefinition,
     db: Any,
