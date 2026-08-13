@@ -3731,6 +3731,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--log-file", help="Optional file for workbench stdout/stderr")
     parser.add_argument("--daemon", action="store_true", help="Start the workbench in a detached background process")
     parser.add_argument("--pid-file", default="reports/workbench-server.pid", help="PID file used with --daemon")
+    parser.add_argument("--v2-port", type=int, default=None, help="Chat API v2 (FastAPI) port; defaults to --port + 1000")
+    parser.add_argument("--no-v2", action="store_true", help="Disable the FastAPI chat v2 layer (/api/chat/* + /docs)")
     args = parser.parse_args(argv)
 
     # Guard: refuse non-loopback binds without an access token (before daemon fork)
@@ -3787,6 +3789,16 @@ def main(argv: list[str] | None = None) -> None:
     server = ThreadingHTTPServer((args.host, port), WorkbenchHandler)
     _start_persistent_worker()
     print(f"Conflux workbench: http://{args.host}:{port}", flush=True)
+    # P4.2 C 对话入口：FastAPI v2 与老服务同进程共存，独立端口，老端点冻结不动。
+    if not args.no_v2:
+        try:
+            from conflux.workbench.api_v2 import serve_api_v2
+
+            v2_port = _available_port(args.host, args.v2_port or port + 1000)
+            serve_api_v2(host=args.host, port=v2_port)
+            print(f"Conflux chat API v2: http://{args.host}:{v2_port} (docs: /docs)", flush=True)
+        except Exception as exc:  # v2 失败不拖垮老端点
+            print(f"[workbench] chat API v2 failed to start: {exc}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
