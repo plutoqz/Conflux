@@ -28,6 +28,14 @@ from .projections import knowledge_state
 from .repository import ProjectIntelligence
 
 
+# P3.6 partition caps: snapshots stay bounded; full histories live in the
+# authoritative stores (run/event tables), never in the materialized view.
+_RUNS_CAP = 200
+_TESTS_CAP = 100
+_SOURCES_CAP = 200
+_EVENT_BATCH = 500
+
+
 def _apply_event_to_snapshot(
     snapshot: ProjectContextSnapshot,
     event: dict[str, Any],
@@ -83,6 +91,38 @@ def _apply_event_to_snapshot(
         snapshot.document_index_version = str(
             payload.get("index_version") or snapshot.document_index_version
         )
+
+
+def _cap_partitions(snapshot: ProjectContextSnapshot) -> None:
+    """Keep append-only partitions bounded; recent entries survive."""
+    runs = snapshot.run_state.get("runs")
+    if isinstance(runs, list) and len(runs) > _RUNS_CAP:
+        snapshot.run_state["runs"] = runs[-_RUNS_CAP:]
+    tests = snapshot.run_state.get("tests")
+    if isinstance(tests, list) and len(tests) > _TESTS_CAP:
+        snapshot.run_state["tests"] = tests[-_TESTS_CAP:]
+    sources = snapshot.evidence_state.get("sources")
+    if isinstance(sources, list) and len(sources) > _SOURCES_CAP:
+        snapshot.evidence_state["sources"] = sources[-_SOURCES_CAP:]
+
+
+def _replay_events(
+    intelligence: ProjectIntelligence,
+    snapshot: ProjectContextSnapshot,
+    *,
+    from_cursor: int,
+) -> int:
+    """Apply events newer than ``from_cursor`` in batches; returns last id."""
+    cursor = int(from_cursor)
+    while True:
+        events = intelligence.events.list(
+            snapshot.project_id, after_event_id=cursor, limit=_EVENT_BATCH
+        )
+        if not events:
+            return cursor
+        for event in events:
+            _apply_event_to_snapshot(snapshot, event)
+        cursor = max(int(event["event_id"]) for event in events)
 
 
 def _health_from_snapshot(snapshot: ProjectContextSnapshot) -> str:
@@ -159,6 +199,7 @@ def build_snapshot(
             trigger=trigger,
             definition_version=latest.definition_version,
             document_index_version=latest.document_index_version,
+            event_cursor=int(latest.event_cursor or 0),
             git_state=latest.git_state,
             work_items=list(latest.work_items),
             knowledge_state=dict(latest.knowledge_state),
@@ -175,10 +216,12 @@ def build_snapshot(
         snapshot.run_state = {}
         snapshot.evidence_state = {}
 
-    # Consume events since the latest snapshot.
-    events = intelligence.events.list(project.id, after_event_id=0, limit=1000)
-    for event in events:
-        _apply_event_to_snapshot(snapshot, event)
+    # Consume events since the snapshot's replay cursor (P3.6).  Incremental
+    # builds apply only events newer than the cursor; fresh/forced builds
+    # replay the whole log in batches (no 1000-event truncation).
+    replay_from = 0 if (latest is None or force) else int(snapshot.event_cursor or 0)
+    snapshot.event_cursor = _replay_events(intelligence, snapshot, from_cursor=replay_from)
+    _cap_partitions(snapshot)
 
     # Deterministic projections + links (P3.3/P3.4): declared plan ->
     # work items, cross-feature runs/claims/papers -> link fields,
@@ -192,7 +235,7 @@ def build_snapshot(
     snapshot.summary = _summary_from_snapshot(
         snapshot,
         pending_review_count=len(pending_reviews),
-        event_count=len(events),
+        event_count=intelligence.events.count(project.id),
     )
     snapshot.health = _health_from_snapshot(snapshot)
     if snapshot.summary.get("blocked"):

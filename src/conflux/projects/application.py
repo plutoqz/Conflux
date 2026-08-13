@@ -1,8 +1,7 @@
 """P3.1 application API — project state layer entry point (plan §11.5).
 
-Provides the versioned state read/refresh surface and a compatibility
-adapter over the legacy `/api/projects` overview so the old Workbench UI
-keeps working unchanged during P3.1–P3.3 (plan §17.2).
+Provides the versioned state read/refresh surface.  The legacy `/api/projects`
+overview adapter was removed with the old page in P3.6 (plan §17.2).
 """
 
 from __future__ import annotations
@@ -66,33 +65,6 @@ class ProjectStateApplication:
 
     def work_items(self, project_id: str) -> list[Any]:
         return self.intelligence.work_items.list(project_id)
-
-
-def legacy_overview_adapter(
-    legacy_overview: dict[str, Any],
-    intelligence: ProjectIntelligence,
-) -> dict[str, Any]:
-    """Merge legacy `/api/projects` payload with P3 state (compat).
-
-    The old UI keeps reading the legacy shape; this adds P3 versioning
-    fields without changing the legacy contract (plan §17.2).
-    """
-    merged = dict(legacy_overview)
-    projects = merged.get("projects") or []
-    for entry in projects:
-        project_id = str((entry.get("project") or {}).get("id") or "")
-        if not project_id:
-            continue
-        current = intelligence.snapshots.current(project_id)
-        entry["p3"] = {
-            "revision": (current or {}).get("revision", 0),
-            "snapshot_id": (current or {}).get("snapshot_id", ""),
-            "updated_at": (current or {}).get("updated_at", 0.0),
-            "health": (current or {}).get("health", ""),
-            "protocol_version": intelligence.protocol_version,
-        }
-    merged["p3"] = {"enabled": True, "protocol_version": intelligence.protocol_version}
-    return merged
 
 
 def record_project_event(

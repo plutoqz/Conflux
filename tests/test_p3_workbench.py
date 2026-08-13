@@ -83,21 +83,18 @@ def p3_server(tmp_path, monkeypatch):
 
     monkeypatch.setattr(server, "_research_database", open_db)
     monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(server, "monitor_project",
-                        lambda *a, **kw: pytest.fail("monitor_project must not run on P3 page reads"))
     return server
 
 
 # ── flag ─────────────────────────────────────────────────────────────
 
 
-def test_p3_flag_in_build_status(p3_server, monkeypatch):
+def test_p3_overview_is_the_only_projects_page(p3_server, monkeypatch):
+    """P3.6: the rollback flag is gone; the P3 page is always enabled."""
     status = p3_server.build_status()
     assert status["p3"]["overview_enabled"] is True
-
     monkeypatch.setenv("CONFLUX_P3_OVERVIEW", "0")
-    assert p3_server.build_status()["p3"]["overview_enabled"] is False
-    monkeypatch.setenv("CONFLUX_P3_OVERVIEW", "1")
+    assert p3_server.build_status()["p3"]["overview_enabled"] is True
 
 
 # ── v1 list / state ──────────────────────────────────────────────────
@@ -533,14 +530,15 @@ def test_workbench_static_surface_exposes_p3_page():
         assert marker in app, f"missing {marker} in app.js"
 
 
-def test_legacy_projects_route_contract_unchanged(p3_server, tmp_path, monkeypatch):
-    """The legacy /api/projects payload keeps its contract (plan §17.2)."""
-    _write_project_yaml(tmp_path)
-    from conflux.project_registry import monitor_project
+def test_legacy_overview_paths_removed_in_p36(p3_server):
+    """P3.6: legacy aggregation/cache/audit endpoints no longer exist."""
+    for name in (
+        "build_projects_overview",
+        "refresh_projects",
+        "run_progress_audit",
+        "_write_project_cache",
+        "_load_project_cache",
+        "update_registered_project_settings",
+    ):
+        assert not hasattr(p3_server, name), name
 
-    monkeypatch.setattr(p3_server, "monitor_project", monitor_project)
-
-    result = p3_server.build_projects_overview()
-
-    assert result["ok"] is True
-    assert result["projects"][0]["project"]["id"] == "demo"

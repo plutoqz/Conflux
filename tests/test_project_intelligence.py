@@ -26,7 +26,6 @@ from conflux.projects import (
     SnapshotTrigger,
     build_snapshot,
     ingest_events,
-    legacy_overview_adapter,
     new_event,
     new_snapshot,
     register_project_intelligence_migration,
@@ -244,24 +243,53 @@ def test_application_refresh_and_state(tmp_path: Path):
     assert app.revisions("p3-test")[0]["revision"] == 1
 
 
-def test_legacy_overview_adapter(tmp_path: Path):
+
+
+# ── P3.6 replay cursor + partition caps ────────────────────────────
+
+
+def test_incremental_replay_uses_cursor_and_caps_partitions(tmp_path: Path):
+    """>1000 events: batched replay, bounded partitions, cursor advances."""
     intelligence = _intelligence(_db(tmp_path))
-    app = ProjectStateApplication(intelligence)
-    app.refresh(_project(), force=True)
-    legacy = {
-        "ok": True,
-        "projects": [
-            {
-                "project": {"id": "p3-test", "name": "P3 Test"},
-                "health": "ok",
-                "repository": {},
-            }
-        ],
-        "registry_errors": [],
-        "refresh_mode": "manual",
-        "scheduler_active": False,
-    }
-    merged = legacy_overview_adapter(legacy, intelligence)
-    assert merged["p3"]["enabled"] is True
-    assert merged["projects"][0]["p3"]["revision"] == 1
-    assert merged["projects"][0]["p3"]["protocol_version"] == P3_PROTOCOL_VERSION
+    project = _project()
+    first = build_snapshot(intelligence, project)
+    assert first.event_cursor == 0
+
+    # 1200 run events: far beyond the old single-fetch 1000-event limit.
+    for index in range(1200):
+        intelligence.events.append(new_event(
+            "p3-test", EventKind.RESEARCH_QUERY_COMPLETED,
+            payload={"run_id": f"run-{index:04d}", "status": "completed",
+                     "work_item_id": "", "elapsed_seconds": 1.0},
+        ))
+    second = build_snapshot(intelligence, project)
+    runs = second.run_state.get("runs") or []
+    assert len(runs) == 200  # capped, newest survive
+    assert runs[-1]["run_id"] == "run-1199"
+    assert second.event_cursor == 1200
+
+    # One new event -> cursor advances by exactly one, state stays bounded.
+    intelligence.events.append(new_event(
+        "p3-test", EventKind.GIT_HEAD_CHANGED,
+        payload={"root": ".", "branch": "main", "head": "h2",
+                 "recent_subjects": ["x"], "checked_at": time.time()},
+    ))
+    third = build_snapshot(intelligence, project)
+    assert third.event_cursor == 1201
+    assert third.git_state.head == "h2"
+    assert len(third.run_state.get("runs") or []) == 200
+
+
+def test_force_rebuild_replays_full_log(tmp_path: Path):
+    intelligence = _intelligence(_db(tmp_path))
+    project = _project()
+    build_snapshot(intelligence, project)
+    for index in range(20):
+        intelligence.events.append(new_event(
+            "p3-test", EventKind.RESEARCH_QUERY_COMPLETED,
+            payload={"run_id": f"r{index}", "status": "completed"},
+        ))
+    build_snapshot(intelligence, project)
+    forced = build_snapshot(intelligence, project, force=True)
+    assert len(forced.run_state.get("runs") or []) == 20
+    assert forced.event_cursor == 20

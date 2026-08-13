@@ -7,11 +7,7 @@ API with legacy adapter.  UI work is out of scope until P3.3.
 
 from __future__ import annotations
 
-from .application import (
-    ProjectStateApplication,
-    legacy_overview_adapter,
-    record_project_event,
-)
+from .application import ProjectStateApplication, record_project_event
 from .collectors import collect_all_events, collect_test_events, ingest_events
 from .contracts import (
     P3_PROTOCOL_VERSION,
@@ -105,7 +101,6 @@ __all__ = [
     "intent_work_item_map",
     "knowledge_state",
     "latest_confirmed_summary",
-    "legacy_overview_adapter",
     "materialize_links",
     "new_event",
     "new_snapshot",

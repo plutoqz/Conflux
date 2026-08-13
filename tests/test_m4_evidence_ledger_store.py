@@ -200,9 +200,9 @@ def test_workbench_static_surface_exposes_evidence_review_controls() -> None:
     root = Path(__file__).resolve().parents[1] / "src/conflux/workbench/static"
     html = (root / "index.html").read_text(encoding="utf-8")
     app = (root / "app.js").read_text(encoding="utf-8")
-    assert "researchEvidenceReviewsList" in html
-    assert "renderEvidenceReviews" in app
-    assert "/api/evidence/reviews/resolve" in app
+    # P3.6: evidence reviews surface through the unified project inbox.
+    assert "p3InboxList" in html
+    assert "resolveP3Review" in app
 
 
 def test_project_evidence_reviews_include_unscoped_changes(tmp_path: Path, monkeypatch) -> None:

@@ -448,8 +448,6 @@ def p35_server(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(server, "_research_database", open_db)
     monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(server, "monitor_project",
-                        lambda *a, **kw: pytest.fail("monitor_project must not run on P3 audit reads"))
     return server
 
 

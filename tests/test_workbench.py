@@ -694,8 +694,8 @@ def test_frontend_has_login_and_backend_owned_timeout_flow():
     assert "交付完整性：" in app
     assert "引用核验：" in app
     assert "未完成扩展问题：" in app
-    assert "人工计划来源" in html
-    assert "最近审计证据" in html
+    assert "人工状态写入项目 YAML" in html
+    assert "周期审计与摘要" in html
 
 
 def test_timeout_and_user_cancel_have_distinct_terminal_states():
@@ -1252,81 +1252,24 @@ def test_paper_search_error_uses_summary_and_collapsible_raw_details():
     assert "JSON.stringify(data, null, 2)" in app
 
 
-def test_workbench_progress_audit_creates_and_compares_baseline(tmp_path):
-    from conflux.workbench.server import run_progress_audit
-
-    project = tmp_path / "project"
-    project.mkdir()
-
-    def git(*args):
-        return subprocess.run(
-            ["git", *args],
-            cwd=project,
-            text=True,
-            encoding="utf-8",
-            capture_output=True,
-            check=True,
-        )
-
-    git("init")
-    git("config", "user.name", "Workbench Test")
-    git("config", "user.email", "workbench@example.com")
-    (project / "README.md").write_text("# Project\n", encoding="utf-8")
-    git("add", "README.md")
-    git("commit", "-m", "Initial project")
-
-    profile = tmp_path / "profile.yaml"
-    profile.write_text("\n".join([
-        "id: progress-profile",
-        "name: Progress Profile",
-        "fields: [cs.AI]",
-        f"research_questions: [{json.dumps('What changed?')}]",
-        "keywords: [progress]",
-        f"project_paths: [{json.dumps(str(project))}]",
-    ]), encoding="utf-8")
-    output = tmp_path / "audit-output"
-    payload = {
-        "profile": str(profile),
-        "project_path": str(project),
-        "out_dir": str(output),
-    }
-
-    first = run_progress_audit(payload)
-    (project / "method.py").write_text("VALUE = 1\n", encoding="utf-8")
-    git("add", "method.py")
-    git("commit", "-m", "Add research method")
-    second = run_progress_audit(payload)
-
-    assert first["ok"] is True
-    assert first["report"]["baseline_status"] == "created"
-    assert second["report"]["baseline_status"] == "compared"
-    assert second["report"]["real_progress"][0]["evidence_refs"][0].startswith("git:")
-    assert Path(second["markdown_path"]).exists()
-    assert Path(second["snapshot_path"]).exists()
-
-
 def test_frontend_exposes_evidence_backed_progress_audit():
+    """P3.5 cycle audit surface (replaces the removed /api/progress/audit)."""
     html = Path("src/conflux/workbench/static/index.html").read_text(encoding="utf-8")
     app = Path("src/conflux/workbench/static/app.js").read_text(encoding="utf-8")
 
     for element_id in (
-        "progress",
-        "progressProfile",
-        "progressProjectPath",
-        "progressTestCommand",
-        "runProgressAudit",
-        "realProgressList",
-        "progressRiskList",
-        "weakSignalsList",
-        "nextActionsList",
+        "p3AuditTitle",
+        "p3AuditBody",
+        "p3RunAudit",
     ):
         assert f'id="{element_id}"' in html
-    assert "'/api/progress/audit'" in app
-    assert "renderProgressAudit(data)" in app
-    assert "item.evidence_refs" in app
+    assert "'/audit'" in app or "'/audit/confirm'" in app
+    assert "renderP3AuditDraft" in app
+    assert "claim.evidence_refs" in app
 
 
 def test_frontend_exposes_unified_project_monitoring_panel():
+    """P3.6: the P3 panel is the only project page; legacy aggregation is gone."""
     html = Path("src/conflux/workbench/static/index.html").read_text(encoding="utf-8")
     app = Path("src/conflux/workbench/static/app.js").read_text(encoding="utf-8")
     css = Path("src/conflux/workbench/static/app.css").read_text(encoding="utf-8")
@@ -1335,32 +1278,27 @@ def test_frontend_exposes_unified_project_monitoring_panel():
         "projects",
         "projectList",
         "refreshProjects",
-        "refreshSelectedProject",
         "projectRegisterForm",
-        "projectRepoState",
-        "projectTimeline",
-        "projectActualEvidence",
-        "analyzeProjectPlan",
-        "applyPlanAnalysis",
-        "generateProjectCharter",
-        "applyProjectCharter",
-        "auditSelectedProject",
-        "projectAuditProgressList",
-        "projectConfigPath",
+        "projectDetailP3",
+        "p3WorkItemsTable",
+        "p3InboxList",
     ):
         assert f'id="{element_id}"' in html
-    for project_tab in ("overview", "plan", "evidence", "settings"):
-        assert f'data-project-tab="{project_tab}"' in html
-    assert "'/api/projects/refresh'" in app
+    for project_tab in ("overview", "work", "evidence", "activity", "inbox"):
+        assert f'data-p3-tab="{project_tab}"' in html
+    assert "'/api/v1/projects" in app
     assert "'/api/projects/save'" in app
-    assert "'/api/projects/plan-analysis'" in app
-    assert "'/api/projects/plan-analysis/apply'" in app
-    assert "'/api/projects/charter/generate'" in app
-    assert "'/api/projects/charter/apply'" in app
-    assert "repo.is_repository" in app
-    assert "nav('progress')" not in app[app.index("async function auditSelectedProject"):app.index("function renderAuditItems")]
+    assert "'/api/projects/research/run'" in app
+    # Legacy aggregation endpoints are removed with the old page (plan §17.2).
+    for legacy_endpoint in (
+        "'/api/projects/refresh'",
+        "'/api/projects/plan-analysis'",
+        "'/api/projects/charter/generate'",
+        "'/api/progress/audit'",
+    ):
+        assert legacy_endpoint not in app
+    assert "data-project-tab=" not in html
     assert ".project-workspace" in css
-    assert ".plan-timeline" in css
     assert "--sidebar: #0c485e" in css
     assert "--sidebar-active: #3b755f" in css
     assert "--control-height: 40px" in css
@@ -1375,15 +1313,13 @@ def test_frontend_exposes_fixed_knowledge_reports_search_and_project_settings():
     for element_id in (
         "webSearchProvider",
         "serpapiApiKey",
-        "saveProjectSettings",
-        "projectNameConfig",
-        "projectDocumentFilesConfig",
-        "planAnalysisError",
-        "planAnalysisErrorDetail",
+        "p3SettingsSave",
+        "p3cfgName",
+        "p3cfgDocumentDirs",
     ):
         assert f'id="{element_id}"' in html
     assert 'class="single-line-textarea"' in html
-    assert "'/api/projects/settings'" in app
+    assert "'/api/v1/projects/' + encodeURIComponent(selectedProjectId) + '/settings'" in app
     assert "'/api/markdown?path='" in app
     assert "JSON.stringify(data, null, 2)" in app
     assert "const merged = statusCache.reports || []" in app
@@ -1392,104 +1328,6 @@ def test_frontend_exposes_fixed_knowledge_reports_search_and_project_settings():
     assert "container-type: inline-size" in css
     assert "@container (min-width: 520px)" in css
     assert ".query-layout > .surface" in css
-
-
-def test_project_refresh_contract_is_manual_and_scheduler_is_inactive(tmp_path, monkeypatch):
-    import yaml
-    from conflux.workbench import server
-
-    project = tmp_path / "project"
-    project.mkdir()
-    projects_dir = tmp_path / "projects"
-    projects_dir.mkdir()
-    (projects_dir / "manual.yaml").write_text(yaml.safe_dump({
-        "id": "manual",
-        "name": "Manual project",
-        "path": "project",
-        "refresh": {
-            "mode": "manual",
-            "schedule_enabled": False,
-            "interval_minutes": 120,
-            "next_refresh_at": "",
-        },
-    }, sort_keys=False), encoding="utf-8")
-    monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
-
-    result = server.build_projects_overview()
-
-    assert result["refresh_mode"] == "manual"
-    assert result["scheduler_active"] is False
-    assert result["projects"][0]["project"]["refresh"]["interval_minutes"] == 120
-    assert result["projects"][0]["repository"]["sync_status"] == "not_applicable"
-
-
-def test_project_overview_ignores_stale_cache_for_local_git_state(tmp_path, monkeypatch):
-    import yaml
-    from conflux.workbench import server
-
-    project = tmp_path / "project"
-    project.mkdir()
-    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True)
-    (project / "README.md").write_text("# Project\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README.md"], cwd=project, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-c", "user.name=Conflux Test", "-c", "user.email=test@example.com", "commit", "-m", "initial"],
-        cwd=project,
-        check=True,
-        capture_output=True,
-    )
-    current_head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=project,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-    projects_dir = tmp_path / "projects"
-    projects_dir.mkdir()
-    (projects_dir / "fresh.yaml").write_text(yaml.safe_dump({
-        "id": "fresh",
-        "name": "Fresh project",
-        "path": str(project),
-    }, sort_keys=False), encoding="utf-8")
-    cache_dir = tmp_path / "reports" / "workbench" / "projects"
-    cache_dir.mkdir(parents=True)
-    (cache_dir / "fresh.json").write_text(json.dumps({
-        "project": {"path": str(project)},
-        "repository": {
-            "head": "stale-head",
-            "remote_name": "origin",
-            "remote_head": "remote-head",
-            "remote_checked": True,
-            "sync_status": "in_sync",
-        },
-        "alerts": [{"severity": "warning", "title": "缺少项目纲领", "detail": "stale"}],
-    }), encoding="utf-8")
-    subprocess.run(["git", "mv", "README.md", "RENAMED.md"], cwd=project, check=True, capture_output=True)
-    (project / "PROJECT.md").write_text("# Project charter\n", encoding="utf-8")
-    (project / "untracked.txt").write_text("current change\n", encoding="utf-8")
-    reports = project / "reports"
-    reports.mkdir()
-    (reports / "current.md").write_text("# Current report\n", encoding="utf-8")
-    monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
-
-    result = server.build_projects_overview()
-
-    assert result["projects"][0]["repository"]["head"] == current_head
-    assert set(result["projects"][0]["repository"]["dirty_files"]) == {
-        "PROJECT.md",
-        "RENAMED.md",
-        "reports/current.md",
-        "untracked.txt",
-    }
-    assert result["projects"][0]["repository"]["remote_checked"] is False
-    assert result["projects"][0]["repository"]["remote_head"] == ""
-    assert result["projects"][0]["repository"]["cached_remote_head"] == "remote-head"
-    assert result["projects"][0]["repository"]["sync_status"] == "unknown"
-    assert result["projects"][0]["reports"]["count"] == 1
-    assert result["projects"][0]["reports"]["recent_files"][0]["path"] == "reports/current.md"
-    assert not any(alert["title"] == "缺少项目纲领" for alert in result["projects"][0]["alerts"])
 
 
 def test_workbench_config_saves_three_user_model_tiers_and_role_routes(tmp_path, monkeypatch):

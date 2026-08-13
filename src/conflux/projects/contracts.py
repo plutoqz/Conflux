@@ -177,7 +177,13 @@ class GitState(BaseModel):
 
 
 class ProjectContextSnapshot(BaseModel):
-    """Immutable, comparable versioned project state (P3 §5.4)."""
+    """Immutable, comparable versioned project state (P3 §5.4).
+
+    ``event_cursor`` (P3.6): the last applied ``project_events.event_id``;
+    incremental builds replay only events after it.  Additive field — old
+    snapshots lack it and read as 0 (full replay), so the wire format stays
+    backward compatible.
+    """
 
     snapshot_id: str
     project_id: str
@@ -186,6 +192,7 @@ class ProjectContextSnapshot(BaseModel):
     trigger: SnapshotTrigger = SnapshotTrigger.INITIAL
     definition_version: str = ""
     document_index_version: str = ""
+    event_cursor: int = 0
     git_state: GitState = Field(default_factory=GitState)
     work_items: list[dict[str, Any]] = Field(default_factory=list)
     knowledge_state: dict[str, Any] = Field(default_factory=dict)

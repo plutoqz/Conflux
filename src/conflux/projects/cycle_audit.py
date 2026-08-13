@@ -55,12 +55,24 @@ def _period_events(
     project_id: str,
     start: float,
     end: float,
+    *,
+    max_events: int = 10000,
 ) -> list[dict[str, Any]]:
-    events = intelligence.events.list(project_id, limit=2000)
-    return [
-        event for event in events
-        if start < float(event.get("created_at") or 0) <= end
-    ]
+    """Events with ``start < created_at <= end``, paginated by event id."""
+    matched: list[dict[str, Any]] = []
+    cursor = 0
+    while len(matched) < max_events:
+        events = intelligence.events.list(project_id, after_event_id=cursor, limit=500)
+        if not events:
+            return matched
+        for event in events:
+            created = float(event.get("created_at") or 0)
+            if created > end:
+                return matched
+            if start < created:
+                matched.append(event)
+        cursor = max(int(event["event_id"]) for event in events)
+    return matched
 
 
 def latest_confirmed_summary(

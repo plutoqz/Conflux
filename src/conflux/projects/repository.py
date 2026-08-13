@@ -98,6 +98,7 @@ PROJECT_INTELLIGENCE_STATEMENTS: list[str] = [
         trigger TEXT NOT NULL DEFAULT 'initial',
         definition_version TEXT NOT NULL DEFAULT '',
         document_index_version TEXT NOT NULL DEFAULT '',
+        event_cursor INTEGER NOT NULL DEFAULT 0,
         git_state_json TEXT NOT NULL DEFAULT '{}',
         work_items_json TEXT NOT NULL DEFAULT '[]',
         knowledge_state_json TEXT NOT NULL DEFAULT '{}',
@@ -172,6 +173,22 @@ CYCLE_SUMMARY_STATEMENTS: list[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_project_cycle_summaries_project ON project_cycle_summaries(project_id, current_revision)",
 ]
+
+
+def _ensure_snapshot_cursor_column(db: SQLiteDatabase) -> None:
+    """P3.6: add project_snapshots.event_cursor to pre-P3.6 databases.
+
+    ``ALTER TABLE ADD COLUMN`` is not idempotent, so this is guarded by a
+    PRAGMA check instead of a raw migration statement; fresh installs get the
+    column from the 0007 CREATE TABLE itself.
+    """
+    rows = db.connection.execute("PRAGMA table_info(project_snapshots)").fetchall()
+    if any(str(row["name"]) == "event_cursor" for row in rows):
+        return
+    db.connection.execute(
+        "ALTER TABLE project_snapshots ADD COLUMN event_cursor INTEGER NOT NULL DEFAULT 0"
+    )
+    db.connection.commit()
 
 
 def _json_dumps(value: Any) -> str:
@@ -282,15 +299,17 @@ class ProjectSnapshotStore:
             """
             INSERT OR REPLACE INTO project_snapshots (
                 snapshot_id, project_id, revision, created_at, trigger,
-                definition_version, document_index_version, git_state_json,
-                work_items_json, knowledge_state_json, research_state_json,
-                run_state_json, evidence_state_json, health, summary_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                definition_version, document_index_version, event_cursor,
+                git_state_json, work_items_json, knowledge_state_json,
+                research_state_json, run_state_json, evidence_state_json,
+                health, summary_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 snapshot.snapshot_id, snapshot.project_id, snapshot.revision,
                 snapshot.created_at, snapshot.trigger.value,
                 snapshot.definition_version, snapshot.document_index_version,
+                int(snapshot.event_cursor or 0),
                 _json_dumps(snapshot.git_state.model_dump()),
                 _json_dumps(snapshot.work_items),
                 _json_dumps(snapshot.knowledge_state),
@@ -361,6 +380,7 @@ def _snapshot_from_row(row: Any) -> ProjectContextSnapshot:
         trigger=row["trigger"],
         definition_version=str(row["definition_version"]),
         document_index_version=str(row["document_index_version"]),
+        event_cursor=int(row["event_cursor"] or 0),
         git_state=_json_loads(row["git_state_json"], {}),
         work_items=_json_loads(row["work_items_json"], []),
         knowledge_state=_json_loads(row["knowledge_state_json"], {}),
@@ -658,4 +678,5 @@ class ProjectIntelligence:
             self.db.connection.execute(statement)
         for statement in CYCLE_SUMMARY_STATEMENTS:
             self.db.connection.execute(statement)
+        _ensure_snapshot_cursor_column(self.db)
         self.db.connection.commit()
