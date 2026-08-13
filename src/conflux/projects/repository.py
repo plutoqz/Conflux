@@ -155,7 +155,15 @@ PROJECT_INTELLIGENCE_STATEMENTS: list[str] = [
 
 
 def _json_dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    """Serialize for SQLite JSON columns; replace unpaired surrogates.
+
+    PDF/DOCX extraction can emit lone surrogates (broken math glyphs) that
+    crash UTF-8 encoding in sqlite3 and later JSON responses.  The UTF-16
+    round-trip preserves valid surrogate pairs and replaces unpaired ones
+    with U+FFFD so storage stays UTF-8-safe.
+    """
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return payload.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
 
 
 def _json_loads(value: str, default: Any) -> Any:

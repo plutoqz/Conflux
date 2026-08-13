@@ -48,3 +48,6 @@ workbench-*.pid
 
 # Ad-hoc smoke/eval scripts (P2.6 and earlier)
 .tmp/
+
+# ZCode session artifacts
+.zcode/

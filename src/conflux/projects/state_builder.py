@@ -4,6 +4,10 @@ The builder reads the latest snapshot, applies new events incrementally
 (recomputing only affected partitions), runs deterministic health rules, and
 writes an immutable snapshot plus the materialized current state
 (plan §9.2).  It never invokes the model and never writes declared state.
+
+P3.3: partitions that are deterministic projections (work items from the
+YAML plan, knowledge state from the document index) are recomputed here so
+the page payload stays a single materialized read.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from .contracts import (
     SnapshotTrigger,
     new_snapshot,
 )
+from .projections import knowledge_state, work_item_projection
 from .repository import ProjectIntelligence
 
 
@@ -64,6 +69,44 @@ def _health_from_snapshot(snapshot: ProjectContextSnapshot) -> str:
     return "ok"
 
 
+def _summary_from_snapshot(
+    snapshot: ProjectContextSnapshot,
+    *,
+    pending_review_count: int,
+    event_count: int,
+) -> dict[str, Any]:
+    """Deterministic first-screen summary (plan §7.2)."""
+    items = snapshot.work_items or []
+    milestones = [item for item in items if item.get("kind") == "milestone"]
+    in_progress = [item for item in milestones if item.get("declared_status") == "in_progress"]
+    blocked = [item for item in items if item.get("declared_status") == "blocked"]
+    planned = [item for item in milestones if item.get("declared_status") == "planned"]
+    actions = [item for item in items if item.get("kind") == "action"]
+    goal = next((item for item in items if item.get("kind") == "research_question"), None)
+    focus_candidates = in_progress + planned + blocked + actions
+    focus = focus_candidates[0] if focus_candidates else (goal or (milestones[0] if milestones else None))
+    next_actions = [
+        item for item in items if item.get("kind") == "action"
+    ][:3]
+    runs = snapshot.run_state.get("runs") or []
+    return {
+        "revision": snapshot.revision,
+        "focus": (focus or {}).get("title", "") if focus else "",
+        "focus_kind": (focus or {}).get("kind", "") if focus else "",
+        "in_progress": [item["title"] for item in in_progress],
+        "blocked": [item["title"] for item in blocked],
+        "next_actions": [item["title"] for item in next_actions],
+        "pending_review_count": pending_review_count,
+        "run_count": len(runs),
+        "event_count": event_count,
+        "git": {
+            "branch": snapshot.git_state.branch,
+            "head": snapshot.git_state.head,
+            "dirty_files": snapshot.git_state.dirty_files,
+        },
+    }
+
+
 def build_snapshot(
     intelligence: ProjectIntelligence,
     project: ProjectDefinition,
@@ -106,16 +149,19 @@ def build_snapshot(
     for event in events:
         _apply_event_to_snapshot(snapshot, event)
 
+    # Deterministic projections (P3.3): declared plan -> work items,
+    # document index -> knowledge state.  No model, no scan.
+    snapshot.work_items = work_item_projection(project)
+    snapshot.knowledge_state = knowledge_state(intelligence, project.id)
+
+    pending_reviews = intelligence.reviews.list(project.id, status="pending")
+    snapshot.summary = _summary_from_snapshot(
+        snapshot,
+        pending_review_count=len(pending_reviews),
+        event_count=len(events),
+    )
     snapshot.health = _health_from_snapshot(snapshot)
-    snapshot.summary = {
-        "revision": snapshot.revision,
-        "event_count": len(events),
-        "work_item_count": len(snapshot.work_items),
-        "git": {
-            "branch": snapshot.git_state.branch,
-            "head": snapshot.git_state.head,
-            "dirty_files": snapshot.git_state.dirty_files,
-        },
-    }
+    if snapshot.summary.get("blocked"):
+        snapshot.health = "warning"
     intelligence.snapshots.save(snapshot)
     return snapshot

@@ -16,6 +16,15 @@ let projectPlanAnalysis = null;
 let projectCharterDraft = null;
 let planAnalysisTimers = [];
 let projectRegistryDir = 'projects';
+// P3.3 snapshot-driven project page
+let p3ProjectsCache = [];
+let p3StateCache = {};
+let p3Sse = null;
+let p3SseProjectId = '';
+let p3RefreshTimer = null;
+let p3ConfirmTarget = null;
+let activeP3Tab = 'overview';
+let queryProjectContext = null;
 const MODEL_TIERS = ['quick', 'standard', 'deep'];
 const FEATURE_MODELS = [
   { key: 'profile_optimization', prefix: 'profileOptimization' },
@@ -229,6 +238,10 @@ function closeSidebar() {
   $('menuButton').setAttribute('aria-expanded', 'false');
 }
 
+function p3Enabled() {
+  return Boolean(statusCache && statusCache.p3 && statusCache.p3.overview_enabled);
+}
+
 function nav(target, options = {}) {
   const nextNav = document.querySelector('.nav-item[data-target="' + target + '"]');
   const nextView = $(target);
@@ -245,6 +258,7 @@ function nav(target, options = {}) {
   $('pageSubtitle').textContent = nextNav.dataset.subtitle;
   if (window.location.hash !== '#' + target) history.replaceState(null, '', '#' + target);
   closeSidebar();
+  if (target !== 'projects') closeP3Sse();
   if (options.focus) $('pageTitle').focus({ preventScroll: true });
   window.scrollTo({ top: 0, behavior: 'instant' });
 }
@@ -645,6 +659,28 @@ async function loadProjects(options = {}) {
   if (button) enterBusy(button, options.projectId ? '检查项目' : '检查全部');
   $('projectsError').hidden = true;
   try {
+    if (p3Enabled()) {
+      if (refresh) {
+        const ids = options.projectId
+          ? [options.projectId]
+          : (p3ProjectsCache || []).map((item) => item.id);
+        for (const projectId of ids) {
+          const result = await api('/api/v1/projects/' + encodeURIComponent(projectId) + '/refresh', {});
+          if (!result.ok) throw new Error(result.error || '项目检查失败');
+        }
+      }
+      const response = await authFetch('/api/v1/projects', { cache: 'no-store' });
+      const data = await response.json().catch(() => ({}));
+      if (!data.ok) throw new Error(data.error || '项目状态加载失败');
+      p3ProjectsCache = data.projects || [];
+      if (!p3ProjectsCache.some((item) => item.id === selectedProjectId)) {
+        selectedProjectId = p3ProjectsCache[0] ? p3ProjectsCache[0].id : '';
+      }
+      projectRegistryDir = data.registry_dir || projectRegistryDir;
+      renderP3ProjectList(data);
+      if (refresh) toast(options.projectId ? '项目状态已检查' : '全部项目状态已检查', 'ok');
+      return;
+    }
     let data;
     if (refresh) {
       data = await api('/api/projects/refresh', { project_id: options.projectId || '' });
@@ -716,8 +752,10 @@ function renderProjects(registryErrors, registryDir) {
   document.querySelectorAll('.project-row').forEach((button) => button.addEventListener('click', () => {
     if (selectedProjectId !== button.dataset.projectId) {
       activeProjectTab = 'overview';
+      activeP3Tab = 'overview';
       projectPlanAnalysis = null;
       projectCharterDraft = null;
+      closeP3Sse();
     }
     selectedProjectId = button.dataset.projectId;
     renderProjects(registryErrors, registryDir);
@@ -727,6 +765,10 @@ function renderProjects(registryErrors, registryDir) {
 }
 
 function renderSelectedProject() {
+  if (p3Enabled()) {
+    renderP3SelectedProject();
+    return;
+  }
   const overview = projectsCache.find((item) => item.project.id === selectedProjectId);
   $('projectDetailEmpty').hidden = Boolean(overview);
   $('projectDetail').hidden = !overview;
@@ -826,6 +868,586 @@ function selectProjectTab(tabName) {
     const active = panel.dataset.projectPanel === tabName;
     panel.classList.toggle('active', active);
     panel.hidden = !active;
+  });
+}
+
+// ── P3.3 快照驱动的项目页（四主视图 + 统一待处理） ───────────────────
+
+const P3_KIND_LABELS = {
+  research_question: '研究问题',
+  hypothesis: '假设',
+  milestone: '里程碑',
+  experiment: '实验',
+  decision: '决策',
+  action: '行动'
+};
+const P3_DECLARED_LABELS = { planned: '计划中', in_progress: '进行中', completed: '已完成', blocked: '受阻' };
+const P3_OBSERVED_LABELS = { no_evidence: '无证据', active: '有活动', verified: '已核验', failed: '失败', stale: '过期' };
+const P3_INFERRED_LABELS = { planned: '计划中', in_progress: '进行中', completed: '已完成', blocked: '受阻', needs_review: '需要复核' };
+const P3_REVIEW_KIND_LABELS = {
+  plan_drift: '计划漂移',
+  evidence_change: '证据变化',
+  new_paper: '新论文',
+  run_failure: '失败运行',
+  index_stale: '索引过期',
+  document_authority: '文档确权',
+  status_suggestion: '状态建议',
+  branch_divergence: '分支偏离'
+};
+const P3_JOB_STATUS_LABELS = {
+  pending: '排队中', running: '运行中', completed: '已完成',
+  completed_with_warnings: '完成（有警告）', cancelled: '已取消',
+  failed: '失败', timed_out: '超时', timed_out_with_report: '超时（有报告）',
+  completed_diagnostic: '完成（诊断）'
+};
+
+function closeP3Sse() {
+  if (p3Sse) {
+    p3Sse.close();
+    p3Sse = null;
+  }
+  p3SseProjectId = '';
+  if (p3RefreshTimer) {
+    window.clearTimeout(p3RefreshTimer);
+    p3RefreshTimer = null;
+  }
+}
+
+function openP3Sse(projectId) {
+  if (p3Sse && p3SseProjectId === projectId) return;
+  closeP3Sse();
+  if (typeof EventSource === 'undefined') return;
+  p3SseProjectId = projectId;
+  p3Sse = new EventSource('/api/v1/projects/' + encodeURIComponent(projectId) + '/events');
+  p3Sse.onmessage = () => {
+    if (!p3RefreshTimer) {
+      p3RefreshTimer = window.setTimeout(() => {
+        p3RefreshTimer = null;
+        if (selectedProjectId === p3SseProjectId) loadP3State();
+      }, 400);
+    }
+  };
+  // EventSource reconnects automatically with Last-Event-ID; no handler needed.
+}
+
+function renderP3ProjectList(data) {
+  const projects = data.projects || [];
+  const pendingTotal = projects.reduce((sum, item) => sum + (item.pending_reviews || 0), 0);
+  $('projectNavCount').textContent = String(projects.length);
+  $('projectCount').textContent = String(projects.length);
+  $('projectRegistryPath').textContent = data.registry_dir || 'projects/';
+  if (pendingTotal) {
+    $('projectSummaryState').textContent = pendingTotal + ' 项待处理';
+    $('projectSummaryState').className = 'status-pill warn';
+  } else {
+    $('projectSummaryState').textContent = projects.length ? '状态正常' : '等待登记';
+    $('projectSummaryState').className = 'status-pill ' + (projects.length ? 'ok' : 'neutral');
+  }
+  $('projectSummaryText').textContent = projects.length
+    ? '共 ' + projects.length + ' 个项目，状态来自本地物化快照'
+    : '项目注册表为空';
+
+  $('projectRegistryErrors').hidden = !(data.registry_errors || []).length;
+  $('projectRegistryErrorList').innerHTML = (data.registry_errors || []).map((error) => '<p>' + escapeHtml(error) + '</p>').join('');
+  $('projectsEmpty').hidden = projects.length > 0;
+  $('projectList').innerHTML = projects.map((item) => {
+    const revision = item.revision || 0;
+    const branch = '';
+    return '<button class="project-row" type="button" role="option" data-project-id="' + escapeHtml(item.id) + '" aria-selected="' + String(item.id === selectedProjectId) + '">' +
+      '<span class="project-row-state ' + escapeHtml(item.health || '') + '" aria-hidden="true"></span>' +
+      '<span class="project-row-copy"><strong>' + escapeHtml(item.name || item.id) + '</strong><small title="' + escapeHtml(item.path || '') + '">' + escapeHtml(item.path || '') + '</small></span>' +
+      '<span class="project-row-meta"><span>' + (revision ? '快照 v' + revision : '尚未建立快照') + '</span><code>' + (item.documents_total || 0) + ' 份文档</code>' +
+      (item.pending_reviews ? '<span class="project-row-alerts"><i data-lucide="inbox" aria-hidden="true"></i>' + item.pending_reviews + '</span>' : '') + '</span></button>';
+  }).join('');
+  document.querySelectorAll('.project-row').forEach((button) => button.addEventListener('click', () => {
+    if (selectedProjectId !== button.dataset.projectId) {
+      activeProjectTab = 'overview';
+      activeP3Tab = 'overview';
+      projectPlanAnalysis = null;
+      projectCharterDraft = null;
+      closeP3Sse();
+    }
+    selectedProjectId = button.dataset.projectId;
+    renderP3ProjectList(data);
+  }));
+  renderP3SelectedProject();
+  refreshIcons();
+}
+
+function renderP3SelectedProject() {
+  const pane = $('projectDetailP3');
+  const has = Boolean(selectedProjectId);
+  $('projectDetail').hidden = true;
+  $('projectDetailEmpty').hidden = has;
+  pane.hidden = !has;
+  if (!has) return;
+  loadP3State();
+}
+
+async function loadP3State() {
+  const projectId = selectedProjectId;
+  if (!projectId) return;
+  try {
+    const response = await authFetch('/api/v1/projects/' + encodeURIComponent(projectId) + '/state', { cache: 'no-store' });
+    const data = await response.json().catch(() => ({}));
+    if (!data.ok) throw new Error(data.error || '项目状态加载失败');
+    if (selectedProjectId !== projectId) return;
+    p3StateCache[projectId] = data;
+    renderP3Header(data);
+    renderP3Overview(data);
+    renderP3WorkItems(data);
+    renderP3Evidence(data);
+    renderP3Activity(data);
+    renderP3Inbox(data);
+    refreshIcons();
+    openP3Sse(projectId);
+  } catch (error) {
+    if (selectedProjectId === projectId) {
+      $('p3ProjectName').textContent = '状态加载失败';
+      $('p3ProjectHealth').textContent = error.message;
+      $('p3ProjectHealth').className = 'status-pill error';
+    }
+  }
+}
+
+function selectP3Tab(tabName) {
+  const tabs = Array.from(document.querySelectorAll('[data-p3-tab]'));
+  if (!tabs.some((tab) => tab.dataset.p3Tab === tabName)) tabName = 'overview';
+  activeP3Tab = tabName;
+  tabs.forEach((tab) => {
+    const active = tab.dataset.p3Tab === tabName;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', String(active));
+  });
+  document.querySelectorAll('[data-p3-panel]').forEach((panel) => {
+    const active = panel.dataset.p3Panel === tabName;
+    panel.classList.toggle('active', active);
+    panel.hidden = !active;
+  });
+}
+
+function renderP3Header(data) {
+  const project = data.project || {};
+  const snapshot = data.snapshot || null;
+  const pending = (data.reviews || []).filter((item) => item.status === 'pending');
+  $('p3ProjectName').textContent = project.name || project.id || '-';
+  $('p3ProjectHealth').textContent = snapshot ? (snapshot.health === 'ok' ? '正常' : snapshot.health === 'warning' ? '需关注' : snapshot.health) : '未知';
+  $('p3ProjectHealth').className = 'status-pill ' + (snapshot ? projectHealthClass(snapshot.health) : 'neutral');
+  $('p3SnapshotAge').textContent = snapshot ? ('数据更新 ' + fmtDate(snapshot.updated_at || snapshot.created_at)) : '尚未建立快照';
+  $('p3SnapshotAge').className = 'status-pill ' + (snapshot ? 'neutral' : 'warn');
+  $('p3ProjectDescription').textContent = project.description || '暂无项目说明';
+  $('p3ProjectPath').textContent = project.path || '-';
+  $('p3ReviewCount').textContent = String(pending.length);
+  $('p3InboxTabCount').textContent = String(pending.length);
+}
+
+function p3DeclaredPill(status) {
+  return '<span class="p3-status-pill declared">' + escapeHtml(P3_DECLARED_LABELS[status] || status) + '</span>';
+}
+
+function p3ObservedPill(status) {
+  const cls = status === 'verified' ? 'verified' : status === 'failed' ? 'failed' : '';
+  return '<span class="p3-status-pill observed ' + cls + '">' + escapeHtml(P3_OBSERVED_LABELS[status] || status) + '</span>';
+}
+
+function p3InferredPill(status) {
+  return '<span class="p3-status-pill inferred ' + escapeHtml(status || '') + '">' + escapeHtml(P3_INFERRED_LABELS[status] || status) + '</span>';
+}
+
+function renderP3Overview(data) {
+  const snapshot = data.snapshot || null;
+  const summary = (snapshot && snapshot.summary) || {};
+  const focus = $('p3Focus');
+  if (summary.focus) {
+    const kindLabel = P3_KIND_LABELS[summary.focus_kind] || '工作项';
+    focus.innerHTML =
+      '<div class="focus-icon" aria-hidden="true"><i data-lucide="target"></i></div>' +
+      '<div><strong>' + escapeHtml(summary.focus) + '</strong>' +
+      '<small>' + escapeHtml(kindLabel) + ' · 快照 v' + (snapshot.revision || 0) + ' · ' + (summary.pending_review_count ? summary.pending_review_count + ' 项待处理' : '无待处理项') + '</small></div>';
+  } else {
+    focus.innerHTML =
+      '<div class="focus-icon" aria-hidden="true"><i data-lucide="target"></i></div>' +
+      '<div><strong>尚未定义研究计划</strong><small>在设置中登记总体目标、里程碑或后续行动，或运行一次“检查状态”。</small></div>';
+  }
+
+  const needs = [];
+  (summary.blocked || []).forEach((title) => {
+    needs.push('<div class="audit-item risk"><span class="audit-item-icon"><i data-lucide="triangle-alert" aria-hidden="true"></i></span><div><p>受阻：' + escapeHtml(title) + '</p></div></div>');
+  });
+  const pending = (data.reviews || []).filter((item) => item.status === 'pending').slice(0, 3);
+  pending.forEach((review) => {
+    needs.push(
+      '<div class="audit-item action"><span class="audit-item-icon"><i data-lucide="inbox" aria-hidden="true"></i></span>' +
+      '<div><p>' + escapeHtml(review.summary) + '</p><button class="p3-btn-goto" type="button" data-p3-goto="inbox">前往待处理</button></div></div>'
+    );
+  });
+  $('p3NeedsCount').textContent = String(needs.length ? (summary.blocked || []).length + pending.length : 0);
+  $('p3NeedsAction').innerHTML = needs.join('') || '<div class="p3-inbox-empty-row">当前没有阻塞或待处理项。</div>';
+
+  const activity = data.activity || {};
+  const progressEvents = [];
+  (activity.events || []).forEach((event) => {
+    const kind = String(event.kind || '');
+    if (!['research_query.completed', 'evidence.source_changed', 'work_item.confirmed', 'review.resolved'].includes(kind)) return;
+    progressEvents.push(event);
+  });
+  $('p3RecentProgress').innerHTML = progressEvents.slice(0, 5).map((event) => {
+    const kind = String(event.kind || '');
+    const icon = kind === 'research_query.completed' ? 'flask-conical' : kind === 'evidence.source_changed' ? 'file-warning' : 'check';
+    return '<div class="audit-item progress"><span class="audit-item-icon"><i data-lucide="' + icon + '" aria-hidden="true"></i></span>' +
+      '<div><p>' + escapeHtml(kind) + '</p><div class="audit-evidence"><code>' + escapeHtml(fmtDate(event.created_at)) + '</code></div></div></div>';
+  }).join('') || '<div class="p3-inbox-empty-row">暂无验证进展。测试、运行与证据变化会以事件形式记录在这里。</div>';
+
+  const running = (activity.jobs || []).filter((job) => ['pending', 'running'].includes(job.status));
+  $('p3Running').innerHTML = running.map((job) =>
+    '<div class="audit-item action"><span class="audit-item-icon"><i data-lucide="loader" aria-hidden="true"></i></span>' +
+    '<div><p>' + escapeHtml(job.query || job.run_id) + '</p><div class="audit-evidence"><code>' + escapeHtml(job.status) + '</code></div></div></div>'
+  ).join('') || '<div class="p3-inbox-empty-row">当前没有运行中的任务。</div>';
+
+  const git = (snapshot && snapshot.git_state) || {};
+  $('p3RepoBranch').textContent = git.is_repository ? (git.branch || 'detached') : '非 Git 目录';
+  $('p3RepoHead').textContent = git.head ? git.head.slice(0, 8) : '-';
+  $('p3DirtyFiles').textContent = git.dirty_files ? String(git.dirty_files) : '0';
+
+  $('p3FocusMeta').textContent = snapshot ? ('快照 v' + snapshot.revision) : '-';
+  document.querySelectorAll('[data-p3-goto="inbox"]').forEach((button) => button.addEventListener('click', () => selectP3Tab('inbox')));
+}
+
+function renderP3WorkItems(data) {
+  const snapshot = data.snapshot || null;
+  const items = (snapshot && snapshot.work_items) || [];
+  const body = $('p3WorkItemsBody');
+  $('p3WorkItemsEmpty').hidden = items.length > 0;
+  $('p3WorkItemsTable').style.display = items.length ? '' : 'none';
+  body.innerHTML = items.map((item) => {
+    const kind = item.kind || 'action';
+    const editable = kind === 'milestone' || kind === 'action';
+    return '<tr>' +
+      '<td><div class="p3-workitem-title">' + escapeHtml(item.title) + '</div></td>' +
+      '<td><span class="p3-kind-tag ' + (kind === 'milestone' ? 'plan' : '') + '">' + escapeHtml(P3_KIND_LABELS[kind] || kind) + '</span></td>' +
+      '<td>' + p3DeclaredPill(item.declared_status) + '</td>' +
+      '<td>' + p3ObservedPill(item.observed_status) + '</td>' +
+      '<td>' + p3InferredPill(item.inferred_status) + '</td>' +
+      '<td><div class="p3-workitem-criteria">' + escapeHtml((item.acceptance_criteria || []).join('；') || '未给出验收标准') + '</div></td>' +
+      '<td><div class="p3-workitem-actions">' + (editable
+        ? '<button class="button secondary compact" type="button" data-p3-status-edit="' + escapeHtml(item.work_item_id) + '"><i data-lucide="pencil" aria-hidden="true"></i><span>变更状态</span></button>'
+        : '<span class="field-hint">只读</span>') + '</div></td>' +
+      '</tr>';
+  }).join('');
+  document.querySelectorAll('[data-p3-status-edit]').forEach((button) => button.addEventListener('click', () => {
+    openP3Confirm(button.dataset.p3StatusEdit);
+  }));
+
+  const radar = data.radar || {};
+  $('p3RadarStatus').textContent = radar.status === 'not_run' ? '未运行' : (radar.usable ? '可用' : '需复核');
+  $('p3RadarStatus').className = 'status-pill ' + (radar.status === 'not_run' ? 'neutral' : radar.usable ? 'ok' : 'warn');
+  $('p3RadarIntents').textContent = radar.intents != null ? String(radar.intents) : '-';
+  $('p3RadarCandidates').textContent = radar.candidates != null ? String(radar.candidates) : '-';
+  $('p3RadarShortlisted').textContent = radar.shortlisted != null ? String(radar.shortlisted) : '-';
+  $('p3RadarSaved').textContent = radar.saved != null ? String(radar.saved) : '-';
+  $('p3RadarEmpty').hidden = radar.status !== 'not_run';
+}
+
+function p3AllDocuments(documents) {
+  if (!documents) return [];
+  const byAuthority = documents.by_authority || {};
+  return ['confirmed', 'candidate', 'excluded'].flatMap((authority) =>
+    (byAuthority[authority] || []).map((doc) => Object.assign({}, doc, { authority }))
+  );
+}
+
+function p3DocRow(doc) {
+  const kindLabel = { charter: '纲领', plan: '计划', decision: '决策', experiment: '实验', report: '报告', paper_note: '论文笔记', code_doc: '代码文档', other: '其他' }[doc.kind] || doc.kind;
+  const failed = doc.parse_status === 'failed';
+  let actions = '';
+  if (doc.authority === 'candidate') {
+    actions += '<button class="button primary compact p3-doc-authority" type="button" data-doc-id="' + escapeHtml(doc.document_id) + '" data-authority="confirmed"><i data-lucide="check" aria-hidden="true"></i><span>确权</span></button>';
+    actions += '<button class="button secondary compact p3-doc-authority" type="button" data-doc-id="' + escapeHtml(doc.document_id) + '" data-authority="excluded"><i data-lucide="x" aria-hidden="true"></i><span>排除</span></button>';
+  } else if (doc.authority === 'confirmed') {
+    actions += '<button class="button secondary compact p3-doc-authority" type="button" data-doc-id="' + escapeHtml(doc.document_id) + '" data-authority="excluded"><i data-lucide="x" aria-hidden="true"></i><span>排除</span></button>';
+  } else if (doc.authority === 'excluded') {
+    actions += '<button class="button secondary compact p3-doc-authority" type="button" data-doc-id="' + escapeHtml(doc.document_id) + '" data-authority="candidate"><i data-lucide="undo-2" aria-hidden="true"></i><span>恢复候选</span></button>';
+  }
+  return '<div class="p3-doc-row">' +
+    '<span class="p3-kind-tag ' + (doc.kind === 'charter' || doc.kind === 'plan' ? 'plan' : '') + '">' + escapeHtml(kindLabel) + '</span>' +
+    '<span class="doc-main"><span class="doc-path">' + escapeHtml(doc.path) + '</span><span class="doc-meta">' + escapeHtml((doc.title || '无标题') + (failed ? ' · 解析失败' : '')) + '</span></span>' +
+    '<span class="p3-doc-actions">' + actions + '</span></div>';
+}
+
+function renderP3Evidence(data) {
+  const documents = data.documents || null;
+  const all = p3AllDocuments(documents);
+  const stats = { confirmed: 0, candidate: 0, excluded: 0, failed: 0 };
+  all.forEach((doc) => {
+    stats[doc.authority] = (stats[doc.authority] || 0) + 1;
+    if (doc.parse_status === 'failed') stats.failed += 1;
+  });
+  $('p3DocStats').textContent = all.length ? (all.length + ' 份文档') : '尚未发现文档';
+  $('p3DocsConfirmed').innerHTML = all.filter((doc) => doc.authority === 'confirmed').map(p3DocRow).join('') || '<div class="p3-inbox-empty-row">没有已确权文档。确权后文档才作为计划分析依据。</div>';
+  $('p3DocsCandidates').innerHTML = all.filter((doc) => doc.authority === 'candidate' && doc.parse_status !== 'failed').map(p3DocRow).join('') || '<div class="p3-inbox-empty-row">没有待确权文档。运行“检查状态”以自动发现文档。</div>';
+  $('p3DocsFailed').innerHTML = all.filter((doc) => doc.parse_status === 'failed').map(p3DocRow).join('') || '<div class="p3-inbox-empty-row">没有解析失败的文档。</div>';
+  $('p3DocsExcluded').innerHTML = all.filter((doc) => doc.authority === 'excluded').map(p3DocRow).join('') || '<div class="p3-inbox-empty-row">没有排除的文档。</div>';
+  document.querySelectorAll('.p3-doc-authority').forEach((button) => button.addEventListener('click', () => {
+    setP3DocumentAuthority(button.dataset.docId, button.dataset.authority, button);
+  }));
+
+  const snapshot = data.snapshot || null;
+  const knowledge = (snapshot && snapshot.knowledge_state) || {};
+  const knowledgeDocs = knowledge.documents || {};
+  $('p3KnowledgeDocs').textContent = knowledgeDocs.total != null ? String(knowledgeDocs.total) : '-';
+  $('p3KnowledgeKinds').textContent = Object.keys(knowledgeDocs.by_kind || {}).length ? Object.keys(knowledgeDocs.by_kind).join('、') : '-';
+  $('p3KnowledgeFailed').textContent = knowledgeDocs.parse_failed != null ? String(knowledgeDocs.parse_failed) : '-';
+  $('p3KnowledgeIndex').textContent = (snapshot && snapshot.document_index_version) || '尚未建立索引';
+
+  const sources = (snapshot && snapshot.evidence_state && snapshot.evidence_state.sources) || [];
+  const evidenceReviews = (data.reviews || []).filter((item) => item.kind === 'evidence_change');
+  $('p3EvidenceSources').innerHTML = sources.map((source) =>
+    '<div class="audit-item"><span class="audit-item-icon"><i data-lucide="file-warning" aria-hidden="true"></i></span>' +
+    '<div><p>' + escapeHtml(source.source_id || '未知来源') + '</p><div class="audit-evidence"><code>' + escapeHtml(source.status || '') + '</code></div></div></div>'
+  ).join('') || '<div class="p3-inbox-empty-row">' + (evidenceReviews.length ? '有 ' + evidenceReviews.length + ' 项证据变化在待处理队列中。' : '暂无记录的证据来源变化。') + '</div>';
+}
+
+function renderP3Activity(data) {
+  const activity = data.activity || {};
+  const rows = [];
+  (activity.jobs || []).forEach((job) => {
+    const elapsed = job.started_at && job.ended_at
+      ? Math.max(1, Math.round((Number(job.ended_at) - Number(job.started_at)) / 1000)) + ' 秒'
+      : '-';
+    const cancellable = ['pending', 'running'].includes(job.status);
+    rows.push('<tr>' +
+      '<td><div class="p3-workitem-title">研究查询 ' + escapeHtml(job.run_id) + '</div><div class="p3-workitem-criteria">' + escapeHtml(job.query || '') + '</div></td>' +
+      '<td><span class="status-pill ' + (job.status === 'failed' || job.status === 'cancelled' ? 'error' : job.status === 'completed' ? 'ok' : job.status === 'running' || job.status === 'pending' ? 'warn' : 'neutral') + '">' + escapeHtml(P3_JOB_STATUS_LABELS[job.status] || job.status) + '</span></td>' +
+      '<td>' + escapeHtml(elapsed) + '</td>' +
+      '<td>' + (cancellable ? '<button class="button secondary compact p3-job-cancel" type="button" data-run-id="' + escapeHtml(job.run_id) + '"><i data-lucide="square" aria-hidden="true"></i><span>取消</span></button>' : '<span class="field-hint">—</span>') + '</td>' +
+      '</tr>');
+  });
+  if (activity.radar_job) {
+    rows.push('<tr>' +
+      '<td><div class="p3-workitem-title">论文雷达</div></td>' +
+      '<td><span class="status-pill neutral">' + escapeHtml(activity.radar_job.status || '') + '</span></td>' +
+      '<td>-</td><td><span class="field-hint">—</span></td></tr>');
+  }
+  $('p3ActivityBody').innerHTML = rows.join('');
+  $('p3ActivityEmpty').hidden = rows.length > 0;
+  $('p3ActivityTable').style.display = rows.length ? '' : 'none';
+  document.querySelectorAll('.p3-job-cancel').forEach((button) => button.addEventListener('click', () => {
+    requestQueryCancellation(button.dataset.runId).then(() => loadP3State()).catch(() => {});
+  }));
+
+  $('p3EventLog').innerHTML = (activity.events || []).slice(0, 10).map((event) =>
+    '<div class="p3-event-row"><code>' + escapeHtml(event.kind || '') + '</code><span class="event-detail">' + escapeHtml((event.payload && event.payload.path) || (event.payload && event.payload.title) || '') + '</span><time>' + escapeHtml(fmtDate(event.created_at)) + '</time></div>'
+  ).join('') || '<div class="p3-inbox-empty-row">暂无事件。运行“检查状态”后开始记录。</div>';
+}
+
+function p3ReviewRow(review) {
+  const kindLabel = P3_REVIEW_KIND_LABELS[review.kind] || review.kind;
+  const sourceLabel = review.source === 'evidence_ledger' ? '证据台账' : '项目状态';
+  return '<div class="p3-inbox-row" data-review-id="' + escapeHtml(review.review_id) + '">' +
+    '<div class="p3-inbox-main">' +
+    '<span class="p3-kind-tag ' + (review.kind === 'run_failure' || review.kind === 'plan_drift' ? 'risk' : '') + '">' + escapeHtml(kindLabel) + '</span>' +
+    '<div><strong>' + escapeHtml(review.summary) + '</strong>' +
+    '<small>' + escapeHtml(review.proposed_action || '') + ' · ' + escapeHtml(sourceLabel) + (review.priority ? ' · 优先级 ' + review.priority : '') + '</small></div></div>' +
+    '<div class="p3-inbox-actions">' +
+    '<button class="button secondary compact p3-review-action" type="button" data-status="dismissed"><i data-lucide="x" aria-hidden="true"></i><span>忽略</span></button>' +
+    '<button class="button primary compact p3-review-action" type="button" data-status="confirmed"><i data-lucide="check" aria-hidden="true"></i><span>确认</span></button>' +
+    '</div></div>';
+}
+
+function renderP3Inbox(data) {
+  const reviews = data.reviews || [];
+  const pending = reviews.filter((item) => item.status === 'pending');
+  const history = reviews.filter((item) => item.status !== 'pending');
+  $('p3InboxSummary').textContent = pending.length + ' 项待处理';
+  $('p3InboxSummary').className = 'status-pill ' + (pending.length ? 'warn' : 'ok');
+  $('p3InboxList').innerHTML = pending.map(p3ReviewRow).join('');
+  $('p3InboxEmpty').hidden = pending.length > 0;
+  $('p3InboxHistoryWrap').hidden = history.length === 0;
+  $('p3InboxHistory').innerHTML = history.map(p3ReviewRow).join('');
+  document.querySelectorAll('.p3-review-action').forEach((button) => button.addEventListener('click', () => {
+    const row = button.closest('.p3-inbox-row');
+    resolveP3Review(row.dataset.reviewId, button.dataset.status, button);
+  }));
+  $('p3ReviewCount').textContent = String(pending.length);
+  $('p3InboxTabCount').textContent = String(pending.length);
+}
+
+async function refreshP3SelectedProject() {
+  const projectId = selectedProjectId;
+  if (!projectId) return;
+  const button = $('p3RefreshProject');
+  enterBusy(button, '检查中');
+  try {
+    const data = await api('/api/v1/projects/' + encodeURIComponent(projectId) + '/refresh', {});
+    toast('状态已检查：新增事件 ' + data.new_events + '，发现文档 ' + data.discovery.parsed + ' 份', 'ok');
+  } catch (error) {
+    toast('检查失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+  loadProjects({});
+}
+
+async function setP3DocumentAuthority(documentId, authority, button) {
+  if (!selectedProjectId) return;
+  if (button) enterBusy(button, '处理中');
+  try {
+    await api('/api/v1/projects/' + encodeURIComponent(selectedProjectId) + '/documents/' + encodeURIComponent(documentId) + '/authority', { authority });
+    toast(authority === 'confirmed' ? '文档已确权' : authority === 'excluded' ? '文档已排除' : '已恢复候选', 'ok');
+  } catch (error) {
+    toast('文档操作失败：' + error.message, 'err');
+    if (button) leaveBusy(button);
+    return;
+  }
+  await loadP3State();
+}
+
+async function resolveP3Review(reviewId, status, button) {
+  if (!selectedProjectId) return;
+  if (button) enterBusy(button, '处理中');
+  try {
+    await api('/api/v1/projects/' + encodeURIComponent(selectedProjectId) + '/reviews/' + encodeURIComponent(reviewId) + '/resolve', { status });
+    toast(status === 'confirmed' ? '已确认该复核项' : '已忽略该复核项', 'ok');
+  } catch (error) {
+    toast('处理失败：' + error.message, 'err');
+    if (button) leaveBusy(button);
+    return;
+  }
+  await loadP3State();
+}
+
+function openP3Confirm(workItemId) {
+  const state = p3StateCache[selectedProjectId];
+  if (!state || !state.snapshot) return;
+  const item = (state.snapshot.work_items || []).find((candidate) => candidate.work_item_id === workItemId);
+  if (!item) return;
+  p3ConfirmTarget = { work_item_id: workItemId, kind: item.kind, title: item.title };
+  $('p3ConfirmTitle').textContent = item.kind === 'action' ? '完成后续行动' : '变更人工状态';
+  $('p3ConfirmText').textContent = (item.kind === 'action'
+    ? '确认后将把该行动标记为完成并从项目 YAML 的后续计划中移除：'
+    : '该状态写入项目 YAML（人工计划的权威来源），不会自动推断：') + ' “' + item.title + '”';
+  $('p3ConfirmField').hidden = item.kind === 'action';
+  $('p3ConfirmStatus').value = ['planned', 'in_progress', 'completed', 'blocked'].includes(item.declared_status) ? item.declared_status : 'planned';
+  $('p3ConfirmError').hidden = true;
+  const dialog = $('p3ConfirmDialog');
+  if (!dialog.open) dialog.showModal();
+}
+
+async function runP3Confirm(event) {
+  event.preventDefault();
+  const target = p3ConfirmTarget;
+  if (!target || !selectedProjectId) return;
+  const status = target.kind === 'action' ? 'completed' : ($('p3ConfirmStatus').value || 'planned');
+  const button = $('p3ConfirmOk');
+  enterBusy(button, '写入中');
+  $('p3ConfirmError').hidden = true;
+  try {
+    await api('/api/v1/projects/' + encodeURIComponent(selectedProjectId) + '/work-items/' + encodeURIComponent(target.work_item_id) + '/confirm', { declared_status: status });
+    p3ConfirmTarget = null;
+    $('p3ConfirmDialog').close();
+    toast('人工状态已写入项目 YAML', 'ok');
+  } catch (error) {
+    $('p3ConfirmError').textContent = error.message;
+    $('p3ConfirmError').hidden = false;
+  } finally {
+    leaveBusy(button);
+  }
+  await loadP3State();
+}
+
+function openP3Settings() {
+  const state = p3StateCache[selectedProjectId];
+  const project = (state && state.project) || {};
+  $('p3cfgName').value = project.name || '';
+  $('p3cfgPath').value = project.path || '';
+  $('p3cfgDescription').value = project.description || '';
+  $('p3cfgTestCommand').value = project.test_command || '';
+  $('p3cfgDocumentDirs').value = ((project.documents && project.documents.directories) || []).join('\n');
+  $('p3cfgDocumentFiles').value = ((project.documents && project.documents.root_files) || []).join('\n');
+  $('p3cfgResultDirs').value = ((project.artifacts && project.artifacts.directories) || []).join('\n');
+  $('p3cfgReportDirs').value = ((project.reports && project.reports.directories) || []).join('\n');
+  $('p3SettingsMessage').textContent = '';
+  $('p3SettingsMessage').className = 'form-message';
+  const dialog = $('p3SettingsDialog');
+  if (!dialog.open) dialog.showModal();
+}
+
+async function saveP3Settings(event) {
+  event.preventDefault();
+  if (!selectedProjectId) return;
+  const name = $('p3cfgName').value.trim();
+  const path = $('p3cfgPath').value.trim();
+  if (!name || !path) {
+    const target = name ? $('p3cfgPath') : $('p3cfgName');
+    target.focus();
+    $('p3SettingsMessage').textContent = '项目名称和本地目录不能为空';
+    $('p3SettingsMessage').className = 'form-message error';
+    return;
+  }
+  const button = $('p3SettingsSave');
+  enterBusy(button, '保存设置');
+  $('p3SettingsMessage').textContent = '';
+  try {
+    await api('/api/v1/projects/' + encodeURIComponent(selectedProjectId) + '/settings', {
+      project_id: selectedProjectId,
+      name,
+      path,
+      description: $('p3cfgDescription').value.trim(),
+      test_command: $('p3cfgTestCommand').value.trim(),
+      document_dirs: $('p3cfgDocumentDirs').value,
+      document_files: $('p3cfgDocumentFiles').value,
+      result_dirs: $('p3cfgResultDirs').value,
+      report_dirs: $('p3cfgReportDirs').value
+    });
+    $('p3SettingsDialog').close();
+    toast('项目设置已保存', 'ok');
+  } catch (error) {
+    $('p3SettingsMessage').textContent = error.message;
+    $('p3SettingsMessage').className = 'form-message error';
+    toast('项目设置保存失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+  await loadP3State();
+  loadProjects({});
+}
+
+function startResearchFromP3() {
+  const state = p3StateCache[selectedProjectId];
+  const summary = state && state.snapshot && state.snapshot.summary;
+  queryProjectContext = { project_id: selectedProjectId, focus: (summary && summary.focus) || '' };
+  if (summary && summary.focus) {
+    $('queryText').value = '围绕当前研究重点“' + summary.focus + '”，找出证据缺口和下一步实验机会';
+  }
+  nav('query', { focus: true });
+}
+
+async function runP3Radar() {
+  const button = $('p3RunRadar');
+  enterBusy(button, '运行中');
+  try {
+    await runProjectRadar();
+  } finally {
+    leaveBusy(button);
+  }
+  loadP3State();
+}
+
+function bindP3Events() {
+  document.querySelectorAll('[data-p3-tab]').forEach((button) => button.addEventListener('click', () => {
+    selectP3Tab(button.dataset.p3Tab);
+  }));
+  $('p3OpenInbox').addEventListener('click', () => selectP3Tab('inbox'));
+  $('p3RefreshProject').addEventListener('click', () => refreshP3SelectedProject());
+  $('p3OpenSettings').addEventListener('click', () => openP3Settings());
+  $('p3StartResearch').addEventListener('click', () => startResearchFromP3());
+  $('p3RunRadar').addEventListener('click', () => runP3Radar());
+  $('p3SettingsForm').addEventListener('submit', saveP3Settings);
+  $('p3SettingsCancel').addEventListener('click', () => $('p3SettingsDialog').close());
+  $('p3ConfirmForm').addEventListener('submit', runP3Confirm);
+  $('p3ConfirmCancel').addEventListener('click', () => {
+    p3ConfirmTarget = null;
+    $('p3ConfirmDialog').close();
   });
 }
 
@@ -2102,6 +2724,7 @@ async function runQuery() {
   let runId = '';
   const queryDepth = normalizeTier($('queryDepth').value || $('depthSelect').value);
   let runTimeoutSeconds = 300;
+  const projectContext = queryProjectContext;
   try {
     const submitRes = await authFetch('/api/query/jobs', {
       method: 'POST',
@@ -2112,7 +2735,8 @@ async function runQuery() {
         embedding_base_url: $('embeddingBaseUrl').value,
         embedding_api_key: $('embeddingApiKey').value,
         embedding_model: $('embeddingModel').value,
-        depth: queryDepth
+        depth: queryDepth,
+        project_id: projectContext ? (projectContext.project_id || '') : ''
       }))
     });
     const submitData = await submitRes.json();
@@ -2121,6 +2745,7 @@ async function runQuery() {
     }
     runId = submitData.run_id;
     runTimeoutSeconds = Math.max(1, Number(submitData.timeout_seconds || 300));
+    queryProjectContext = null;
     $('queryResultBand').dataset.activeRun = runId;
     activeQuery = { runId, cancelRequested: false, timedOut: false, timeoutSeconds: runTimeoutSeconds };
     // The result panel owns the running state; the submit button is not a progress indicator.
@@ -2417,6 +3042,7 @@ function bindEvents() {
     $('applyProjectCharter').disabled = !$('confirmCharterApply').checked;
   });
   $('saveProjectSettings').addEventListener('click', saveSelectedProjectSettings);
+  bindP3Events();
   $('auditSelectedProject').addEventListener('click', auditSelectedProject);
   $('runProjectRadar').addEventListener('click', runProjectRadar);
   $('researchScheduleEnabled').addEventListener('change', () => {
@@ -2491,7 +3117,9 @@ async function startWorkbench() {
   updatePaperSourceFields();
   const initialTarget = window.location.hash.slice(1);
   nav($(initialTarget) ? initialTarget : 'dashboard');
-  await Promise.all([refreshStatus({ resetDefaults: true }), renderDashboard(), loadProjects()]);
+  // refreshStatus first: the P3 feature flag gates which project page loads.
+  await refreshStatus({ resetDefaults: true });
+  await Promise.all([renderDashboard(), loadProjects()]);
 }
 
 async function init() {

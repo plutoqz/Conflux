@@ -43,6 +43,12 @@ from .repository import (
     ProjectWorkItemStore,
     register_project_intelligence_migration,
 )
+from .projections import (
+    knowledge_state,
+    parse_work_item_ref,
+    work_item_projection,
+)
+from .review_service import seed_reviews, supersede_document_reviews
 from .state_builder import build_snapshot
 
 __all__ = [
@@ -73,9 +79,14 @@ __all__ = [
     "build_snapshot",
     "collect_all_events",
     "ingest_events",
+    "knowledge_state",
     "legacy_overview_adapter",
     "new_event",
     "new_snapshot",
+    "parse_work_item_ref",
     "record_project_event",
     "register_project_intelligence_migration",
+    "seed_reviews",
+    "supersede_document_reviews",
+    "work_item_projection",
 ]

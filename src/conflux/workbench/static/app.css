@@ -691,6 +691,66 @@ input:disabled, select:disabled, textarea:disabled { background: var(--surface-s
 .project-alert strong { display: block; font-size: 11px; }
 .project-alert p { margin-top: 2px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
 .projects-error { margin-top: 12px; }
+
+/* ── P3 快照驱动的项目页（四主视图 + 统一待处理） ───────────────── */
+.p3-focus-band { display: flex; align-items: flex-start; gap: 12px; margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-soft); }
+.p3-focus-band .focus-icon { flex: 0 0 auto; width: 34px; height: 34px; display: grid; place-items: center; border-radius: 9px; background: var(--surface-strong); color: var(--accent-strong); }
+.p3-focus-band .focus-icon svg { width: 16px; height: 16px; }
+.p3-focus-band > div { min-width: 0; }
+.p3-focus-band strong { display: block; font-size: 13px; overflow-wrap: anywhere; }
+.p3-focus-band small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.plan-key-dot.neutral { background: var(--line-strong); border-color: var(--line-strong); }
+.plan-key-dot.suggested { background: var(--accent-bright); border-color: var(--accent); }
+.project-detail-actions .nav-count, .project-tab .nav-count { margin-left: 6px; background: var(--accent-soft); color: var(--accent-strong); }
+.p3-kind-tag { display: inline-flex; align-items: center; min-height: 20px; padding: 1px 7px; border-radius: 999px; background: var(--surface-strong); color: var(--ink-soft); font-size: 10px; font-weight: 680; white-space: nowrap; }
+.p3-kind-tag.plan { background: var(--info-soft); color: var(--info); }
+.p3-kind-tag.risk { background: var(--danger-soft); color: var(--danger); }
+.p3-status-pill { display: inline-flex; align-items: center; min-height: 22px; padding: 1px 8px; border-radius: 999px; font-size: 10px; font-weight: 680; letter-spacing: .02em; white-space: nowrap; }
+.p3-status-pill.declared { background: var(--plan); color: var(--ink-soft); border: 1px solid var(--line-strong); }
+.p3-status-pill.observed { background: var(--surface-strong); color: var(--muted); }
+.p3-status-pill.observed.verified { background: var(--success-soft); color: var(--success); }
+.p3-status-pill.observed.failed { background: var(--danger-soft); color: var(--danger); }
+.p3-status-pill.inferred.needs_review { background: var(--accent-soft); color: var(--accent-strong); }
+.p3-status-pill.inferred.completed { background: var(--success-soft); color: var(--success); }
+.p3-status-pill.inferred.blocked { background: var(--danger-soft); color: var(--danger); }
+.p3-status-pill.inferred.planned, .p3-status-pill.inferred.in_progress { background: var(--surface-soft); color: var(--ink-soft); }
+#p3WorkItemsTable { min-width: 640px; }
+.p3-workitem-title { font-size: 11px; font-weight: 650; overflow-wrap: anywhere; }
+.p3-workitem-criteria { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.p3-workitem-actions { display: flex; gap: 6px; white-space: nowrap; }
+.p3-doc-groups { display: grid; gap: 13px; margin-top: 10px; }
+.p3-doc-groups section > h4, .p3-doc-groups .audit-details > summary { margin: 0 0 4px; color: var(--ink-soft); font-size: 10px; }
+.p3-doc-groups .compact-file-list { margin-top: 0; }
+.p3-doc-row { display: flex; align-items: center; gap: 9px; padding: 8px 2px; border-bottom: 1px solid var(--line); }
+.p3-doc-row:last-child { border-bottom: 0; }
+.p3-doc-row .doc-main { flex: 1; min-width: 0; }
+.p3-doc-row .doc-path { display: block; font-size: 11px; overflow-wrap: anywhere; }
+.p3-doc-row .doc-meta { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; }
+.p3-doc-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+.p3-doc-actions .button { min-height: 30px; padding: 4px 9px; font-size: 10px; }
+.p3-inbox-list { display: grid; margin-top: 8px; }
+.p3-inbox-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 2px; border-bottom: 1px solid var(--line); }
+.p3-inbox-row:last-child { border-bottom: 0; }
+.p3-inbox-main { display: flex; align-items: flex-start; gap: 9px; min-width: 0; }
+.p3-inbox-main > div { min-width: 0; }
+.p3-inbox-main strong { display: block; font-size: 11px; overflow-wrap: anywhere; }
+.p3-inbox-main small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.p3-inbox-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+.p3-inbox-empty-row { padding: 10px 2px; color: var(--muted); font-size: 10px; }
+.p3-event-row { display: flex; align-items: center; gap: 9px; padding: 7px 2px; border-bottom: 1px solid var(--line); }
+.p3-event-row:last-child { border-bottom: 0; }
+.p3-event-row code { flex: 0 0 auto; max-width: 220px; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.p3-event-row .event-detail { min-width: 0; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.p3-event-row time { flex: 0 0 auto; margin-left: auto; color: var(--muted); font-size: 10px; }
+.p3-settings-dialog { max-width: 760px; border: 1px solid var(--line); }
+.p3-settings-panel { width: min(760px, calc(100vw - 40px)); max-height: calc(100vh - 48px); overflow: auto; }
+.p3-settings-panel .form-section { margin-top: 13px; }
+.p3-settings-panel .form-actions { margin-top: 14px; }
+.p3-settings-panel .form-message { margin-right: auto; }
+#p3ConfirmField { display: block; }
+#p3ConfirmStatus { width: 100%; margin-top: 5px; }
+.p3-btn-goto { padding: 0; border: 0; background: none; color: var(--accent-strong); font-size: 10px; font-weight: 650; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.p3-btn-goto:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .progress-layout { grid-template-columns: minmax(360px, .72fr) minmax(540px, 1.28fr); align-items: start; }
 .progress-form label small { color: var(--muted); font-size: 10px; font-weight: 450; }
 .progress-result { min-height: 520px; }
@@ -1021,6 +1081,10 @@ iframe { width: 100%; height: calc(100vh - 220px); min-height: 520px; margin-top
   .audit-overview > div:nth-last-child(-n+2) { border-bottom: 0; }
   .audit-overview > div:first-child { padding-inline-start: 10px; }
   .audit-overview > div:last-child { padding-inline-end: 10px; }
+  .p3-focus-band { flex-direction: column; }
+  .p3-doc-row, .p3-inbox-row, .p3-event-row { flex-wrap: wrap; }
+  .p3-doc-actions, .p3-inbox-actions { margin-left: 0; }
+  .p3-event-row code { max-width: 130px; }
   iframe { min-height: 480px; height: 70vh; }
 }
 

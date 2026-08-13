@@ -82,6 +82,7 @@ class ResearchJob:
     timeout_seconds: int = 300
     deadline_at: float = 0.0
     commit_reserve_seconds: float = 20.0
+    project_id: str = ""
     final_answer: str = ""
     has_report: bool = False
     source_statuses: dict[str, str] = field(default_factory=dict)
@@ -255,6 +256,7 @@ def _job_metadata(job: ResearchJob) -> dict[str, Any]:
         "timeout_seconds": job.timeout_seconds,
         "deadline_at": job.deadline_at,
         "commit_reserve_seconds": job.commit_reserve_seconds,
+        "project_id": job.project_id,
         "final_answer": job.final_answer,
         "source_statuses": job.source_statuses,
         "factcheck_status": job.factcheck_status,
@@ -281,6 +283,7 @@ def _job_from_metadata(run_id: str, metadata: dict[str, Any]) -> ResearchJob:
         timeout_seconds=max(1, int(metadata.get("timeout_seconds") or 300)),
         deadline_at=float(metadata.get("deadline_at") or 0.0),
         commit_reserve_seconds=float(metadata.get("commit_reserve_seconds") or 20.0),
+        project_id=str(metadata.get("project_id") or ""),
         final_answer=str(metadata.get("final_answer") or ""),
         has_report=bool(metadata.get("has_report")),
         source_statuses=dict(metadata.get("source_statuses") or {}),
@@ -309,6 +312,7 @@ def _public_status(job: ResearchJob) -> dict[str, Any]:
         "timeout_seconds": job.timeout_seconds,
         "deadline_at": job.deadline_at,
         "commit_reserve_seconds": job.commit_reserve_seconds,
+        "project_id": job.project_id,
         "final_answer": full_answer[:4000],
         "final_answer_truncated": answer_len > 4000,
         "final_answer_total_length": answer_len,
@@ -391,6 +395,7 @@ class JobManager:
             timeout_seconds=timeout_seconds,
             deadline_at=started_at + timeout_seconds,
             commit_reserve_seconds=commit_reserve_seconds,
+            project_id=str(payload.get("project_id") or ""),
         )
         persisted_payload = _sanitize_payload(dict(payload))
         secrets = {
@@ -504,7 +509,7 @@ class JobManager:
             legacy._cancel_flag.set()
             return True
 
-    def list(self, limit: int = 20) -> list[dict[str, Any]]:
+    def list(self, limit: int = 20, *, project_id: str | None = None) -> list[dict[str, Any]]:
         db = self._database()
         try:
             queued = JobQueue(db, lease_seconds=self._lease_seconds).list(
@@ -519,6 +524,8 @@ class JobManager:
             run = runs.get(item["run_id"], {})
             metadata = dict(run.get("metadata") or {})
             metadata.update(item.get("result") or {})
+            if project_id is not None and str(metadata.get("project_id") or "") != project_id:
+                continue
             result.append(
                 {
                     "run_id": item["run_id"],
@@ -526,6 +533,7 @@ class JobManager:
                     "status": str(metadata.get("public_status") or item["status"]),
                     "started_at": metadata.get("started_at", item["created_at"]),
                     "ended_at": metadata.get("ended_at"),
+                    "project_id": str(metadata.get("project_id") or ""),
                 }
             )
         return result

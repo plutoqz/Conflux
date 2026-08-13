@@ -37,8 +37,8 @@
           <button class="nav-item" type="button" data-target="query" data-title="研究查询" data-subtitle="协调本地知识、网络证据与模型推理">
             <i data-lucide="search" aria-hidden="true"></i><span>研究查询</span>
           </button>
-          <button class="nav-item" type="button" data-target="projects" data-title="项目监控" data-subtitle="统一查看项目版本、计划基线、实际证据和风险">
-            <i data-lucide="folders" aria-hidden="true"></i><span>项目监控</span>
+          <button class="nav-item" type="button" data-target="projects" data-title="项目" data-subtitle="项目概览、研究工作与统一待处理队列">
+            <i data-lucide="folders" aria-hidden="true"></i><span>项目</span>
             <span class="nav-count" id="projectNavCount">0</span>
           </button>
         </div>
@@ -595,6 +595,159 @@
                 </section>
               </div>
             </div>
+
+            <div class="p3-detail-pane" id="projectDetailP3" hidden>
+            <header class="project-detail-header">
+              <div class="project-title-block">
+                <div class="project-title-row">
+                  <h2 id="p3ProjectName">-</h2>
+                  <span id="p3ProjectHealth" class="status-pill neutral">未知</span>
+                  <span id="p3SnapshotAge" class="status-pill neutral">尚未建立快照</span>
+                </div>
+                <p id="p3ProjectDescription"></p>
+                <code id="p3ProjectPath">-</code>
+              </div>
+              <div class="project-detail-actions">
+                <button id="p3RefreshProject" class="button secondary compact" type="button"><i data-lucide="refresh-cw" aria-hidden="true"></i><span>检查状态</span></button>
+                <button id="p3OpenInbox" class="button primary compact" type="button"><i data-lucide="inbox" aria-hidden="true"></i><span>待处理</span><span class="nav-count" id="p3ReviewCount">0</span></button>
+                <button id="p3OpenSettings" class="icon-button subtle" type="button" aria-label="项目设置" title="项目设置"><i data-lucide="settings-2" aria-hidden="true"></i></button>
+              </div>
+            </header>
+
+            <div class="project-tabs" role="tablist" aria-label="项目视图">
+              <button class="project-tab active" type="button" role="tab" aria-selected="true" data-p3-tab="overview">概览</button>
+              <button class="project-tab" type="button" role="tab" aria-selected="false" data-p3-tab="work">研究工作</button>
+              <button class="project-tab" type="button" role="tab" aria-selected="false" data-p3-tab="evidence">证据与知识</button>
+              <button class="project-tab" type="button" role="tab" aria-selected="false" data-p3-tab="activity">活动与运行</button>
+              <button class="project-tab" type="button" role="tab" aria-selected="false" data-p3-tab="inbox">待处理<span class="nav-count" id="p3InboxTabCount">0</span></button>
+            </div>
+
+            <div class="project-tab-panel active" data-p3-panel="overview" role="tabpanel">
+              <section class="project-detail-section" aria-labelledby="p3FocusTitle">
+                <div class="project-section-heading"><h3 id="p3FocusTitle">当前重点</h3><span id="p3FocusMeta" class="status-pill neutral">-</span></div>
+                <div id="p3Focus" class="p3-focus-band"></div>
+              </section>
+              <section class="project-detail-section" aria-labelledby="p3NeedsTitle">
+                <div class="project-section-heading"><h3 id="p3NeedsTitle">需要处理</h3><span id="p3NeedsCount" class="status-pill neutral">0</span></div>
+                <div id="p3NeedsAction" class="audit-list"></div>
+              </section>
+              <section class="project-detail-section" aria-labelledby="p3ProgressTitle">
+                <div class="project-section-heading"><h3 id="p3ProgressTitle">最近验证进展</h3><p>进展必须来自提交、测试、实验或报告等可定位证据。</p></div>
+                <div id="p3RecentProgress" class="audit-list"></div>
+              </section>
+              <section class="project-detail-section" aria-labelledby="p3RunningTitle">
+                <div class="project-section-heading"><h3 id="p3RunningTitle">运行中</h3></div>
+                <div id="p3Running" class="audit-list"></div>
+              </section>
+              <section class="project-detail-section repository-section" aria-labelledby="p3RepoTitle">
+                <div class="project-section-heading"><h3 id="p3RepoTitle">仓库状态</h3></div>
+                <dl class="repository-grid">
+                  <div><dt>分支</dt><dd id="p3RepoBranch">-</dd></div>
+                  <div><dt>本地版本</dt><dd><code id="p3RepoHead">-</code></dd></div>
+                  <div><dt>未提交变更</dt><dd id="p3DirtyFiles">-</dd></div>
+                </dl>
+              </section>
+            </div>
+
+            <div class="project-tab-panel" data-p3-panel="work" role="tabpanel" hidden>
+              <section class="project-detail-section" aria-labelledby="p3WorkTitle">
+                <div class="project-section-heading">
+                  <div><h3 id="p3WorkTitle">研究工作项</h3><p>人工状态写入项目 YAML；观察证据与系统建议由规则给出，不自动改写计划。</p></div>
+                  <div class="project-section-actions">
+                    <button id="p3StartResearch" class="button primary compact" type="button"><i data-lucide="flask-conical" aria-hidden="true"></i><span>发起研究</span></button>
+                  </div>
+                </div>
+                <div class="plan-status-key">
+                  <span><i class="plan-key-dot configured" aria-hidden="true"></i>人工计划</span>
+                  <span><i class="plan-key-dot neutral" aria-hidden="true"></i>观察证据</span>
+                  <span><i class="plan-key-dot suggested" aria-hidden="true"></i>系统建议</span>
+                </div>
+                <div class="table-wrap compact-table">
+                  <table id="p3WorkItemsTable">
+                    <thead><tr><th>工作项</th><th>类型</th><th>人工状态</th><th>观察状态</th><th>系统建议</th><th>验收标准</th><th>操作</th></tr></thead>
+                    <tbody id="p3WorkItemsBody"></tbody>
+                  </table>
+                </div>
+                <div id="p3WorkItemsEmpty" class="inline-empty" hidden>尚未定义计划。登记总体目标、里程碑或后续行动后会显示在这里。</div>
+              </section>
+              <section class="project-detail-section" aria-labelledby="p3RadarTitle">
+                <div class="project-section-heading">
+                  <div><h3 id="p3RadarTitle">论文雷达</h3><p>项目驱动的论文发现；候选论文与工作项的关联在 P3.4 落地。</p></div>
+                  <div class="project-section-actions">
+                    <span id="p3RadarStatus" class="status-pill neutral">未运行</span>
+                    <button id="p3RunRadar" class="button secondary compact" type="button"><i data-lucide="radar" aria-hidden="true"></i><span>运行雷达</span></button>
+                  </div>
+                </div>
+                <dl class="evidence-metrics">
+                  <div><dt>搜索意图</dt><dd id="p3RadarIntents">-</dd></div>
+                  <div><dt>候选论文</dt><dd id="p3RadarCandidates">-</dd></div>
+                  <div><dt>入围</dt><dd id="p3RadarShortlisted">-</dd></div>
+                  <div><dt>已保存</dt><dd id="p3RadarSaved">-</dd></div>
+                </dl>
+                <div id="p3RadarEmpty" class="inline-empty">尚未运行论文雷达。运行后结果会显示在这里；需要复核的关联会进入待处理队列。</div>
+              </section>
+            </div>
+
+            <div class="project-tab-panel" data-p3-panel="evidence" role="tabpanel" hidden>
+              <section class="project-detail-section" aria-labelledby="p3DocsTitle">
+                <div class="project-section-heading">
+                  <div><h3 id="p3DocsTitle">项目文档</h3><p>自动发现只生成候选；确权后文档才作为计划分析的权威依据。</p></div>
+                  <span id="p3DocStats" class="status-pill neutral"></span>
+                </div>
+                <div class="p3-doc-groups">
+                  <section><h4>已确权</h4><div id="p3DocsConfirmed" class="compact-file-list"></div></section>
+                  <section><h4>候选（待确权）</h4><div id="p3DocsCandidates" class="compact-file-list"></div></section>
+                  <section><h4>解析失败</h4><div id="p3DocsFailed" class="compact-file-list"></div></section>
+                  <details class="audit-details"><summary><span>已排除文档</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary><div id="p3DocsExcluded" class="compact-file-list"></div></details>
+                </div>
+              </section>
+              <section class="project-detail-section" aria-labelledby="p3KnowledgeTitle">
+                <div class="project-section-heading"><div><h3 id="p3KnowledgeTitle">知识库覆盖</h3><p>RAG 索引与项目文档的覆盖关系（P3.4 完整接入）。</p></div></div>
+                <dl class="evidence-metrics">
+                  <div><dt>项目文档</dt><dd id="p3KnowledgeDocs">-</dd></div>
+                  <div><dt>文档类型</dt><dd id="p3KnowledgeKinds">-</dd></div>
+                  <div><dt>解析失败</dt><dd id="p3KnowledgeFailed">-</dd></div>
+                  <div><dt>索引版本</dt><dd id="p3KnowledgeIndex">-</dd></div>
+                </dl>
+              </section>
+              <section class="project-detail-section" aria-labelledby="p3EvidenceTitle">
+                <div class="project-section-heading"><div><h3 id="p3EvidenceTitle">证据来源变化</h3><p>Evidence Ledger 的来源变化映射到待处理队列，确认前不改变计划。</p></div></div>
+                <div id="p3EvidenceSources" class="audit-list"></div>
+              </section>
+            </div>
+
+            <div class="project-tab-panel" data-p3-panel="activity" role="tabpanel" hidden>
+              <section class="project-detail-section" aria-labelledby="p3ActivityTitle">
+                <div class="project-section-heading"><div><h3 id="p3ActivityTitle">任务与运行</h3><p>研究查询、论文雷达与项目关联的运行记录。</p></div></div>
+                <div class="table-wrap compact-table">
+                  <table id="p3ActivityTable">
+                    <thead><tr><th>任务</th><th>状态</th><th>耗时</th><th>操作</th></tr></thead>
+                    <tbody id="p3ActivityBody"></tbody>
+                  </table>
+                </div>
+                <div id="p3ActivityEmpty" class="inline-empty" hidden>暂无关联运行。发起研究或运行论文雷达后会显示在这里。</div>
+              </section>
+              <section class="project-detail-section" aria-labelledby="p3EventsTitle">
+                <div class="project-section-heading"><div><h3 id="p3EventsTitle">最近事件</h3><p>状态由事件驱动构建，页面通过 SSE 增量更新。</p></div></div>
+                <div id="p3EventLog" class="compact-file-list"></div>
+              </section>
+            </div>
+
+            <div class="project-tab-panel" data-p3-panel="inbox" role="tabpanel" hidden>
+              <section class="project-detail-section" aria-labelledby="p3InboxTitle">
+                <div class="project-section-heading">
+                  <div><h3 id="p3InboxTitle">统一待处理队列</h3><p>计划漂移、证据变化、失败运行与文档确权在一个队列中处理。</p></div>
+                  <span id="p3InboxSummary" class="status-pill neutral">0 项</span>
+                </div>
+                <div id="p3InboxList" class="p3-inbox-list"></div>
+                <div id="p3InboxEmpty" class="empty-state"><i data-lucide="inbox" aria-hidden="true"></i><strong>没有待处理项</strong><p>检查状态后，需要复核的变化会出现在这里。</p></div>
+                <details class="audit-details" id="p3InboxHistoryWrap" hidden>
+                  <summary><span>已处理</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary>
+                  <div id="p3InboxHistory" class="p3-inbox-list"></div>
+                </details>
+              </section>
+            </div>
+            </div>
           </div>
         </section>
         <div id="projectsError" class="inbox-error projects-error" role="alert" hidden><div class="inbox-error-summary"><span class="inbox-error-icon"><i data-lucide="circle-alert" aria-hidden="true"></i></span><div><strong>项目状态未加载</strong><p id="projectsErrorMessage"></p></div></div></div>
@@ -773,6 +926,66 @@
       <label>访问令牌<input id="accessToken" type="password" autocomplete="current-password" required></label>
       <p id="authError" class="auth-error" role="alert" hidden></p>
       <button id="loginButton" class="button primary large" type="submit"><i data-lucide="log-in" aria-hidden="true"></i><span>登录</span></button>
+    </form>
+  </dialog>
+
+  <dialog id="p3SettingsDialog" class="auth-dialog p3-settings-dialog" aria-labelledby="p3SettingsTitle">
+    <form id="p3SettingsForm" class="auth-panel p3-settings-panel">
+      <div class="auth-icon" aria-hidden="true"><i data-lucide="settings-2"></i></div>
+      <div>
+        <h2 id="p3SettingsTitle">项目设置</h2>
+        <p>基础配置与发现范围写回项目 YAML；模型路由与预算在“模型与环境”中维护。</p>
+      </div>
+      <fieldset class="form-section">
+        <legend>基础</legend>
+        <div class="field-grid two">
+          <label>项目名称<input id="p3cfgName" autocomplete="off"></label>
+          <label>本地目录<input id="p3cfgPath" autocomplete="off"></label>
+          <label class="field-wide">项目说明<textarea id="p3cfgDescription" rows="2"></textarea></label>
+          <label class="field-wide">测试命令<input id="p3cfgTestCommand" autocomplete="off" placeholder="例如 python -m pytest -q"></label>
+        </div>
+      </fieldset>
+      <fieldset class="form-section">
+        <legend>发现与关联</legend>
+        <div class="field-grid two">
+          <label>文档目录<textarea id="p3cfgDocumentDirs" class="settings-list-input" rows="2" placeholder="每行一个目录"></textarea></label>
+          <label>根目录文档<textarea id="p3cfgDocumentFiles" class="settings-list-input" rows="2" placeholder="每行一个文件"></textarea></label>
+          <label>实验产物目录<textarea id="p3cfgResultDirs" class="settings-list-input" rows="2" placeholder="每行一个目录"></textarea></label>
+          <label>报告目录<textarea id="p3cfgReportDirs" class="settings-list-input" rows="2" placeholder="每行一个目录"></textarea></label>
+        </div>
+      </fieldset>
+      <fieldset class="form-section">
+        <legend>高级</legend>
+        <p class="field-hint">论文雷达周期、模型路由、预算与索引策略分别由旧版“研究”页和“模型与环境”管理；自动化级别统一在后续版本提供。</p>
+      </fieldset>
+      <p id="p3SettingsMessage" class="form-message" role="status"></p>
+      <div class="form-actions">
+        <button type="button" id="p3SettingsCancel" class="button secondary"><i data-lucide="x" aria-hidden="true"></i><span>取消</span></button>
+        <button type="submit" id="p3SettingsSave" class="button primary"><i data-lucide="save" aria-hidden="true"></i><span>保存设置</span></button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="p3ConfirmDialog" class="auth-dialog" aria-labelledby="p3ConfirmTitle" aria-describedby="p3ConfirmText">
+    <form id="p3ConfirmForm" class="auth-panel">
+      <div class="auth-icon" aria-hidden="true"><i data-lucide="shield-check"></i></div>
+      <div>
+        <h2 id="p3ConfirmTitle">确认状态变更</h2>
+        <p id="p3ConfirmText"></p>
+      </div>
+      <label id="p3ConfirmField" class="field-wide">新的人工状态
+        <select id="p3ConfirmStatus">
+          <option value="planned">计划中</option>
+          <option value="in_progress">进行中</option>
+          <option value="completed">已完成</option>
+          <option value="blocked">受阻</option>
+        </select>
+      </label>
+      <p id="p3ConfirmError" class="auth-error" role="alert" hidden></p>
+      <div class="form-actions">
+        <button type="button" id="p3ConfirmCancel" class="button secondary"><i data-lucide="x" aria-hidden="true"></i><span>取消</span></button>
+        <button type="submit" id="p3ConfirmOk" class="button primary"><i data-lucide="check" aria-hidden="true"></i><span>确认写入 YAML</span></button>
+      </div>
     </form>
   </dialog>
 

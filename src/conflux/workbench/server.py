@@ -45,6 +45,22 @@ from conflux.paper_ingestion.filters import paper_matches_negative_filter
 from conflux.paper_ingestion.inbox_report import write_inbox_artifacts
 from conflux.paper_ingestion.pipeline import build_inbox
 from conflux.paper_ingestion.scorer import reading_level_for_score
+from conflux.projects import (
+    P3_PROTOCOL_VERSION,
+    EventKind,
+    ProjectIntelligence,
+    ReviewStatus,
+    SnapshotTrigger,
+    build_snapshot,
+    collect_all_events,
+    ingest_events,
+    new_event,
+    parse_work_item_ref,
+    seed_reviews,
+    supersede_document_reviews,
+    work_item_projection,
+)
+from conflux.projects.discovery_service import document_map, scan_project_documents
 from conflux.project_registry import (
     Milestone,
     ProjectDefinition,
@@ -238,6 +254,10 @@ def build_status() -> dict[str, Any]:
         },
         "workbench_env": str(WORKBENCH_ENV) if WORKBENCH_ENV.exists() else "",
         "saved_depth": os.environ.get("CONFLUX_DEPTH", "standard"),
+        "p3": {
+            "overview_enabled": _p3_overview_enabled(),
+            "protocol_version": P3_PROTOCOL_VERSION,
+        },
         "credentials": {
             "openai_api_key": _has_env("OPENAI_API_KEY"),
             "reasoning_api_key": _has_env("CONFLUX_MODELS__REASONING__API_KEY"),
@@ -3308,6 +3328,423 @@ def _load_charter_draft_cache(project_id: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+# ── P3.3 snapshot-driven project page (plan §7/§11.5) ────────────────────
+#
+# Every GET below reads only the registry YAML and materialized SQLite state.
+# No monitor_project, no model, no tests, no remote calls on page reads
+# (plan §P3.3 acceptance).  Refresh is an explicit local POST.
+
+
+def _p3_overview_enabled() -> bool:
+    """Feature flag; set CONFLUX_P3_OVERVIEW=0 to roll back to the legacy page."""
+    return os.environ.get("CONFLUX_P3_OVERVIEW", "1").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+
+
+def _project_intelligence() -> ProjectIntelligence:
+    """Fresh per-call connection — same threading pattern as _research_database."""
+    db = _research_database()
+    intelligence = ProjectIntelligence(db)
+    intelligence.ensure_schema()
+    return intelligence
+
+
+def _p3_project_or_none(project_id: str) -> ProjectDefinition | None:
+    return _project_registry().get(project_id)
+
+
+def build_p3_projects() -> dict[str, Any]:
+    """P3.3 project list — registry + materialized snapshot, zero scanning."""
+    loaded = _project_registry().load_all()
+    intelligence = _project_intelligence()
+    projects = []
+    try:
+        for project in loaded.projects:
+            current = intelligence.snapshots.current(project.id)
+            pending = intelligence.reviews.list(project.id, status="pending")
+            knowledge = (current or {}).get("knowledge_state") or {}
+            projects.append({
+                "id": project.id,
+                "name": project.name,
+                "path": project.path,
+                "description": project.description,
+                "enabled": project.enabled,
+                "revision": (current or {}).get("revision", 0),
+                "snapshot_id": (current or {}).get("snapshot_id", ""),
+                "updated_at": (current or {}).get("updated_at", 0.0),
+                "health": (current or {}).get("health", "unknown"),
+                "pending_reviews": len(pending),
+                "documents_total": int((knowledge.get("documents") or {}).get("total") or 0),
+            })
+        return {
+            "ok": True,
+            "projects": projects,
+            "registry_errors": loaded.errors,
+            "registry_dir": str(PROJECT_ROOT / DEFAULT_PROJECTS_DIR),
+            "protocol_version": P3_PROTOCOL_VERSION,
+        }
+    finally:
+        intelligence.db.close()
+
+
+def _unified_reviews(
+    project_id: str,
+    intelligence: ProjectIntelligence,
+    *,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    """Unified inbox: project_reviews + bridged Evidence Ledger reviews."""
+    merged: list[dict[str, Any]] = []
+    for review in intelligence.reviews.list(project_id, status=status):
+        merged.append({
+            "review_id": review.review_id,
+            "source": "project",
+            "project_id": review.project_id,
+            "kind": review.kind.value,
+            "priority": review.priority,
+            "status": review.status.value,
+            "summary": review.summary,
+            "impact_refs": review.impact_refs,
+            "evidence_refs": review.evidence_refs,
+            "proposed_action": review.proposed_action,
+            "input_snapshot_id": review.input_snapshot_id,
+            "created_at": review.created_at,
+            "resolved_at": review.resolved_at,
+        })
+    try:
+        evidence = get_evidence_reviews(project_id=project_id, status=status)
+    except Exception:
+        evidence = {"ok": False, "reviews": []}
+    for review in (evidence or {}).get("reviews") or []:
+        rid = str(review.get("review_id") or "")
+        if not rid:
+            continue
+        merged.append({
+            "review_id": f"ev:{rid}",
+            "source": "evidence_ledger",
+            "project_id": project_id,
+            "kind": "evidence_change",
+            "priority": 65,
+            "status": str(review.get("status") or "pending"),
+            "summary": f"证据来源变化：{str(review.get('source_identity') or '未知来源')}",
+            "impact_refs": [
+                str(item.get("target_id") or "") for item in (review.get("impacts") or [])
+            ],
+            "evidence_refs": [],
+            "proposed_action": "复核来源变化对 claim/报告的影响，确认或忽略",
+            "input_snapshot_id": "",
+            "created_at": 0.0,
+            "resolved_at": 0.0,
+            "detail": {
+                "source_identity": review.get("source_identity"),
+                "reason": review.get("reason"),
+                "impacts": review.get("impacts"),
+            },
+        })
+    merged.sort(key=lambda item: (-int(item["priority"]), -(item["created_at"] or 0)))
+    return merged
+
+
+def _p3_radar_summary(project_id: str) -> dict[str, Any]:
+    cache = _load_research_cache(project_id)
+    job = _latest_project_radar_job(project_id, active_only=False)
+    schedule = _project_research_schedule(project_id)
+    links = (cache or {}).get("links") or []
+    saved = sum(1 for link in links if str(link.get("status") or "") == "saved")
+    shortlisted = sum(1 for link in links if str(link.get("status") or "") == "shortlisted")
+    return {
+        "status": str((cache or {}).get("status") or "not_run"),
+        "usable": bool((cache or {}).get("usable")),
+        "reason": str((cache or {}).get("reason") or ""),
+        "intents": len((cache or {}).get("intents") or []),
+        "queries": len((cache or {}).get("queries") or []),
+        "candidates": len(links),
+        "shortlisted": shortlisted,
+        "saved": saved,
+        "suggestions": len((cache or {}).get("suggestions") or []),
+        "job": {
+            "job_id": job["job_id"],
+            "status": job["status"],
+        } if job else None,
+        "schedule_enabled": bool((schedule or {}).get("enabled")),
+    }
+
+
+def build_p3_activity(project_id: str, intelligence: ProjectIntelligence) -> dict[str, Any]:
+    """Unified runs for the 活动与运行 view (query jobs + radar + events)."""
+    try:
+        jobs = get_job_manager().list(limit=50, project_id=project_id)
+    except Exception:
+        jobs = []
+    radar_job = _latest_project_radar_job(project_id, active_only=False)
+    snapshot = intelligence.snapshots.current(project_id)
+    return {
+        "jobs": jobs,
+        "radar_job": {
+            "job_id": radar_job["job_id"],
+            "status": radar_job["status"],
+        } if radar_job else None,
+        "events": intelligence.events.list(project_id, limit=50),
+        "runs": (snapshot or {}).get("run_state", {}).get("runs", []) if snapshot else [],
+        "git": (snapshot or {}).get("git_state", {}) if snapshot else {},
+    }
+
+
+def build_p3_project_state(project_id: str) -> dict[str, Any]:
+    """Page payload: one materialized read (snapshot + documents + inbox)."""
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    intelligence = _project_intelligence()
+    try:
+        current = intelligence.snapshots.current(project_id)
+        return {
+            "ok": True,
+            "project_id": project_id,
+            "project": project.to_dict(include_source=False),
+            "snapshot": current,
+            "documents": document_map(intelligence, project_id) if current else None,
+            "reviews": _unified_reviews(project_id, intelligence, status=None),
+            "activity": build_p3_activity(project_id, intelligence),
+            "radar": _p3_radar_summary(project_id),
+            "revisions": intelligence.snapshots.list_revisions(project_id, limit=20),
+            "protocol_version": P3_PROTOCOL_VERSION,
+        }
+    finally:
+        intelligence.db.close()
+
+
+def refresh_p3_project(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """User-triggered local check: collect + discover + seed reviews + snapshot.
+
+    No remote checks and no model calls (plan §P3.3 acceptance).
+    """
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    force = bool(payload.get("force"))
+    intelligence = _project_intelligence()
+    try:
+        previous = intelligence.snapshots.latest(project_id)
+        events = collect_all_events(project, intelligence.db, since=0.0, check_remote=False)
+        added = ingest_events(intelligence, events)
+        discovery = scan_project_documents(intelligence, project, force=force)
+        seeded = seed_reviews(
+            intelligence,
+            project,
+            input_snapshot_id=previous.snapshot_id if previous else "",
+        )
+        snapshot = build_snapshot(intelligence, project, trigger=SnapshotTrigger.MANUAL)
+        return {
+            "ok": True,
+            "project_id": project_id,
+            "snapshot_id": snapshot.snapshot_id,
+            "revision": snapshot.revision,
+            "new_events": added,
+            "discovery": {key: value for key, value in discovery.items() if key != "project_id"},
+            "reviews_added": len(seeded),
+            "health": snapshot.health,
+            "pending_reviews": snapshot.summary.get("pending_review_count", 0),
+        }
+    finally:
+        intelligence.db.close()
+
+
+def build_p3_documents(project_id: str) -> dict[str, Any]:
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    intelligence = _project_intelligence()
+    try:
+        return {"ok": True, **document_map(intelligence, project_id)}
+    finally:
+        intelligence.db.close()
+
+
+def set_p3_document_authority(
+    project_id: str,
+    document_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    authority = str(payload.get("authority") or "").strip()
+    if authority not in {"candidate", "confirmed", "excluded"}:
+        return {"ok": False, "error": f"无效 authority：{authority}"}
+    intelligence = _project_intelligence()
+    try:
+        document = intelligence.documents.get(document_id)
+        if document is None or document.project_id != project_id:
+            return {"ok": False, "error": f"文档不存在：{document_id}"}
+        if authority == "confirmed":
+            document.metadata["confirmed_hash"] = document.content_hash
+            intelligence.documents.upsert(document)
+        intelligence.documents.set_authority(document_id, authority)
+        superseded = supersede_document_reviews(intelligence, project_id, document_id)
+        intelligence.events.append(new_event(
+            project_id,
+            EventKind.REVIEW_RESOLVED,
+            payload={
+                "document_id": document_id,
+                "authority": authority,
+                "path": document.path,
+            },
+            dedup_key=f"doc-authority-{document_id}-{authority}-{document.content_hash[:12]}",
+        ))
+        project = _p3_project_or_none(project_id)
+        build_snapshot(intelligence, project, trigger=SnapshotTrigger.MANUAL)
+        return {
+            "ok": True,
+            "document_id": document_id,
+            "authority": authority,
+            "superseded": superseded,
+        }
+    finally:
+        intelligence.db.close()
+
+
+def build_p3_work_items(project_id: str) -> dict[str, Any]:
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    return {"ok": True, "project_id": project_id, "items": work_item_projection(project)}
+
+
+def confirm_p3_work_item(
+    project_id: str,
+    work_item_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Write a user-confirmed declared status back to the project YAML (P3 §9.4)."""
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    ref = parse_work_item_ref(project_id, work_item_id)
+    if ref is None:
+        return {"ok": False, "error": f"无效工作项：{work_item_id}"}
+    kind, index = ref
+    declared_status = str(payload.get("declared_status") or "").strip()
+    if declared_status not in {"planned", "in_progress", "completed", "blocked"}:
+        return {"ok": False, "error": f"无效人工状态：{declared_status}"}
+    if kind == "goal":
+        return {"ok": False, "error": "总体目标没有状态字段，请通过里程碑或行动管理进度。"}
+    title = ""
+    if kind == "ms":
+        milestones = project.plan.milestones
+        if index >= len(milestones):
+            return {"ok": False, "error": "里程碑不存在或计划已变化，请刷新后重试。"}
+        milestone = milestones[index]
+        milestone.status = declared_status  # type: ignore[assignment]
+        title = milestone.title
+    else:  # act: next_actions is a plain list; only completion is persisted.
+        actions = project.plan.next_actions
+        if index >= len(actions):
+            return {"ok": False, "error": "行动不存在或计划已变化，请刷新后重试。"}
+        title = actions[index]
+        if declared_status == "completed":
+            actions.pop(index)
+        declared_status = "completed" if declared_status == "completed" else "planned"
+    project.plan.updated_at = _iso_utc(time.time())
+    _project_registry().save(project)
+    saved = _project_registry().get(project_id)
+    if saved is None:
+        raise RuntimeError("项目配置已写入，但无法重新读取")
+    intelligence = _project_intelligence()
+    try:
+        intelligence.events.append(new_event(
+            project_id,
+            EventKind.WORK_ITEM_CONFIRMED,
+            payload={
+                "work_item_id": work_item_id,
+                "title": title,
+                "declared_status": declared_status,
+            },
+            dedup_key=f"wi-confirm-{work_item_id}-{declared_status}",
+        ))
+        snapshot = build_snapshot(intelligence, saved, trigger=SnapshotTrigger.MANUAL)
+        return {
+            "ok": True,
+            "work_item_id": work_item_id,
+            "declared_status": declared_status,
+            "revision": snapshot.revision,
+            "items": work_item_projection(saved),
+        }
+    finally:
+        intelligence.db.close()
+
+
+def resolve_p3_review(project_id: str, review_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    status = str(payload.get("status") or "").strip()
+    if status not in {"confirmed", "dismissed"}:
+        return {"ok": False, "error": f"无效处理结果：{status}"}
+    if review_id.startswith("ev:"):
+        result = resolve_evidence_review({"review_id": review_id[3:], "status": status})
+        if not result.get("ok"):
+            return result
+        return {"ok": True, "review_id": review_id, "status": status, "source": "evidence_ledger"}
+    intelligence = _project_intelligence()
+    try:
+        review = next(
+            (item for item in intelligence.reviews.list(project_id) if item.review_id == review_id),
+            None,
+        )
+        if review is None:
+            return {"ok": False, "error": f"复核项不存在：{review_id}"}
+        if status == "confirmed" and review.kind.value == "document_authority":
+            document_id = (review.impact_refs or [""])[0]
+            document = intelligence.documents.get(document_id) if document_id else None
+            if document is not None:
+                document.metadata["confirmed_hash"] = document.content_hash
+                intelligence.documents.upsert(document)
+                intelligence.documents.set_authority(document_id, "confirmed")
+                supersede_document_reviews(intelligence, project_id, document_id)
+        intelligence.reviews.resolve(review_id, status)
+        intelligence.events.append(new_event(
+            project_id,
+            EventKind.REVIEW_RESOLVED,
+            payload={"review_id": review_id, "status": status, "kind": review.kind.value},
+            dedup_key=f"review-resolve-{review_id}-{status}",
+        ))
+        project = _p3_project_or_none(project_id)
+        build_snapshot(intelligence, project, trigger=SnapshotTrigger.MANUAL)
+        return {"ok": True, "review_id": review_id, "status": status}
+    finally:
+        intelligence.db.close()
+
+
+def save_p3_project_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    """Settings dialog save: YAML write + local P3 refresh (no sync monitor scan)."""
+    project_id = str(payload.get("project_id") or "").strip()
+    project = _project_registry().get(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    name = str(payload.get("name") or "").strip()
+    path_value = str(payload.get("path") or "").strip()
+    if not name or not path_value:
+        return {"ok": False, "error": "项目名称和本地目录不能为空。"}
+    project.name = name
+    project.path = path_value
+    project.description = str(payload.get("description") or "").strip()
+    project.test_command = str(payload.get("test_command") or "").strip()
+    project.document_dirs = _split_lines(payload.get("document_dirs")) or ["docs"]
+    project.document_files = _split_lines(payload.get("document_files")) or ["README.md"]
+    project.result_dirs = _split_lines(payload.get("result_dirs")) or ["results", "artifacts", "experiments"]
+    project.report_dirs = _split_lines(payload.get("report_dirs")) or ["reports"]
+    config_path = _project_registry().save(project)
+    saved = _project_registry().get(project.id)
+    if saved is None:
+        raise RuntimeError("项目配置已写入，但无法重新读取")
+    intelligence = _project_intelligence()
+    try:
+        events = collect_all_events(saved, intelligence.db, since=0.0, check_remote=False)
+        ingest_events(intelligence, events)
+        scan_project_documents(intelligence, saved)
+        seed_reviews(intelligence, saved)
+        snapshot = build_snapshot(intelligence, saved, trigger=SnapshotTrigger.MANUAL)
+    finally:
+        intelligence.db.close()
+    return {"ok": True, "path": str(config_path), "revision": snapshot.revision}
+
+
 class WorkbenchHandler(BaseHTTPRequestHandler):
     server_version = "ConfluxWorkbench/0.1"
 
@@ -3368,6 +3805,12 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/status":
             self._send_json(build_status())
+            return
+        if parsed.path == "/api/v1/projects":
+            self._send_json(build_p3_projects(), headers={"Cache-Control": "no-store"})
+            return
+        if parsed.path.startswith("/api/v1/projects/"):
+            self._route_p3_get(parsed)
             return
         if parsed.path == "/api/projects":
             self._send_json(build_projects_overview(), headers={"Cache-Control": "no-store"})
@@ -3512,6 +3955,9 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
+            if parsed.path.startswith("/api/v1/projects/"):
+                self._route_p3_post(parsed, payload)
+                return
             if parsed.path == "/api/papers/inbox":
                 self._send_json(run_paper_inbox(payload))
                 return
@@ -3634,6 +4080,121 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         if not length:
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
+
+    def _route_p3_get(self, parsed: urllib.parse.ParseResult) -> None:
+        """GET /api/v1/projects/{id}/... — snapshot-driven reads only."""
+        parts = parsed.path[len("/api/v1/projects/"):].strip("/").split("/")
+        project_id = parts[0] if parts else ""
+        if not project_id:
+            self.send_error(404)
+            return
+        if len(parts) == 2 and parts[1] == "state":
+            result = build_p3_project_state(project_id)
+            self._send_json(result, status=200 if result.get("ok") else 404,
+                            headers={"Cache-Control": "no-store"})
+            return
+        if len(parts) == 2 and parts[1] == "documents":
+            result = build_p3_documents(project_id)
+            self._send_json(result, status=200 if result.get("ok") else 404)
+            return
+        if len(parts) == 2 and parts[1] == "work-items":
+            result = build_p3_work_items(project_id)
+            self._send_json(result, status=200 if result.get("ok") else 404)
+            return
+        if len(parts) == 2 and parts[1] == "reviews":
+            project = _p3_project_or_none(project_id)
+            if project is None:
+                self._send_json({"ok": False, "error": f"未找到已登记项目：{project_id}"}, status=404)
+                return
+            intelligence = _project_intelligence()
+            try:
+                reviews = _unified_reviews(project_id, intelligence, status=None)
+            finally:
+                intelligence.db.close()
+            pending = [item for item in reviews if item["status"] == "pending"]
+            self._send_json({"ok": True, "reviews": reviews, "pending": pending,
+                             "count": len(pending)})
+            return
+        if len(parts) == 2 and parts[1] == "activity":
+            project = _p3_project_or_none(project_id)
+            if project is None:
+                self._send_json({"ok": False, "error": f"未找到已登记项目：{project_id}"}, status=404)
+                return
+            intelligence = _project_intelligence()
+            try:
+                self._send_json({"ok": True, **build_p3_activity(project_id, intelligence)})
+            finally:
+                intelligence.db.close()
+            return
+        if len(parts) == 2 and parts[1] == "events":
+            self._send_project_sse(project_id)
+            return
+        self.send_error(404)
+
+    def _route_p3_post(self, parsed: urllib.parse.ParseResult, payload: dict[str, Any]) -> None:
+        """POST /api/v1/projects/{id}/... — explicit user actions."""
+        parts = parsed.path[len("/api/v1/projects/"):].strip("/").split("/")
+        project_id = parts[0] if parts else ""
+        if not project_id:
+            self.send_error(404)
+            return
+        if len(parts) == 2 and parts[1] == "refresh":
+            result = refresh_p3_project(project_id, payload)
+            self._send_json(result, status=200 if result.get("ok") else 404)
+            return
+        if len(parts) == 2 and parts[1] == "settings":
+            result = save_p3_project_settings(payload)
+            self._send_json(result, status=200 if result.get("ok") else 400)
+            return
+        if len(parts) == 4 and parts[1] == "documents" and parts[3] == "authority":
+            result = set_p3_document_authority(project_id, parts[2], payload)
+            self._send_json(result, status=200 if result.get("ok") else 400)
+            return
+        if len(parts) == 4 and parts[1] == "work-items" and parts[3] == "confirm":
+            result = confirm_p3_work_item(project_id, parts[2], payload)
+            self._send_json(result, status=200 if result.get("ok") else 400)
+            return
+        if len(parts) == 4 and parts[1] == "reviews" and parts[3] == "resolve":
+            result = resolve_p3_review(project_id, parts[2], payload)
+            self._send_json(result, status=200 if result.get("ok") else 400)
+            return
+        self.send_error(404)
+
+    def _send_project_sse(self, project_id: str) -> None:
+        """Stream P3 project events with the event id as the reconnection cursor."""
+        intelligence = _project_intelligence()
+        try:
+            if _p3_project_or_none(project_id) is None:
+                self.send_error(404)
+                return
+            last_id = self.headers.get("Last-Event-ID", "")
+            cursor = int(last_id) if last_id.isdigit() else 0
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Content-Security-Policy", CSP_HEADER)
+            self.end_headers()
+            last_keepalive = time.monotonic()
+            while True:
+                batch = intelligence.events.list(project_id, after_event_id=cursor, limit=200)
+                for event in batch:
+                    event_id = int(event["event_id"])
+                    data = json.dumps(event, ensure_ascii=False)
+                    self.wfile.write(f"id: {event_id}\ndata: {data}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                    cursor = event_id
+                if not batch and time.monotonic() - last_keepalive >= 25.0:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    last_keepalive = time.monotonic()
+                if not batch:
+                    time.sleep(0.25)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            intelligence.db.close()
 
     def _send_json(
         self,
