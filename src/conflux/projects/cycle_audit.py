@@ -691,6 +691,8 @@ def build_cycle_audit(
         weak_signals.extend(item_weak)
         weak_signals.extend(_diff_documents(base_for_diff, current_payload, period_events))
         risks.extend(_snapshot_risks(current_payload, period_events))
+        # Standing risks carried across cycles (e.g. completed without evidence).
+        risks.extend(_work_item_risks(current_payload))
         if not claims and not weak_signals:
             weak_signals.append("相对基线未检测到可归因的新提交、测试、实验、查询或论文变化。")
 
