@@ -301,6 +301,7 @@ def query_command(
         query_rewriter=v2_rewriter,
         semantic_reranker=v2_semantic_reranker,
         reranker_model=role_models.get("reranker"),
+        panel_models=(model_trace or {}).get("panel_models") or {},
         llm_rerank_enabled=(
             bool(config_get("research", "semantic_rerank", default=False))
             if not replay_bundle
@@ -320,6 +321,15 @@ def query_command(
         timeout_seconds=research_profile.timeout_seconds,
         baseline_variant=baseline_variant,
     )
+    # P4.0 A：召回相关用户记忆并注入系统提示词前缀（一次成型；失败时为空串，
+    # 记忆绝不拖垮运行；证据裁决角色不接收偏好注入）。
+    if not replay_bundle:
+        try:
+            from .memory import recall_for_query
+
+            initial_state["_memory_banner"] = recall_for_query(query)
+        except Exception:
+            initial_state["_memory_banner"] = ""
     final_state, trace_events = _run_phase2_graph(
         graph,
         initial_state,

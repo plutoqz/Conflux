@@ -73,12 +73,15 @@ def test_protocol_contracts_round_trip():
 
 
 def test_migration_registered_globally():
+    import conflux.memory  # noqa: F401 — 导入即注册 0009（同 projects 的 0007/0008 模式）
     from conflux.adapters import sqlite_store as store
 
     versions = {item[0] for item in store.SCHEMA_MIGRATIONS}
     assert "0007_project_intelligence" in versions
     assert "0008_project_cycles" in versions
-    assert store.SCHEMA_MIGRATIONS[-1][0] == "0008_project_cycles"
+    # P4.0 A 追加 0009 用户记忆迁移（conflux.memory 导入时注册）。
+    assert "0009_user_memory" in versions
+    assert store.SCHEMA_MIGRATIONS[-1][0] == "0009_user_memory"
 
 
 def test_bootstrap_applies_project_intelligence(tmp_path: Path):

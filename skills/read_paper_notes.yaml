@@ -1,0 +1,17 @@
+name: read_paper_notes
+description: 把一批论文读成结构化文献笔记（相关性与证据质量评审）
+version: 0.1.0
+when:
+  intent: ingest_pdf
+  tags: [paper, literature]
+steps:
+  - tool: builtin.paper.review
+    mode: agentic
+    inputs:
+      papers: "{{papers}}"
+tools: [builtin.paper.review]
+gates:
+  - after: builtin.paper.review
+    check: every_review_has_relevance_and_evidence_quality
+output:
+  contract: literature_note

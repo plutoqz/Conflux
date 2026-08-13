@@ -1,0 +1,23 @@
+name: weekly_report_draft
+description: 依据本周检索证据与证据评审草拟项目周报
+version: 0.1.0
+when:
+  intent: cycle_summary
+  tags: [report, weekly]
+steps:
+  - tool: builtin.rag.search
+    mode: deterministic
+    config:
+      query: "{{query}}"
+      top_k: 8
+  - tool: builtin.research.evidence_review
+    mode: agentic
+    inputs:
+      query: "{{query}}"
+      candidates: "{{builtin.rag.search.documents}}"
+tools: [builtin.rag.search, builtin.research.evidence_review]
+gates:
+  - after: builtin.research.evidence_review
+    check: report_mentions_only_reviewed_evidence
+output:
+  contract: weekly_report_draft

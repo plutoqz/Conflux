@@ -1,0 +1,24 @@
+name: experiment_reproducibility_check
+description: 检查实验记录是否覆盖可复现要素（数据/代码/环境/指标）
+version: 0.1.0
+when:
+  intent: project_audit
+  tags: [experiment, reproducibility]
+steps:
+  - tool: builtin.rag.search
+    mode: deterministic
+    config:
+      query: "{{query}}"
+      top_k: 8
+  - tool: builtin.text.keyword_match
+    mode: deterministic
+    config:
+      keywords: [dataset, code, environment, metric, seed]
+    inputs:
+      text: "{{builtin.rag.search.documents}}"
+tools: [builtin.rag.search, builtin.text.keyword_match]
+gates:
+  - after: builtin.text.keyword_match
+    check: coverage_above_threshold
+output:
+  contract: reproducibility_report
