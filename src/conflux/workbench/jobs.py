@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import uuid
@@ -208,6 +209,82 @@ def _persist_trace_snapshot(job: ResearchJob, events: list[Any], output_dir: str
         job.warnings.append(f"trace snapshot failed: {type(exc).__name__}: {exc}")
         return
     job.artifacts["trace_path"] = str(path.resolve())
+
+
+def _write_failure_diagnostic(
+    job: ResearchJob,
+    output_dir: str,
+    *,
+    status: str,
+    error: str,
+    retryable: bool,
+) -> None:
+    """Persist a user-readable failure artifact without treating it as a report."""
+
+    diagnostic = {
+        "schema_version": "conflux.research_failure.v1",
+        "run_id": job.run_id,
+        "query": job.query,
+        "status": status,
+        "error_type": str(error).partition(":")[0],
+        "error": str(error),
+        "occurred_at": time.time(),
+        "current_stage": job.current_stage,
+        "progress": dict(job.progress),
+        "source_statuses": dict(job.source_statuses),
+        "formal_report_preserved": bool(
+            job.has_report or job.final_answer or job.artifacts.get("markdown_path")
+        ),
+        "recovery": {
+            "retryable": bool(retryable),
+            "action": (
+                "Retry the run after checking the failed stage and external dependencies."
+                if retryable
+                else "Fix the recorded contract or configuration error before submitting a new run."
+            ),
+        },
+    }
+    root = Path(output_dir)
+    json_path = root / f"{job.run_id}.diagnostic.json"
+    markdown_path = root / f"{job.run_id}.diagnostic.md"
+    markdown = "\n".join(
+        [
+            "# Conflux research failure diagnostic",
+            "",
+            f"- Run ID: `{job.run_id}`",
+            f"- Status: `{status}`",
+            f"- Failed stage: `{job.current_stage or 'unknown'}`",
+            f"- Retryable: `{'yes' if retryable else 'no'}`",
+            f"- Formal report preserved: `{'yes' if diagnostic['formal_report_preserved'] else 'no'}`",
+            "",
+            "## Query",
+            "",
+            job.query,
+            "",
+            "## Error",
+            "",
+            f"`{error}`",
+            "",
+            "## Recovery",
+            "",
+            str(diagnostic["recovery"]["action"]),
+            "",
+        ]
+    )
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(
+            json.dumps(diagnostic, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        markdown_path.write_text(markdown, encoding="utf-8")
+    except Exception as exc:
+        job.warnings.append(
+            f"failure diagnostic snapshot failed: {type(exc).__name__}: {exc}"
+        )
+        return
+    job.artifacts["diagnostic_json_path"] = str(json_path.resolve())
+    job.artifacts["diagnostic_markdown_path"] = str(markdown_path.resolve())
 
 
 def _state_warnings(state: dict[str, Any]) -> list[str]:
@@ -885,13 +962,34 @@ class JobManager:
             queue.cancel(run_id)
             persist_job(run_status="cancelled")
         except _JobTimedOut as exc:
+            _write_failure_diagnostic(
+                job,
+                output_dir,
+                status="timed_out",
+                error=f"{type(exc).__name__}: {exc}",
+                retryable=True,
+            )
             _finish_job(job, "timed_out", str(exc), preserve_report=True)
             result = _job_metadata(job)
             queue.complete(run_id, self._worker_id, result=result)
             persist_job(run_status=job.status)
         except SystemExit as exc:
-            _finish_job(job, "failed", f"SystemExit code={exc.code}", preserve_report=True)
-            queue.fail(run_id, self._worker_id, job.error, retryable=False)
+            error = f"SystemExit code={exc.code}"
+            _write_failure_diagnostic(
+                job,
+                output_dir,
+                status="failed",
+                error=error,
+                retryable=False,
+            )
+            _finish_job(job, "failed", error, preserve_report=True)
+            queue.fail(
+                run_id,
+                self._worker_id,
+                job.error,
+                retryable=False,
+                result=_job_metadata(job),
+            )
             persist_job(run_status="failed")
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
@@ -904,13 +1002,33 @@ class JobManager:
                 persist_job(run_status="cancelled")
             elif job.cancel_reason == "timeout" or _deadline_exceeded(job):
                 job.cancel_reason = "timeout"
+                _write_failure_diagnostic(
+                    job,
+                    output_dir,
+                    status="timed_out",
+                    error=error,
+                    retryable=True,
+                )
                 _finish_job(job, "timed_out", error, preserve_report=True)
                 result = _job_metadata(job)
                 queue.complete(run_id, self._worker_id, result=result)
                 persist_job(run_status=job.status)
             else:
+                _write_failure_diagnostic(
+                    job,
+                    output_dir,
+                    status="failed",
+                    error=error,
+                    retryable=False,
+                )
                 _finish_job(job, "failed", error, preserve_report=True)
-                queue.fail(run_id, self._worker_id, job.error, retryable=False)
+                queue.fail(
+                    run_id,
+                    self._worker_id,
+                    job.error,
+                    retryable=False,
+                    result=_job_metadata(job),
+                )
                 persist_job(run_status="failed")
         finally:
             heartbeat_stop.set()

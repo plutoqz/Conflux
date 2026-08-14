@@ -615,22 +615,25 @@ def create_research_models(
             member_tokens = max(300, profile.role_max_tokens[anchor_role] // 2)
             anchor_timeout = profile.role_timeout_seconds[anchor_role]
             members = [
-                BudgetedChatModel(
-                    BoundedChatModel(
-                        create_chat_model(
-                            preset,
-                            max_tokens=member_tokens,
-                            timeout=anchor_timeout,
-                            max_retries=profile.max_retries,
+                (
+                    preset,
+                    BudgetedChatModel(
+                        BoundedChatModel(
+                            create_chat_model(
+                                preset,
+                                max_tokens=member_tokens,
+                                timeout=anchor_timeout,
+                                max_retries=profile.max_retries,
+                            ),
+                            anchor_timeout,
+                            deadline_at=deadline_at,
+                            commit_reserve_seconds=panel_point_downstream[point],
+                            role=f"panel_{point}",
                         ),
-                        anchor_timeout,
-                        deadline_at=deadline_at,
-                        commit_reserve_seconds=panel_point_downstream[point],
+                        budget,
+                        output_reserve=member_tokens,
                         role=f"panel_{point}",
                     ),
-                    budget,
-                    output_reserve=member_tokens,
-                    role=f"panel_{point}",
                 )
                 for preset in member_presets
             ]

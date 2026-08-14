@@ -1475,6 +1475,7 @@ class JobQueue:
         *,
         retry_delay: float = 5.0,
         retryable: bool = True,
+        result: dict[str, Any] | None = None,
     ) -> bool:
         now = time.time()
         connection = self.db.connection
@@ -1499,10 +1500,18 @@ class JobQueue:
                 """
                 UPDATE jobs
                 SET status = ?, lease_owner = NULL, lease_expires_at = NULL,
-                    scheduled_at = ?, error = ?, updated_at = ?
+                    scheduled_at = ?, error = ?, result_json = COALESCE(?, result_json),
+                    updated_at = ?
                 WHERE job_id = ?
                 """,
-                (status, scheduled_at, error, now, job_id),
+                (
+                    status,
+                    scheduled_at,
+                    error,
+                    _json_dumps(result) if result is not None else None,
+                    now,
+                    job_id,
+                ),
             )
             connection.commit()
         except Exception:

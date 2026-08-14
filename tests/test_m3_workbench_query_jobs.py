@@ -118,6 +118,39 @@ def test_query_worker_recovers_pending_job_and_persists_events_and_checkpoint(
         db.close()
 
 
+def test_query_failure_persists_structured_diagnostic_artifacts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from conflux import __main__ as cli
+
+    def broken_query(*_args, **_kwargs):
+        raise TypeError("cannot unpack non-iterable BudgetedChatModel object")
+
+    monkeypatch.setattr(cli, "query_command", broken_query)
+    output_dir = tmp_path / "reports"
+    manager = JobManager(db_path=tmp_path / "conflux.db", poll_interval=0.02)
+    run_id = manager.submit(
+        "panel contract smoke",
+        {"depth": "standard", "output_dir": str(output_dir)},
+    )["run_id"]
+    status = _wait_for_status(manager, run_id, {"failed"})
+    manager.close()
+
+    assert status["has_report"] is False
+    assert "cannot unpack" in status["error"]
+    diagnostic_json = Path(status["artifacts"]["diagnostic_json_path"])
+    diagnostic_markdown = Path(status["artifacts"]["diagnostic_markdown_path"])
+    assert diagnostic_json.is_file()
+    assert diagnostic_markdown.is_file()
+    diagnostic = json.loads(diagnostic_json.read_text(encoding="utf-8"))
+    assert diagnostic["schema_version"] == "conflux.research_failure.v1"
+    assert diagnostic["status"] == "failed"
+    assert diagnostic["error_type"] == "TypeError"
+    assert diagnostic["recovery"]["retryable"] is False
+    assert "panel contract smoke" in diagnostic_markdown.read_text(encoding="utf-8")
+
+
 def test_expired_query_lease_is_reclaimed_and_records_resume_event(
     tmp_path: Path,
     monkeypatch,

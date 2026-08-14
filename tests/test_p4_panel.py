@@ -155,12 +155,45 @@ class TestPanelModelConstruction:
         members = verification.get("members") or []
         assert len(members) == 2
         expected = max(300, profile.verifier_max_tokens // 2)
-        assert all(member.max_tokens == expected for member in members)
+        assert [label for label, _member in members] == profile.panel_members("verification")
+        assert all(member.max_tokens == expected for _label, member in members)
         assert verification.get("referee") is not None
         assert verification["referee"].max_tokens == expected
         # deep 档第二判断点（arbitration）成员来自 reasoning + flash
         arbitration = panel.get("arbitration") or {}
-        assert len(arbitration.get("members") or []) == 2
+        arbitration_members = arbitration.get("members") or []
+        assert [label for label, _member in arbitration_members] == profile.panel_members("arbitration")
+
+    def test_standard_and_deep_factory_panels_run_through_verification(
+        self,
+        monkeypatch,
+    ):
+        import conflux.model_factory as model_factory
+
+        class FactoryPanelModel(_PanelModel):
+            def __init__(self, *, max_tokens: int):
+                super().__init__(_check("supports", 0.9))
+                self.max_tokens = max_tokens
+
+            def invoke(self, messages, **_kwargs):
+                return super().invoke(messages)
+
+        monkeypatch.setattr(
+            model_factory,
+            "create_chat_model",
+            lambda _preset, **kwargs: FactoryPanelModel(max_tokens=kwargs["max_tokens"]),
+        )
+
+        for depth in ("standard", "deep"):
+            models, diagnostics = model_factory.create_research_models(depth)
+            result = verification_node(
+                _verification_state(depth=depth),
+                models["verifier"],
+                panel=diagnostics["panel_models"]["verification"],
+            )
+            verification = result["_claim_records"][0]["verification_result"]
+            assert verification["verdict"] == "supports"
+            assert len(verification["panel"]["members"]) == 2
 
 
 # ============================================================
@@ -294,8 +327,8 @@ class TestRunPanel:
 # B4 verification 挂载 + 确定性优先
 # ============================================================
 
-def _verification_state() -> dict:
-    state = _new_state("panel test question", run_id="run-panel")
+def _verification_state(*, depth: str = "deep") -> dict:
+    state = _new_state("panel test question", run_id="run-panel", depth=depth)
     state["_claim_records"] = [{
         "claim_id": "run-panel:claim:sq-1:01",
         "subquestion_id": "sq-1",
