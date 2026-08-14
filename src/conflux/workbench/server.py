@@ -3017,6 +3017,46 @@ def confirm_p3_mentor_report(project_id: str, payload: dict[str, Any]) -> dict[s
         intelligence.db.close()
 
 
+# ── P4.4 E1 code QA (AST chunks + call graph) ────────────────────
+
+
+def index_p3_project_code(project_id: str) -> dict[str, Any]:
+    """POST /api/v1/projects/{id}/code/index — index Python sources (E1)."""
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    from conflux.code_qa import index_project_code
+
+    try:
+        return index_project_code(None, project)
+    except Exception as exc:
+        return {"ok": False, "error": f"代码索引失败：{type(exc).__name__}: {exc}"}
+
+
+def query_p3_project_code(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /api/v1/projects/{id}/code/query — deterministic code answer (E1)."""
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    query = str(payload.get("query") or "").strip()
+    if not query:
+        return {"ok": False, "error": "query 必填。"}
+    from conflux.code_qa import answer_code_question
+
+    try:
+        return {
+            "ok": True,
+            "project_id": project_id,
+            **answer_code_question(
+                query,
+                project_id=project_id,
+                top_k=int(payload.get("top_k") or 3),
+            ),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": f"代码问答失败：{type(exc).__name__}: {exc}"}
+
+
 def build_p3_project_state(project_id: str) -> dict[str, Any]:
     """Page payload: one materialized read (snapshot + documents + inbox)."""
     project = _p3_project_or_none(project_id)
@@ -3703,6 +3743,14 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         if len(parts) == 2 and parts[1] == "mentor-report":
             result = build_p3_mentor_report(project_id)
             self._send_json(result, status=200 if result.get("ok") else 404)
+            return
+        if len(parts) == 3 and parts[1] == "code" and parts[2] == "query":
+            result = query_p3_project_code(project_id, payload)
+            self._send_json(result, status=200 if result.get("ok") else 400)
+            return
+        if len(parts) == 3 and parts[1] == "code" and parts[2] == "index":
+            result = index_p3_project_code(project_id)
+            self._send_json(result, status=200 if result.get("ok") else 400)
             return
         if len(parts) == 2 and parts[1] == "events":
             self._send_project_sse(project_id)

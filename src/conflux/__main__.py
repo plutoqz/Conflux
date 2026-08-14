@@ -184,7 +184,12 @@ def _read_pdf_documents(path: Path, source: str) -> list[Document]:
             documents.append(
                 Document(
                     page_content=text,
-                    metadata={"source": f"{source}#page-{page_idx}", "file": source, "page": page_idx},
+                    metadata={
+                        "source": f"{source}#page-{page_idx}",
+                        "file": source,
+                        "page": page_idx,
+                        "chunk_id": f"{source}#page-{page_idx}",
+                    },
                 )
             )
     return documents
