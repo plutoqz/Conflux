@@ -2770,6 +2770,7 @@ def _cycle_summary_light(confirmed: dict[str, Any] | None) -> dict[str, Any] | N
         "confirmed_at": confirmed.get("confirmed_at", 0.0),
         "period": summary.get("period", ""),
         "real_progress": len(summary.get("real_progress") or []),
+        "experiments": len(summary.get("experiments") or []),
         "failed_experiments": len(summary.get("failed_experiments") or []),
         "risks": len(summary.get("risks") or []),
         "next_cycle_candidates": len(summary.get("next_cycle_candidates") or []),
@@ -2851,6 +2852,166 @@ def confirm_p3_audit(project_id: str, payload: dict[str, Any]) -> dict[str, Any]
             current_revision=int(current_raw) if current_raw not in (None, "") else None,
             legacy_out_dir=_p3_legacy_audit_dir(project_id),
             out_dir=PROJECT_ROOT / DEFAULT_PROGRESS_DIR,
+        )
+    finally:
+        intelligence.db.close()
+
+
+# ── P4.3 D experiment registry (migration 0010) ───────────────────
+
+
+def _experiment_db() -> Any:
+    from conflux.adapters.sqlite_store import SQLiteDatabase
+
+    db = SQLiteDatabase(database_path()).connect()
+    db.bootstrap_schema()
+    return db
+
+
+def _experiment_repo(db: Any) -> Any:
+    from conflux.experiments import ExperimentRepository
+
+    return ExperimentRepository(db)
+
+
+def register_p3_experiment(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /api/v1/projects/{id}/experiments — register one experiment (D1).
+
+    Unified entry for CLI / API / chat: name and metrics are required;
+    status is bounded; numbers and hashes are stored verbatim so the weekly
+    report's ``exp:`` refs stay traceable.
+    """
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        return {"ok": False, "error": "实验名为必填（name）。"}
+    status = str(payload.get("status") or "draft").strip()
+    if status not in {"draft", "running", "done", "failed"}:
+        return {"ok": False, "error": f"无效实验状态：{status}"}
+    db = _experiment_db()
+    try:
+        repo = _experiment_repo(db)
+        entry = repo.register(
+            project_id=project_id,
+            name=name,
+            hypothesis=str(payload.get("hypothesis") or ""),
+            params=dict(payload.get("params") or {}),
+            metrics=dict(payload.get("metrics") or {}),
+            status=status,
+            commit_hash=str(payload.get("commit_hash") or ""),
+            artifacts=[str(item) for item in (payload.get("artifacts") or [])],
+            linked_claims=[str(item) for item in (payload.get("linked_claims") or [])],
+            source_ref=str(payload.get("source_ref") or ""),
+        )
+        intelligence = _project_intelligence()
+        try:
+            intelligence.events.append(new_event(
+                project_id,
+                EventKind.WORK_ITEM_CONFIRMED,
+                payload={
+                    "kind": "experiment.registered",
+                    "experiment_id": entry["id"],
+                    "name": name,
+                },
+                dedup_key=f"exp-reg-{project_id}-{name}-{entry['id'][:12]}",
+            ))
+            project_definition = _p3_project_or_none(project_id)
+            build_snapshot(intelligence, project_definition, trigger=SnapshotTrigger.MANUAL)
+        finally:
+            intelligence.db.close()
+        return {"ok": True, "experiment": entry}
+    finally:
+        db.close()
+
+
+def list_p3_experiments(project_id: str, status: str | None = None) -> dict[str, Any]:
+    """GET /api/v1/projects/{id}/experiments — read-only experiment list."""
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    db = _experiment_db()
+    try:
+        repo = _experiment_repo(db)
+        entries = repo.list(project_id, status=status)
+        return {
+            "ok": True,
+            "project_id": project_id,
+            "count": len(entries),
+            "experiments": entries,
+        }
+    finally:
+        db.close()
+
+
+def scan_p3_experiment_files(project_id: str) -> dict[str, Any]:
+    """POST /api/v1/projects/{id}/experiments/scan — scan results*.json (D §2).
+
+    Converts result-dir JSON files matching the key contract into experiment
+    records; idempotent (source_ref = scan:{path}).
+    """
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    from conflux.experiments import auto_scan_result_files
+
+    registered = auto_scan_result_files(project)
+    db = _experiment_db()
+    try:
+        repo = _experiment_repo(db)
+        entries = repo.list(project_id)
+        result = {
+            "ok": True,
+            "project_id": project_id,
+            "registered": registered,
+            "count": len(entries),
+            "experiments": entries,
+        }
+    finally:
+        db.close()
+    return result
+
+
+# ── P4.3 D mentor weekly report (D2–D4) ─────────────────────────
+
+
+def build_p3_mentor_report(project_id: str) -> dict[str, Any]:
+    """GET /api/v1/projects/{id}/mentor-report — read-only data draft (no LLM)."""
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    from conflux.mentor_report import build_mentor_report
+
+    intelligence = _project_intelligence()
+    try:
+        return build_mentor_report(intelligence, project, legacy_out_dir=_p3_legacy_audit_dir(project_id))
+    finally:
+        intelligence.db.close()
+
+
+def confirm_p3_mentor_report(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /api/v1/projects/{id}/mentor-report/confirm — draft → export.
+
+    Accepts an optional pre-validated ``report`` (from the workbench) or runs
+    the optional LLM organization step; the deterministic validator gates the
+    export, so an unbackable number/hash never reaches the Markdown.
+    """
+    project = _p3_project_or_none(project_id)
+    if project is None:
+        return {"ok": False, "error": f"未找到已登记项目：{project_id}"}
+    from conflux.mentor_report import confirm_mentor_report
+
+    baseline_raw = payload.get("baseline_revision")
+    intelligence = _project_intelligence()
+    try:
+        return confirm_mentor_report(
+            intelligence,
+            project,
+            report=str(payload.get("report") or ""),
+            baseline_revision=int(baseline_raw) if baseline_raw not in (None, "") else None,
+            legacy_out_dir=_p3_legacy_audit_dir(project_id),
+            out_dir=PROJECT_ROOT / DEFAULT_PROGRESS_DIR / project_id,
         )
     finally:
         intelligence.db.close()
@@ -3535,6 +3696,14 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             result = build_p3_audit(project_id)
             self._send_json(result, status=200 if result.get("ok") else 404)
             return
+        if len(parts) == 2 and parts[1] == "experiments":
+            result = list_p3_experiments(project_id, status=None)
+            self._send_json(result, status=200 if result.get("ok") else 404)
+            return
+        if len(parts) == 2 and parts[1] == "mentor-report":
+            result = build_p3_mentor_report(project_id)
+            self._send_json(result, status=200 if result.get("ok") else 404)
+            return
         if len(parts) == 2 and parts[1] == "events":
             self._send_project_sse(project_id)
             return
@@ -3577,6 +3746,18 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             return
         if len(parts) == 3 and parts[1] == "audit" and parts[2] == "confirm":
             result = confirm_p3_audit(project_id, payload)
+            self._send_json(result, status=200 if result.get("ok") else 400)
+            return
+        if len(parts) == 2 and parts[1] == "experiments":
+            result = register_p3_experiment(project_id, payload)
+            self._send_json(result, status=200 if result.get("ok") else 400)
+            return
+        if len(parts) == 3 and parts[1] == "experiments" and parts[2] == "scan":
+            result = scan_p3_experiment_files(project_id)
+            self._send_json(result, status=200 if result.get("ok") else 400)
+            return
+        if len(parts) == 3 and parts[1] == "mentor-report" and parts[2] == "confirm":
+            result = confirm_p3_mentor_report(project_id, payload)
             self._send_json(result, status=200 if result.get("ok") else 400)
             return
         self.send_error(404)

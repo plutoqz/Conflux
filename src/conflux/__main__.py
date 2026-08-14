@@ -47,6 +47,121 @@ def _clean_text(text: str) -> str:
     return text.encode("utf-8", errors="ignore").decode("utf-8")
 
 
+def _mentor_command(args: argparse.Namespace) -> int:
+    """P4.3 D mentor report CLI: draft（确定性数据）→ confirm（校验+导出）。"""
+    import json as _json
+
+    from conflux.core.runtime_home import database_path
+
+    try:
+        from conflux.adapters.sqlite_store import SQLiteDatabase
+        from conflux.mentor_report import build_mentor_report, confirm_mentor_report
+        from conflux.project_registry import ProjectRegistry
+        from conflux.projects import ProjectIntelligence
+
+        project = ProjectRegistry(Path("projects"), base_dir=Path.cwd()).get(args.project)
+        if project is None:
+            print(f"未找到已登记项目：{args.project}")
+            return 2
+        db = SQLiteDatabase(database_path()).connect()
+        db.bootstrap_schema()
+        intelligence = ProjectIntelligence(db)
+        intelligence.ensure_schema()
+        try:
+            action = str(getattr(args, "mentor_action", "") or "draft")
+            if action == "draft":
+                data = build_mentor_report(intelligence, project)
+                if data.get("ok") is False:
+                    print(f"周报草稿生成失败：{data.get('error')}")
+                    return 1
+                print(f"导师周报草稿（{data.get('period')}）：")
+                print(f"  真实进展 {len(data['claims'])} 项；实验 {len(data['experiments'])} 项；"
+                      f"风险 {len(data['risks'])} 项")
+                print("\n数据块：\n" + data.get("data_block", ""))
+                return 0
+            if action == "confirm":
+                report = ""
+                if getattr(args, "report_file", ""):
+                    report = Path(args.report_file).read_text(encoding="utf-8")
+                result = confirm_mentor_report(
+                    intelligence,
+                    project,
+                    report=report,
+                    out_dir=Path("reports/progress") / project.id,
+                )
+                if result.get("ok") is False:
+                    print(f"确认失败：{result.get('error', '')}")
+                    for failure in result.get("failures") or []:
+                        print(f"  - {failure}")
+                    return 1
+                print(f"周报已导出：{result['artifacts']['markdown_path']}")
+                print(result.get("report", "")[:800])
+                return 0
+            print("未知 mentor 子命令")
+            return 2
+        finally:
+            db.close()
+    except Exception as exc:
+        print(f"周报命令失败：{exc}")
+        return 1
+
+
+def _experiment_command(args: argparse.Namespace) -> int:
+    """P4.3 D experiment CLI: register / list / scan (统一走 experiment_register)."""
+    import json as _json
+
+    action = str(getattr(args, "experiment_action", "") or "")
+    db = None
+    try:
+        from conflux.experiments import ExperimentRepository, auto_scan_result_files, open_experiment_repo
+
+        repo, db = open_experiment_repo()
+        if action == "register":
+            try:
+                params = _json.loads(getattr(args, "params", "{}") or "{}")
+                metrics = _json.loads(getattr(args, "metrics", "{}") or "{}")
+            except ValueError as exc:
+                print(f"参数/指标必须是合法 JSON：{exc}")
+                return 2
+            entry = repo.register(
+                project_id=args.project,
+                name=args.name,
+                hypothesis=getattr(args, "hypothesis", "") or "",
+                params=params if isinstance(params, dict) else {},
+                metrics=metrics if isinstance(metrics, dict) else {},
+                status=getattr(args, "status", "draft") or "draft",
+                commit_hash=getattr(args, "commit", "") or "",
+                source_ref=getattr(args, "source_ref", "") or "",
+            )
+            print(f"已登记实验 {entry['id']}：{entry['name']}（{entry['status']}）")
+            print(_json.dumps(entry, ensure_ascii=False, indent=2))
+            return 0
+        if action == "scan":
+            from conflux.project_registry import ProjectRegistry
+
+            project = ProjectRegistry(Path("projects"), base_dir=Path.cwd()).get(args.project)
+            if project is None:
+                print(f"未找到已登记项目：{args.project}")
+                return 2
+            registered = auto_scan_result_files(project)
+            entries = repo.list(args.project)
+            print(f"扫描完成：新增 {len(registered)} 个实验，项目共 {len(entries)} 个实验记录")
+            for entry in entries:
+                print(f"- [{entry['status']}] {entry['name']} ({entry['id']})")
+            return 0
+        if action == "list" or action == "":
+            entries = repo.list(args.project, status=getattr(args, "status", None) or None)
+            print(f"项目 {args.project} 共 {len(entries)} 个实验")
+            for entry in entries:
+                print(f"- [{entry['status']}] {entry['name']} ({entry['id']})")
+            return 0
+        print("未知 experiment 子命令")
+        return 2
+    finally:
+        if db is not None:
+            db.close()
+
+
 def _configure_console_encoding() -> None:
     for stream_name in ("stdout", "stderr"):
         stream = getattr(sys, stream_name)
@@ -748,6 +863,39 @@ def main() -> None:
     import_legacy_parser.add_argument("--source", required=True, help="Legacy reports/workbench/projects path")
     import_legacy_parser.add_argument("--dry-run", action="store_true", help="Count candidate JSON files only")
 
+    # ── P4.3 D experiment registry ──────────────────────────────
+    experiment_parser = sub.add_parser("experiment", help="Track experiments (P4.3 D)")
+    experiment_sub = experiment_parser.add_subparsers(dest="experiment_action")
+
+    exp_register_parser = experiment_sub.add_parser("register", help="Register an experiment (U1: 登记即建记录)")
+    exp_register_parser.add_argument("--project", required=True, help="Registered project id")
+    exp_register_parser.add_argument("--name", required=True, help="Experiment name")
+    exp_register_parser.add_argument("--hypothesis", default="", help="Experiment hypothesis")
+    exp_register_parser.add_argument("--params", default="{}", help="JSON object of parameters")
+    exp_register_parser.add_argument("--metrics", default="{}", help="JSON object of metrics")
+    exp_register_parser.add_argument("--status", choices=["draft", "running", "done", "failed"], default="draft",
+                                     help="Experiment status")
+    exp_register_parser.add_argument("--commit", default="", help="Corresponding git commit hash")
+    exp_register_parser.add_argument("--source-ref", default="", help="Traceability source reference")
+
+    exp_list_parser = experiment_sub.add_parser("list", help="List experiments for a project")
+    exp_list_parser.add_argument("--project", required=True, help="Project id")
+    exp_list_parser.add_argument("--status", choices=["draft", "running", "done", "failed"], default=None)
+
+    exp_scan_parser = experiment_sub.add_parser("scan", help="Scan result files (results*.json) into experiments")
+    exp_scan_parser.add_argument("--project", required=True, help="Project id")
+
+    # ── P4.3 D mentor weekly report ─────────────────────────────
+    mentor_parser = sub.add_parser("mentor", help="Draft/confirm the mentor weekly report (P4.3 D)")
+    mentor_sub = mentor_parser.add_subparsers(dest="mentor_action")
+
+    mentor_draft_parser = mentor_sub.add_parser("draft", help="Build the deterministic data draft (no model)")
+    mentor_draft_parser.add_argument("--project", required=True, help="Project id")
+
+    mentor_confirm_parser = mentor_sub.add_parser("confirm", help="Confirm and export the weekly report")
+    mentor_confirm_parser.add_argument("--project", required=True, help="Project id")
+    mentor_confirm_parser.add_argument("--report-file", default="", help="Pre-written report file (skips LLM)")
+
     # ── legacy research CLI (preserved) ─────────────────────────
     research_parser = sub.add_parser("research", help="Run a research query (default)")
     research_parser.add_argument("query_positional", nargs="?", help="Research question")
@@ -793,6 +941,10 @@ def main() -> None:
         raise SystemExit(doctor_command(args.home))
     elif args.command == "import-legacy":
         raise SystemExit(import_legacy_command(args.home, args.source, args.dry_run))
+    elif args.command == "experiment":
+        raise SystemExit(_experiment_command(args))
+    elif args.command == "mentor":
+        raise SystemExit(_mentor_command(args))
     elif args.command == "research" or (not args.command and (args.query or args.query_opt or args.index)):
         actual_query = getattr(args, "query_positional", None) or args.query or args.query_opt
         if args.index:

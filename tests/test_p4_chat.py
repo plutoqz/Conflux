@@ -53,7 +53,8 @@ class TestIntentRouting:
         assert classify_intent("帮我调研一下多智能体评审").action == "research_query"
         assert classify_intent("跑一次论文雷达").action == "run_radar"
         assert classify_intent("项目审计").action == "project_audit"
-        assert classify_intent("本周进展周报").action == "cycle_summary"
+        assert classify_intent("本周进展周报").action == "mentor_report"  # D：导师周报动作
+        assert classify_intent("本周周期总结").action == "cycle_summary"
         assert classify_intent("我有什么偏好记忆").action == "memory_query"
 
     def test_llm_non_whitelist_action_is_clarify(self):

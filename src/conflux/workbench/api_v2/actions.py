@@ -98,7 +98,16 @@ def _default_write_executors() -> None:
 
         return run_project_research_radar(diff)
 
+    def experiment(diff: dict[str, Any]) -> dict[str, Any]:
+        from conflux.workbench.server import register_p3_experiment
+
+        return register_p3_experiment(
+            str(diff.get("project_id") or ""),
+            {key: value for key, value in diff.items() if key != "project_id"},
+        )
+
     _WRITE_EXECUTORS["research.radar"] = radar
+    _WRITE_EXECUTORS["experiment.register"] = experiment
 
 
 def execute_intent(intent: IntentResult, request: Any) -> ChatMessageResponse:
@@ -206,6 +215,56 @@ def execute_intent(intent: IntentResult, request: Any) -> ChatMessageResponse:
             payload={"entries": entries},
         )
 
+    if intent.action == "experiment":
+        if not project_id:
+            return ChatMessageResponse(
+                reply="请先告诉我项目 ID，我再登记实验（假设/参数/指标/提交）。",
+                action="clarify",
+                clarify_question="",
+            )
+        approval = create_approval(
+            "experiment.register",
+            {
+                "project_id": project_id,
+                "name": str((intent.params or {}).get("name") or "").strip() or message[:40],
+                "hypothesis": str((intent.params or {}).get("hypothesis") or ""),
+                "commit_hash": str((intent.params or {}).get("commit") or ""),
+                "metrics": (intent.params or {}).get("metrics") or {},
+                "params": (intent.params or {}).get("params") or {},
+            },
+            risk="low",
+        )
+        return ChatMessageResponse(
+            reply=(
+                f"我将把实验「{approval.diff['name']}」登记到项目 {project_id}"
+                f"（审批号 {approval.approval_id}），确认后写入实验表。"
+            ),
+            action="experiment",
+            requires_approval=True,
+            approval_id=approval.approval_id,
+        )
+
+    if intent.action == "mentor_report":
+        from conflux.workbench.server import build_p3_mentor_report
+
+        if not project_id:
+            return ChatMessageResponse(
+                reply="请告诉我项目 ID，我汇总该项目本周期已登记的进展、实验与风险。",
+                action="clarify",
+            )
+        payload = build_p3_mentor_report(project_id)
+        if payload.get("ok") is False:
+            return ChatMessageResponse(
+                reply=f"周报草稿生成失败：{payload.get('error')}",
+                action="mentor_report",
+                payload=payload,
+            )
+        return ChatMessageResponse(
+            reply=_summarize_mentor(payload),
+            action="mentor_report",
+            payload=payload,
+        )
+
     return ChatMessageResponse(reply="暂不支持该动作。", action="clarify")
 
 
@@ -228,3 +287,21 @@ def _summarize_cycle(payload: dict[str, Any]) -> str:
         f"本周期已确认摘要：真实进展 {cycle.get('real_progress', 0)} 项、"
         f"失败工作项 {cycle.get('failed_experiments', 0)} 项、常驻风险 {cycle.get('risks', 0)} 项。"
     )
+
+
+def _summarize_mentor(payload: dict[str, Any]) -> str:
+    if payload.get("ok") is False:
+        return f"周报草稿读取失败：{payload.get('error')}"
+    period = payload.get("period", "")
+    claims = payload.get("claims") or []
+    experiments = payload.get("experiments") or []
+    risks = payload.get("risks") or []
+    lines = [
+        f"导师周报草稿（{period}）：",
+        f"- 真实进展 {len(claims)} 项",
+        f"- 实验记录 {len(experiments)} 项（done {sum(1 for e in experiments if e.get('status') == 'done')}、"
+        f"failed {sum(1 for e in experiments if e.get('status') == 'failed')}）",
+        f"- 风险 {len(risks)} 项",
+        "数据已整理为确定性块，确认后导出 Markdown（「确认周报」）。",
+    ]
+    return "\n".join(lines)

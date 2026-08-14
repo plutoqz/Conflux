@@ -16,6 +16,8 @@ ChatAction = Literal[
     "project_audit",
     "cycle_summary",
     "memory_query",
+    "experiment",
+    "mentor_report",
     "clarify",
 ]
 

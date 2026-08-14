@@ -18,6 +18,8 @@ ACTION_WHITELIST = (
     "project_audit",
     "cycle_summary",
     "memory_query",
+    "experiment",
+    "mentor_report",
 )
 
 _CLARIFY_HINTS: dict[str, str] = {
@@ -26,12 +28,16 @@ _CLARIFY_HINTS: dict[str, str] = {
     "project_audit": "我可以读取项目的审计与状态快照（只读）。",
     "cycle_summary": "我可以汇总本周期已确认的研究进展与风险。",
     "memory_query": "我可以查询你保存的偏好与术语记忆。",
+    "experiment": "我可以登记实验（假设/参数/指标/提交），写入后进入周期审计与周报。",
+    "mentor_report": "我可以生成导师周报草稿：只整理已登记的进展与实验数据。",
 }
 
 # (action, 关键词组)：组内全命中才算；空组仅按词命中。有序，先到先得。
 _RULES: list[tuple[str, tuple[str, ...]]] = [
     ("run_radar", ("雷达", "论文扫描", "paper radar", "找论文", "新论文")),
-    ("cycle_summary", ("周报", "周期", "总结", "进展汇总")),
+    ("cycle_summary", ("周期", "总结", "进展汇总")),
+    ("experiment", ("实验", "登记实验", "记录实验", "experiment")),
+    ("mentor_report", ("周报", "导师", "mentor", "评审报告", "周报草稿")),
     ("project_audit", ("审计", "项目状态", "体检", "audit")),
     ("memory_query", ("记忆", "偏好", "memory", "记住什么")),
     ("research_query", ("调研", "研究", "检索", "查证", "research", "调查")),
@@ -50,6 +56,8 @@ Actions:
 - project_audit: read a project's audit or status snapshot (read-only)
 - cycle_summary: summarize the confirmed cycle progress and risks
 - memory_query: query saved user preferences and terminology memories
+- experiment: register an experiment (hypothesis/params/metrics/commit) into the experiment ledger
+- mentor_report: draft a mentor weekly report from registered progress and experiments
 - clarify: anything else, or when the message is ambiguous
 
 User message:

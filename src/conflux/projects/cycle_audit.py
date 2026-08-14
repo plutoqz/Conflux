@@ -468,6 +468,54 @@ def _diff_papers(
     return claims, changes
 
 
+def _diff_experiments(
+    experiments: list[dict[str, Any]],
+    baseline: dict[str, Any],
+    current: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """D2 experiment records (migration 0010) entered this period.
+
+    Completed experiments are progress claims (evidence refs ``exp:{id}``);
+    failed experiments become risks/candidates.  ``linked_claims`` reference
+    ledger claim refs the same way work-item evidence refs do, so numbers and
+    hashes stay traceable back to the experiments table.
+    """
+    start = float(baseline.get("created_at") or 0)
+    end = float(current.get("created_at") or 0)
+    period_items = [
+        entry for entry in experiments
+        if (start < float(entry.get("created_at") or 0) <= end)
+        or (float(entry.get("created_at") or 0) <= start
+            and start < float(entry.get("updated_at") or 0) <= end)
+    ]
+    claims: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for entry in period_items:
+        name = str(entry.get("name") or entry.get("id") or "")
+        experiment_id = str(entry.get("id") or "")
+        status = str(entry.get("status") or "draft")
+        refs = [f"exp:{experiment_id}"]
+        refs.extend(str(claim) for claim in (entry.get("linked_claims") or []) if str(claim).startswith("claim:"))
+        commit = str(entry.get("commit_hash") or "")
+        if commit:
+            refs.append(f"git:{commit[:16]}")
+        if status == "done":
+            claims.append({
+                "category": "experiment",
+                "experiment_id": experiment_id,
+                "summary": f"实验完成：{name}",
+                "evidence_refs": refs,
+            })
+        elif status == "failed":
+            failed.append({
+                "experiment_id": experiment_id,
+                "name": name,
+                "summary": f"实验失败：{name}",
+                "evidence_refs": refs,
+            })
+    return claims, failed
+
+
 def _diff_documents(
     baseline: dict[str, Any],
     current: dict[str, Any],
@@ -651,6 +699,8 @@ def build_cycle_audit(
     query_changes: list[dict[str, Any]] = []
     paper_changes: list[dict[str, Any]] = []
     acceptance_updates: list[dict[str, Any]] = []
+    failed_experiments_period: list[dict[str, Any]] = []
+    period_experiments: list[dict[str, Any]] = []
 
     if baseline_status in {"created", "unchanged"}:
         weak_signals.append(
@@ -695,6 +745,30 @@ def build_cycle_audit(
             intelligence, project_id, base_for_diff, current_payload
         )
         claims.extend(paper_claims)
+        # P4.3 D: experiment records (migration 0010) entered this period.
+        try:
+            from conflux.experiments import ExperimentRepository
+
+            period_experiments = ExperimentRepository(intelligence.db).list_period(
+                project_id,
+                start=float(baseline_payload["created_at"] or 0),
+                end=float(latest.created_at),
+            )
+        except Exception:
+            period_experiments = []
+        experiment_claims, experiment_failures = _diff_experiments(
+            period_experiments, base_for_diff, current_payload
+        )
+        claims.extend(experiment_claims)
+        failed_experiments_period = [
+            {
+                "name": entry.get("name"),
+                "experiment_id": entry.get("experiment_id"),
+                "summary": entry.get("summary"),
+                "evidence_refs": entry.get("evidence_refs"),
+            }
+            for entry in experiment_failures
+        ]
         item_claims, acceptance_updates, item_risks, item_weak = _diff_work_items(
             base_for_diff, current_payload
         )
@@ -719,6 +793,7 @@ def build_cycle_audit(
             "summary": f"研究运行失败：{entry.get('run_id')}",
             "evidence_refs": [f"run:{entry.get('run_id')}"],
         })
+    failed_experiments.extend(failed_experiments_period)
     for item in current_payload.get("work_items") or []:
         if str(item.get("observed_status") or "") == "failed":
             failed_experiments.append({
@@ -753,6 +828,16 @@ def build_cycle_audit(
         },
         "period": f"{_utc_date(float(baseline_payload['created_at'] or 0))} 至 {_utc_date(latest.created_at)}",
         "real_progress": claims,
+        "experiments": [
+            {
+                "experiment_id": entry.get("experiment_id"),
+                "name": entry.get("name"),
+                "status": entry.get("status"),
+                "summary": entry.get("summary"),
+                "evidence_refs": entry.get("evidence_refs"),
+            }
+            for entry in period_experiments
+        ],
         "weak_signals": _dedupe(weak_signals),
         "risks": _dedupe(risks),
         "failed_experiments": failed_experiments,
@@ -835,6 +920,7 @@ def build_cycle_markdown(summary: dict[str, Any]) -> str:
         f"- 基线：v{summary.get('baseline', {}).get('revision', 0)}（`{summary.get('baseline_status')}`）",
         f"- 当前：v{summary.get('current', {}).get('revision', 0)}",
         f"- 真实进展：{len(summary.get('real_progress') or [])}",
+        f"- 实验（新增）：{len(summary.get('experiments') or [])}",
         f"- 失败实验：{len(summary.get('failed_experiments') or [])}",
         f"- 风险：{len(summary.get('risks') or [])}",
         "",
@@ -849,6 +935,7 @@ def build_cycle_markdown(summary: dict[str, Any]) -> str:
     if not summary.get("real_progress"):
         lines.append("- 本周期尚无可验证的真实进展。")
     for title, key, empty in (
+        ("实验（新增）", "experiments", "本周期没有新增实验。"),
         ("失败实验", "failed_experiments", "本周期没有失败实验。"),
         ("论文变化", "paper_changes", "本周期没有论文变化。"),
         ("查询变化", "query_changes", "本周期没有研究查询变化。"),
