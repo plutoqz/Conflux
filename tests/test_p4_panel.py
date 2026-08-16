@@ -168,17 +168,33 @@ class TestPanelConfig:
 # ============================================================
 
 class TestPanelModelConstruction:
-    def test_quick_creates_no_panel_models(self):
-        from conflux.model_factory import create_research_models
+    def _fake_construction_models(self, monkeypatch):
+        """构造层测试只验证 roster/token 派生，不构造真实 ChatOpenAI 客户端。
 
-        _, diagnostics = create_research_models("quick")
+        真实客户端在无 API key 的环境（CI、干净 checkout）会在构造期抛
+        OpenAIError；用 max_tokens 占位对象替换 create_chat_model，断言仍然
+        覆盖 create_research_models 的成员数、标签与 max_tokens 减半逻辑。
+        """
+        from conflux import model_factory
+
+        monkeypatch.setattr(
+            model_factory,
+            "create_chat_model",
+            lambda _preset, **kwargs: SimpleNamespace(
+                max_tokens=kwargs.get("max_tokens"),
+            ),
+        )
+        return model_factory
+
+    def test_quick_creates_no_panel_models(self, monkeypatch):
+        model_factory = self._fake_construction_models(monkeypatch)
+        _, diagnostics = model_factory.create_research_models("quick")
         assert diagnostics.get("panel_models") == {}
 
-    def test_deep_member_max_tokens_halved(self):
-        from conflux.model_factory import create_research_models
-
+    def test_deep_member_max_tokens_halved(self, monkeypatch):
+        model_factory = self._fake_construction_models(monkeypatch)
         profile = resolve_research_profile("deep")
-        _, diagnostics = create_research_models("deep")
+        _, diagnostics = model_factory.create_research_models("deep")
         panel = diagnostics.get("panel_models") or {}
         verification = panel.get("verification") or {}
         members = verification.get("members") or []

@@ -1105,6 +1105,7 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
   - 聚焦测试 **107 passed**（37.32s）；全量离线测试 **768 passed / 0 failed / 510 warnings / 407.99s**（较 P1.2 基线 +4）。
   - 测试执行说明（沿用）：经 run_code 的 `node:child_process` 运行 pytest；子进程需显式注入 `USERNAME/TEMP/TMP/HOMEDRIVE/HOMEPATH`；不得用 `--basetemp=.pytest_tmp` 跑全量（两个路径敏感测试会失败）。
   - P1.3 改动已提交并推送 origin/main（见 git log；P1.3 为 C5 提交）。
+  - CI 修复（2026-08-16）：GitHub Actions 自 2026-08-13 起持续红——`tests/test_p4_panel.py::TestPanelModelConstruction` 两个用例直接构造 ChatOpenAI，在无 OPENAI_API_KEY 的环境（CI/干净 checkout）构造期抛 OpenAIError；本地通过是因为仓库根 .env（gitignored）注入密钥掩盖了问题。已改为 create_chat_model 占位对象（断言仍覆盖成员数/标签/max_tokens 减半），CI-like 干净树实测 3 passed；全文件 35 passed。
 - 唯一下一验收点：P1.4 所有终态结构化诊断（`conflux.research_failure.v1` 覆盖 lease 超限/Worker 初始化失败/凭证恢复失败/配置与模型构建失败/用户取消/系统 deadline/Artifact final commit 失败；终态与诊断引用同一事务可见）。
 
 
