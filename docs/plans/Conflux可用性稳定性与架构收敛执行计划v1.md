@@ -1102,7 +1102,8 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
   - P1 阶段退出：`p15_recovery_repeat.json`（20 次进程终止恢复独立复跑）、`p15_daemon_freeze_probe.json`（PID 50348 冻结版本只读探针）、`p15_focused_pytest.{log,xml}` 与 `p15_full_pytest.log`（阶段退出最终一轮，含 §6.10 终态一致性测试）
   - P2.1：`reports/evaluation/convergence/p2/p21_ledger_evidence.json`（逐调用账本设计 + 语义约定）、`p21_full_pytest.log`（全量 784 passed / 0 failed / 550 warnings / 373.79s）
   - P2.2：`p22_reserves_evidence.json`（阶段硬保留机制 + 语义约定 + 待实测项）、`p22_full_pytest.log`（全量 789 passed / 0 failed / 588 warnings / 382.67s）
-  - P2.3：`p23_context_evidence.json`（证据单份嵌入 + 显式上限 + 裁剪审计 + dedup 度量）、`p23_full_pytest.log`（全量 792 passed / **1 failed（test_vector_index_rebuild_preserves_old_collection_until_user_deletes，全量负载下偶发，隔离复跑通过，与 P2.3 改动无关）** / 588 warnings / 395.86s）
+  - P2.3：`p23_context_evidence.json`（证据单份嵌入 + 显式上限 + 裁剪审计 + dedup 度量）、`p23_full_pytest.log`（全量 792 passed / **1 failed（test_vector_index_rebuild_preserves_old_collection_until_user_deletes，全量负载下偶发，隔离复跑通过，与 P2.3 改动无关）** / 588 warnings / 395.86s；复跑 `p23_full_pytest_rerun.log` → **793 passed / 0 failed / 436 warnings / 407.20s**，确认偶发）
+  - P2.4：`p24_panel_evidence.json`（触发谓词 + trace 语义 + A/B 基线约定）、`p24_full_pytest.log`（全量 **794 passed / 0 failed / 510 warnings / 385.64s**）
 - 关键结论：
   - **P1.3 验收通过（2026-08-16）**：提交时生成 `conflux.run_manifest.v1` 运行冻结（code_revision、semantic_hash、model_role、roles 的 provider/model/base_url、embedding 身份、panel 成员身份、prompt_hash、budget、credential_ref 列表、`model_revision_unverified=true`）；manifest 只存凭证**引用**（`workbench_payload:*`/fail_closed、`env:*`、`config:*`），不存任何密钥值（测试断言元数据序列化无密钥）。
   - 重启恢复语义：claim 时先验证凭证引用——临时请求密钥重启后不可解析 → `credential_unavailable_after_restart` 诊断 + 终态 failed（fail-closed，绝不静默回退到共享环境密钥或其他 Provider）；随后比对 semantic_hash，provider/model/Prompt/预算/panel 漂移 → `frozen_config_mismatch` 终态 failed；两者都写入 `conflux.research_failure.v1` 诊断产物与 EventStore `credential_recovery` 事件。旧 run（无 manifest）跳过验证，向后兼容。
@@ -1116,7 +1117,8 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 - **P2.1 验收通过（2026-08-16）**：每次模型调用记录 `conflux.research_failure` 无关的预算调用账本（§7.5 全部字段：run_id/stage/role/provider/model/revision_evidence/prompt_hash/input_tokens/output_tokens/reserved_tokens/context_bytes/evidence_refs_count/latency/finish_reason/estimated_cost）；usage 缺失记录 `unknown` 不用估算冒充；对账快照（reconciliation）解释总预算与各调用之和的差异并写入 `<run_id>.summary.json` 的 `model_trace.token_budget_runtime`；12 个图节点经 contextvar 标注 stage。CI run #31949119159 success。
 - **P2.2 离线验收通过（2026-08-16）**：阶段硬保留机制落地——`stage_reserves_from_ledger` 从逐调用账本计算每阶段 P90 × (1+margin)（样本不足记 `unmeasured_no_reserve`，unknown 如实计数，不写死任意百分比）；`BudgetedChatModel` 按当前 stage 对之后所有交付阶段求和保留（retrieval/analysis/panel/gap 只能使用扣除硬保留后的预算，前置调用突破保底被拒绝并计数）；generate_node 增加 token 预检——预计无法覆盖时先按优先级缩减章节并记录 `token_budget_section_shrink:{n}`；final commit 无模型调用 + 时间保留无回归。config `research.stage_token_reserves` 默认空（旧行为不变），pilot 实测后回填。CI（`9ea74d3`）见 git。
 - **P2.3 离线部分验收通过（2026-08-16）**：证据单份嵌入（citation_map 每 ref 一份 ≤600 字符，下游按 ref 引用；EvidenceLedger 按 content_hash 单份登记——既有基础已验证）；嵌入上限显式化（`_EMBED_CAP_CHARS`）+ 确定性裁剪日志（source_ref/截断量/原因），barrier/correction 两节点随状态传递，run summary 增加 `context_dedup` 度量（嵌入规模/唯一 hash/裁剪量/原因分布/尾 50 条日志，可 replay）。
-- 唯一下一验收点：P2.4 panel 风险触发（quick 恒关；standard 仅高重要性且确定性检查无法裁决的 claim 触发；触发条件/成员失败/分歧/成本进 trace；A/B 同快照同基线）。P2.2 真实 P50/P90 实测与 P2.3 更激进的引用瘦身留待 pilot。
+- **P2.4 离线验收通过（2026-08-16）**：panel 触发谓词落地——仅「确定性不可裁决（uncertain）且 importance ∈ {critical, high}」的 claim 送 panel，其余确定性兜底并逐条记录 trigger_trace（deterministic_adjudicated / low_importance 跳过原因）；全部跳过时零成员调用；quick 恒关（profile 强制）；deep 与 standard 同一谓词不扩大；成员失败/弃权进 `PanelReview.failures` trace；触发/失败/分歧/input_snapshot_id 进 run_summary.panel；成本经 P2.1 账本（role 前缀 panel_）逐条可溯；B4.3 确定性优先保持（panel supports 不能推翻 uncertain）。
+- 唯一下一验收点：P2.5 报告可读性与交付语义（直接回答不重复、single-source/模型分析边界、limited 说明、completed_with_warnings 不冒充完成、FactCheck skipped 必须给原因）。P2.2 真实 P50/P90 实测、P2.3 引用瘦身、P2.4 的 A/B 实测留待 pilot。
 - **付费 live 调用（含 2 案 pilot）前必须冻结 §7.12 清单并取得单独明确授权。**
 
 
@@ -1141,6 +1143,7 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 | P2.1 逐调用账本：contextvar 阶段标注 + 预算包装器记录 §7.5 字段 + reconciliation 对账写入 run summary | usage 缺失记 unknown；revision_evidence 无证据记 unverified；estimated_cost 无价格表记 unknown | 2026-08-16 |
 | P2.2 阶段硬保留：观测 P90+余量驱动（不写死百分比）、按 stage 求和保底、前置突破即拒绝、生成前 token 预检缩减 | 真实 P50/P90 实测待 pilot（付费，需授权）；缺省配置为空 = 旧行为不变 | 2026-08-16 |
 | P2.3 上下文去重（离线部分）：证据按 ref 单份嵌入 + 600 字符显式上限 + 确定性裁剪审计 + context_dedup 度量进 run summary | 压缩只截断不改写；每 claim 选择理由文案化与引用瘦身待 pilot 数据 | 2026-08-16 |
+| P2.4 panel 风险触发：仅「确定性不可裁决 + 高重要性」触发；跳过原因逐条 trace；失败/弃权/分歧/成本可溯；quick 恒关、deep 不扩大 | B4.3 确定性优先保持；A/B 实测留待 pilot（同一冻结快照 + 首成员基线） | 2026-08-16 |
 
 ### 18.4 当前未验证项
 
@@ -1158,6 +1161,42 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 - 不先做单一 ASGI 大迁移。
 
 ## 19. 阶段检查点
+
+### 2026-08-16 23:20 - P2.4 检查点（completed，离线部分）
+
+- 当前目标：P2.4 panel 风险触发——quick 恒关；standard 仅「高重要性 + 确定性检查无法裁决」的 claim 触发；触发条件/成员失败/弃权/分歧/成本进 trace；A/B 同快照同基线。
+- 当前阶段：P2 `in_progress`（P2.1-P2.4 `completed` → 下一工作包 P2.5 报告可读性与交付语义）。
+- 状态：completed（离线部分；panel 触发效果的 A/B 实测待 pilot）
+- 源码版本：`03f62d2`（main；P2.4 改动随本轮提交，见 git log）
+- 允许修改范围：§7.3 列表（graph_v2.py / panel.py / tests/test_p4_panel.py）+ 本文件状态与检查点部分。
+- 本轮非目标：不启动付费模型调用；不改研究 Prompt；不开始 P2.5。
+
+#### 已完成证据
+- 修改文件：`src/conflux/graph_v2.py`（_panel_trigger_partition + _verification_payload 触发过滤 + verification_node sidecar 仅挂触发 claim + run_summary.panel trace 块 + _panel_trace_summary）、`src/conflux/panel.py`（PanelReview.failures 显式记录成员失败/弃权）、`tests/test_p4_panel.py`（3 个旧断言更新为新触发语义 + 新增 test_deterministically_adjudicated_claims_skip_panel）。
+- 测试命令与实际结果：
+  - `python -m pytest -q tests/test_p4_panel.py` → **45 passed**；panel + v3 model_modes → **63 passed**；broader 回归（budget replay/research rounds/workbench jobs/p4 chat）→ **66 passed**。
+  - 全量：`python -m pytest -q` → **794 passed / 0 failed / 510 warnings / 385.64s**（`p24_full_pytest.log`；较 P2.3 基线 +1）。
+- run ID / Artifact / hash：无 live 运行；触发谓词与 trace 由离线单测断言（确定性可裁决跳过 + 低重要性跳过 + 触发后 B4.3 合并语义）。
+- 验证层级：单元 + 集成（真实 verification_node + 真实 run_panel + 真实 BudgetState），离线。
+
+#### 关键结论
+- 触发谓词：deterministic_verdict ∉ {supports, insufficient}（uncertain）且 importance ∈ {critical, high}；每 claim 一条 trigger_trace（含确定性裁决与跳过原因）。
+- 全部跳过时零成员调用；B4.3 保持（panel supports 不能推翻 deterministic uncertain，model_verdict 保留；panel 可降级 contradicts/insufficient）。
+- 成员失败/弃权进 PanelReview.failures；run_summary.panel 携带 triggered/skipped 数、trigger_trace、failures、dissent 数、input_snapshot_id。
+- quick 恒关（profile 层强制）；deep 与 standard 同谓词不扩大。
+
+#### 未完成或阻塞
+- 无阻塞。panel 触发效果的 A/B 实测（同一冻结快照 + 首成员基线）待 pilot；离线已验证谓词与 trace 语义。
+
+#### 决策、推断与待验证假设
+- 事实：B4.3 确定性优先 + P2.4 触发谓词组合后，panel 无法把 uncertain 升为 supports（设计如此：宁可待核验）；panel 的增量价值是降级与分歧信号，A/B 待 pilot 验证。
+- 假设及验证方法：pilot 阶段对比 panel-on/off 的 uncertain 转化率与成本。
+
+#### 唯一下一验收点
+- P2.5 报告可读性与交付语义：避免直接回答与同名章节重复；单一来源/模型分析/推导分析边界明确；limited 说明缺少什么与如何补证；completed_with_warnings 不能 0 章节冒充完成；FactCheck skipped 必须给原因。
+
+#### 不应自动扩展
+- 不启动付费模型调用；不改研究 Prompt；P2.5 完成前不开始 P3。
 
 ### 2026-08-16 22:10 - P2.3 检查点（completed，离线部分）
 

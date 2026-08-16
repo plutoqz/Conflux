@@ -56,6 +56,8 @@ class PanelReview:
     members: list[dict[str, Any]] = field(default_factory=list)
     referee: dict[str, Any] | None = None
     result: dict[str, Any] = field(default_factory=dict)
+    # P2.4：成员失败/弃权显式进 trace（不再静默丢弃）。
+    failures: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _extract_json(content: str) -> dict[str, Any]:
@@ -387,6 +389,12 @@ def _collect_member_outputs(
     executed: list[tuple[str, str, dict[str, Any]]] = []
     for index, ((label, _model), payload) in enumerate(zip(member_models, outputs)):
         if payload is None or not isinstance(payload, dict):
+            # P2.4：失败/弃权进入 trace（空响应/异常/预算耗尽/坏 JSON）。
+            review.failures.append({
+                "label": label,
+                "persona": PANEL_PERSONAS[index % len(PANEL_PERSONAS)],
+                "reason": "member_failed_or_abstained",
+            })
             continue
         executed.append((label, PANEL_PERSONAS[index % len(PANEL_PERSONAS)], payload))
     review.members = [

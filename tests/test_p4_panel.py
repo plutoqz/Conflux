@@ -232,12 +232,16 @@ class TestPanelModelConstruction:
         for depth in ("standard", "deep"):
             models, diagnostics = model_factory.create_research_models(depth)
             result = verification_node(
-                _verification_state(depth=depth),
+                _panel_triggered_state(depth=depth),
                 models["verifier"],
                 panel=diagnostics["panel_models"]["verification"],
             )
             verification = result["_claim_records"][0]["verification_result"]
-            assert verification["verdict"] == "supports"
+            # P2.4 触发后成员全票 supports；B4.3 确定性优先：uncertain 不被
+            # supports 推翻，但 panel sidecar 与成员票完整保留。
+            assert verification["verdict"] == "uncertain"
+            assert verification["verifier_version"] == "rules-v1"
+            assert verification.get("model_verdict") == "supports"
             assert len(verification["panel"]["members"]) == 2
 
 
@@ -395,9 +399,26 @@ def _panel_kwargs(*specs, referee=None) -> dict:
     }
 
 
+def _panel_triggered_state(*, depth: str = "deep") -> dict:
+    """P2.4：高重要性 + 确定性无法裁决（unknown evidence id → uncertain）→ 触发 panel。"""
+    state = _new_state("panel test question", run_id="run-panel", depth=depth)
+    state["_claim_records"] = [{
+        "claim_id": "run-panel:claim:sq-1:01",
+        "subquestion_id": "sq-1",
+        "text": "atomic claim",
+        "claim_type": "direct_fact",
+        "importance": "critical",
+        "evidence_ids": ["missing-ev-id"],
+        "derivation_type": "direct_evidence",
+    }]
+    ledger = EvidenceLedger.from_dict(state["_evidence_ledger"])
+    state["_ledger_snapshot"] = ledger.freeze("final").to_dict()
+    return state
+
+
 class TestVerificationPanelMount:
     def test_deep_panel_path_produces_panel_field(self):
-        state = _verification_state()
+        state = _panel_triggered_state()
         result = verification_node(
             state,
             _PanelModel({"checks": []}),
@@ -407,8 +428,11 @@ class TestVerificationPanelMount:
             ),
         )
         verification = result["_claim_records"][0]["verification_result"]
-        assert verification["verdict"] == "supports"
-        assert verification["verifier_version"] == "model-v1"
+        # P2.4：panel 只对确定性无法裁决的 claim 触发；B4.3 下 supports 不能
+        # 推翻 uncertain，最终仍 rules-v1，但 model_verdict 与票型可追溯。
+        assert verification["verdict"] == "uncertain"
+        assert verification["verifier_version"] == "rules-v1"
+        assert verification.get("model_verdict") == "supports"
         panel = verification["panel"]
         assert len(panel["members"]) == 2
         assert panel["dissent"] == []
@@ -417,13 +441,8 @@ class TestVerificationPanelMount:
         judgment = result["_evidence_ledger"]["judgments"][0]
         assert "panel" in judgment["payload"]
 
-    def test_panel_supports_cannot_override_deterministic_insufficient(self):
-        state = _verification_state()
-        state["_claim_records"][0].update({
-            "claim_type": "direct_fact",
-            "importance": "critical",
-            "derivation_type": "direct_evidence",
-        })
+    def test_panel_supports_cannot_override_deterministic_uncertain(self):
+        state = _panel_triggered_state()
         result = verification_node(
             state,
             _PanelModel({"checks": []}),
@@ -433,10 +452,45 @@ class TestVerificationPanelMount:
             ),
         )
         verification = result["_claim_records"][0]["verification_result"]
-        # 确定性裁决优先：panel 全票 supports 也不能推翻 insufficient
-        assert verification["verdict"] == "insufficient"
+        # 确定性裁决优先：panel 全票 supports 也不能推翻 uncertain
+        assert verification["verdict"] == "uncertain"
         assert verification["verifier_version"] == "rules-v1"
         assert verification.get("model_verdict") == "supports"
+
+    def test_deterministically_adjudicated_claims_skip_panel(self):
+        """P2.4：确定性可裁决或低重要性的 claim 不触发 panel，零成员调用。"""
+        state = _verification_state()  # model_analysis → deterministic supports
+        result = verification_node(
+            state,
+            _PanelModel({"checks": []}),
+            panel=_panel_kwargs(
+                ("a", _PanelModel(_check("supports", 1.0))),
+                ("b", _PanelModel(_check("supports", 1.0))),
+            ),
+        )
+        verification = result["_claim_records"][0]["verification_result"]
+        assert verification["verdict"] == "supports"
+        assert verification["verifier_version"] == "rules-v1"
+        assert "panel" not in verification
+        trace = result["_model_verification"]["panel"]["trigger_trace"]
+        assert trace[0]["panel_triggered"] is False
+        assert trace[0]["reason"] == "panel_skipped:deterministic_adjudicated"
+        assert result["_model_verification"]["panel"]["members"] == []
+
+        # 低重要性 + 确定性无法裁决 → 同样跳过（low_importance）
+        low_state = _panel_triggered_state()
+        low_state["_claim_records"][0]["importance"] = "medium"
+        low_result = verification_node(
+            low_state,
+            _PanelModel({"checks": []}),
+            panel=_panel_kwargs(
+                ("a", _PanelModel(_check("supports", 1.0))),
+                ("b", _PanelModel(_check("supports", 1.0))),
+            ),
+        )
+        low_trace = low_result["_model_verification"]["panel"]["trigger_trace"]
+        assert low_trace[0]["panel_triggered"] is False
+        assert low_trace[0]["reason"] == "panel_skipped:low_importance"
 
     def test_quick_single_verifier_path_unchanged(self):
         state = _verification_state()

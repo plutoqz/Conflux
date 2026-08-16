@@ -1016,6 +1016,54 @@ def _deterministic_claim_verification(
     }
 
 
+def _panel_trigger_partition(
+    claims: list[dict[str, Any]],
+    claim_records: list[ClaimRecord],
+    snapshot: LedgerSnapshot,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """P2.4 panel 风险触发：只对「高重要性 + 确定性检查无法裁决」的 claim 触发。
+
+    - 确定性可裁决（supports/insufficient）→ 跳过 panel，理由 deterministic_adjudicated；
+    - 低/中重要性 → 跳过，理由 low_importance；
+    - 其余（high/critical 且 uncertain）→ 触发。
+    返回 (panel_claims, skipped_claims, trigger_trace)；trace 每 claim 一条，含原因。
+    """
+    by_id = {record.claim_id: record for record in claim_records}
+    panel_claims: list[dict[str, Any]] = []
+    skipped_claims: list[dict[str, Any]] = []
+    trigger_trace: list[dict[str, Any]] = []
+    for claim in claims:
+        claim_id = str(claim.get("claim_id") or "")
+        record = by_id.get(claim_id)
+        if record is not None:
+            deterministic = _deterministic_claim_verification(record, snapshot)
+        else:
+            deterministic = {"verdict": "uncertain", "reason": "no claim record"}
+        deterministic_verdict = str(deterministic.get("verdict") or "uncertain")
+        importance = str(claim.get("importance") or "medium").casefold()
+        inconclusive = deterministic_verdict not in {"supports", "insufficient"}
+        triggered = inconclusive and importance in {"critical", "high"}
+        reason = (
+            "high_importance_and_deterministically_inconclusive"
+            if triggered
+            else (
+                "panel_skipped:deterministic_adjudicated"
+                if not inconclusive
+                else "panel_skipped:low_importance"
+            )
+        )
+        trigger_trace.append({
+            "claim_id": claim_id,
+            "importance": importance,
+            "deterministic_verdict": deterministic_verdict,
+            "deterministic_reason": str(deterministic.get("reason") or ""),
+            "panel_triggered": triggered,
+            "reason": reason,
+        })
+        (panel_claims if triggered else skipped_claims).append(claim)
+    return panel_claims, skipped_claims, trigger_trace
+
+
 def _verification_payload(
     state: dict[str, Any],
     model: Any,
@@ -1050,13 +1098,40 @@ def _verification_payload(
 
     # P4-B 评审团路径：panel 成员并行单轮评审 + 确定性分歧规则 + 裁判叙事。
     # quick 档不传 panel → 走原单 verifier 路径（零回归）。
+    # P2.4：standard/deep 只对「高重要性 + 确定性无法裁决」的 claim 触发，
+    # 其余 claim 确定性兜底并记录跳过原因（不默认扩大调用）。
     if panel:
         from .panel import run_panel
 
+        snapshot = LedgerSnapshot.from_dict(state.get("_ledger_snapshot") or {})
+        panel_records = [
+            ClaimRecord.from_dict(item)
+            for item in state.get("_claim_records") or []
+            if isinstance(item, dict)
+        ]
+        panel_claims, _skipped, trigger_trace = _panel_trigger_partition(
+            claims, panel_records, snapshot
+        )
+        panel_meta: dict[str, Any] = {
+            "members": [],
+            "referee": None,
+            "failures": [],
+            "trigger_trace": trigger_trace,
+            "skipped_claims": [
+                {"claim_id": entry["claim_id"], "reason": entry["reason"]}
+                for entry in trigger_trace
+                if not entry["panel_triggered"]
+            ],
+        }
+        if not panel_claims:
+            # 全部确定性可裁决或低重要性：不调用任何成员（成本为 0），
+            # 校验在 verification_node 按确定性结果兜底。
+            payload = {"panel": panel_meta}
+            return payload
         review = run_panel(
             [(str(label), member) for label, member in (panel.get("members") or [])],
             input_snapshot={
-                "claims": claims,
+                "claims": panel_claims,
                 "ledger_snapshot": state.get("_ledger_snapshot") or {},
             },
             referee=panel.get("referee"),
@@ -1067,6 +1142,9 @@ def _verification_payload(
             payload["panel"] = {
                 "members": review.members,
                 "referee": review.referee,
+                "failures": review.failures,
+                "trigger_trace": trigger_trace,
+                "skipped_claims": panel_meta["skipped_claims"],
             }
         return payload
 
@@ -1151,7 +1229,7 @@ def verification_node(
         else:
             result = {**deterministic, "evidence_ids": list(record.evidence_ids)}
 
-        if panel_meta or item.get("panel_votes"):
+        if item.get("panel_votes"):
             claim_dissent = [
                 entry for entry in dissent
                 if any(
@@ -3850,6 +3928,7 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
         "prompt_version": "research-prompts-v3",
         "model_config_version": "research-model-profile-v1",
         "context_dedup": _context_dedup_metrics(state),
+        "panel": _panel_trace_summary(state),
     }
 
     return {
@@ -3861,6 +3940,28 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
         "_report_markdown": report_with_fc,
         "_run_summary": run_summary,
         "final_answer": report_with_fc[:8000],
+    }
+
+
+def _panel_trace_summary(state: dict[str, Any]) -> dict[str, Any]:
+    """P2.4：panel 触发条件、成员失败、分歧进入 run summary trace（成本经
+    model_trace.token_budget_runtime.calls 按 role 前缀 panel_ 聚合）。"""
+    verification = state.get("_model_verification") or {}
+    panel_meta = verification.get("panel") or {}
+    trigger_trace = panel_meta.get("trigger_trace") or []
+    dissent = verification.get("dissent") or []
+    return {
+        "triggered_count": sum(1 for entry in trigger_trace if entry.get("panel_triggered")),
+        "skipped_count": len(trigger_trace) - sum(
+            1 for entry in trigger_trace if entry.get("panel_triggered")
+        ),
+        "trigger_trace": trigger_trace,
+        "member_failures": panel_meta.get("failures") or [],
+        "member_count": len(panel_meta.get("members") or []),
+        "dissent_count": len(dissent),
+        "input_snapshot_id": str(
+            (state.get("_ledger_snapshot") or {}).get("snapshot_id") or ""
+        ),
     }
 
 
