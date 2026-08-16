@@ -1092,14 +1092,15 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 
 ### 18.2 当前阶段
 
-- 阶段：P1 任务运行正确性与故障恢复 → `completed`（P1.1 claim/lease、P1.2 幂等与背压、P1.3 凭证冻结、P1.4 结构化诊断全部 `completed`，§6.10 六条验收标准全部满足，阶段退出）。
-- 状态：`completed`（下一阶段 P2 standard 预算 `pending`，付费 live 运行需用户明确授权）
+- 阶段：P2 standard 预算、上下文与研究质量闭环（P2.1 逐阶段预算可观测性 → `completed`（离线验收通过）；P1 已整体退出）。
+- 状态：`in_progress`（付费 live 运行需用户明确授权；正式 12 案 live 前必须冻结 §7.12 清单）
 - 证据：
   - `reports/evaluation/convergence/p1/p11_claim_lease_probe.json`（P1.1：25 次探针 + 20 次复跑）
   - `reports/evaluation/convergence/p1/p12_focused_pytest.{log,xml}`（P1.2 聚焦 103 passed）、`p12_recovery_repeat.json`（20/20）、`p12_full_pytest.{log,xml}`（全量 764 passed）
   - `reports/evaluation/convergence/p1/p13_focused_pytest.{log,xml}`（P1.3 聚焦 107 passed）、`p13_full_pytest.{log,xml}`（全量 768 passed）
   - `reports/evaluation/convergence/p1/p14_focused_pytest.{log,xml}`（P1.4 聚焦 116 passed）、`p14_full_pytest.log`（全量 777 passed / 0 failed / 588 warnings / 409.02s）、`p14_eval_recovery.log` + `eval_recovery/job_recovery.json`（200 jobs：recovery/lease_reclaim/final_state_consistency/idempotency_dedup 均 1.0，duplicate_execution/event_loss/reconnect_loss 均 0）、`p14_fault_matrix.json`（§6.8 矩阵 8 行 → 测试逐行映射）
   - P1 阶段退出：`p15_recovery_repeat.json`（20 次进程终止恢复独立复跑）、`p15_daemon_freeze_probe.json`（PID 50348 冻结版本只读探针）、`p15_focused_pytest.{log,xml}` 与 `p15_full_pytest.log`（阶段退出最终一轮，含 §6.10 终态一致性测试）
+  - P2.1：`reports/evaluation/convergence/p2/p21_ledger_evidence.json`（逐调用账本设计 + 语义约定）、`p21_full_pytest.log`（全量 784 passed / 0 failed / 550 warnings / 373.79s）
 - 关键结论：
   - **P1.3 验收通过（2026-08-16）**：提交时生成 `conflux.run_manifest.v1` 运行冻结（code_revision、semantic_hash、model_role、roles 的 provider/model/base_url、embedding 身份、panel 成员身份、prompt_hash、budget、credential_ref 列表、`model_revision_unverified=true`）；manifest 只存凭证**引用**（`workbench_payload:*`/fail_closed、`env:*`、`config:*`），不存任何密钥值（测试断言元数据序列化无密钥）。
   - 重启恢复语义：claim 时先验证凭证引用——临时请求密钥重启后不可解析 → `credential_unavailable_after_restart` 诊断 + 终态 failed（fail-closed，绝不静默回退到共享环境密钥或其他 Provider）；随后比对 semantic_hash，provider/model/Prompt/预算/panel 漂移 → `frozen_config_mismatch` 终态 failed；两者都写入 `conflux.research_failure.v1` 诊断产物与 EventStore `credential_recovery` 事件。旧 run（无 manifest）跳过验证，向后兼容。
@@ -1110,7 +1111,9 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
   - CI 修复（2026-08-16）：GitHub Actions 自 2026-08-13 起持续红——`tests/test_p4_panel.py::TestPanelModelConstruction` 两个用例直接构造 ChatOpenAI，在无 OPENAI_API_KEY 的环境（CI/干净 checkout）构造期抛 OpenAIError；本地通过是因为仓库根 .env（gitignored）注入密钥掩盖了问题。已改为 create_chat_model 占位对象（断言仍覆盖成员数/标签/max_tokens 减半），CI-like 干净树实测 3 passed；全文件 35 passed。
 - **P1.4 验收通过（2026-08-16）**：`conflux.research_failure.v1` 扩展 9 个失败分类码（lease_overrun / worker_init_failure / credential_recovery_failure / config_build_failure / model_build_failure / user_cancelled / system_deadline / final_commit_failure / execution_failure），诊断含 run ID、请求摘要、源码版本（code_revision）、失败阶段、已完成进度、输入配置哈希（semantic_hash）、重试安全性、保留产物、恢复动作、原始错误类型。终态与诊断引用同一事务：`SQLiteDatabase.transaction()`（显式所有权，兼容 sqlite3 legacy 隐式事务）+ queue 终态转移/RunStore 终态行/终态事件一次提交；写入失败整体回滚（注入测试证实）。期间发现并修复一个真实读竞态：expire_exhausted 先单独提交 queue=failed、RunStore 更新在第二个事务，两提交之间 get() 可见「queue=failed + run=pending（无诊断引用）」，改为同一事务后消失。final_commit 写入失败绝不发布无 Artifact 的 completed（无交付产物时 delivery_status=diagnostic_only 保证 has_report 一致）。
 - **P1 阶段退出（2026-08-16）**：§6.8 矩阵 8 行覆盖、§6.9 最小验证集（三文件聚焦 + eval_job_recovery + 全量）、§6.10 六条验收全部满足——20 次进程终止恢复 20/20、无重复执行、全部终态具备报告或结构化诊断、list/详情/RunStore/JobQueue/事件五视图一致（新增一致性测试）、全量离线通过。PID 50348 冻结版本验证完成（冻结于 `38eee94`，健康；P1 修复需重启后生效）。
-- 唯一下一验收点：P2.1 standard 预算与上下文收敛——**付费 live 运行需用户明确授权后启动**。
+- **P2.1 验收通过（2026-08-16）**：每次模型调用记录 `conflux.research_failure` 无关的预算调用账本（§7.5 全部字段：run_id/stage/role/provider/model/revision_evidence/prompt_hash/input_tokens/output_tokens/reserved_tokens/context_bytes/evidence_refs_count/latency/finish_reason/estimated_cost）；usage 缺失记录 `unknown` 不用估算冒充；对账快照（reconciliation）解释总预算与各调用之和的差异并写入 `<run_id>.summary.json` 的 `model_trace.token_budget_runtime`；12 个图节点经 contextvar 标注 stage。
+- 唯一下一验收点：P2.2 交付预算硬保留（用离线回放 + 最小 live pilot 测各阶段 token P50/P90，保留值取 P90 + 余量；synthesis/FactCheck/final commit 硬保留）。
+- **付费 live 调用（含 2 案 pilot）前必须冻结 §7.12 清单并取得单独明确授权。**
 
 
 ### 18.3 当前决策
@@ -1129,8 +1132,9 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 | P1.3 运行冻结 manifest（引用式凭证 + 重启 fail-closed + 配置漂移检测） | 满足 §6.6：重启后要么同一冻结配置恢复，要么明确失败；provider/model/Prompt 不得漂移 | 2026-08-16 |
 | P1.4 终态诊断统一为 `conflux.research_failure.v1` + 9 个失败分类码，诊断契约字段齐全（run ID/请求摘要/源码版本/失败阶段/进度/输入配置哈希/重试安全/保留产物/恢复动作/原始错误类型） | 满足 §6.7 诊断字段要求 | 2026-08-16 |
 | 终态与诊断引用同一事务（SQLiteDatabase.transaction() 显式所有权 + queue/RunStore/事件一次提交，失败整体回滚） | 满足 §6.7「同一事务可见」；实测修复 lease 超限时 queue=failed/run=pending 读竞态 | 2026-08-16 |
-| P1 阶段退出：§6.10 全部满足，进入 P2 pending | 故障矩阵/20 次恢复/无重复执行/终态三选一/五视图一致/全量离线全部通过；PID 50348 冻结版本验证完成 | 2026-08-16 |
+| P1 阶段退出：§6.10 全部满足，进入 P2 | 故障矩阵/20 次恢复/无重复执行/终态三选一/五视图一致/全量离线全部通过；PID 50348 冻结版本验证完成 | 2026-08-16 |
 | P2 需用户明确授权后启动付费 live 运行 | §7.2 前置条件 + 计划 §1.3 非目标「未冻结时不启动付费正式实验」 | 2026-08-16 |
+| P2.1 逐调用账本：contextvar 阶段标注 + 预算包装器记录 §7.5 字段 + reconciliation 对账写入 run summary | usage 缺失记 unknown；revision_evidence 无证据记 unverified；estimated_cost 无价格表记 unknown | 2026-08-16 |
 
 ### 18.4 当前未验证项
 
@@ -1148,6 +1152,44 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 - 不先做单一 ASGI 大迁移。
 
 ## 19. 阶段检查点
+
+### 2026-08-16 19:40 - P2.1 检查点（completed）
+
+- 当前目标：P2.1 逐阶段预算可观测性——每次模型调用记录 §7.5 字段；usage 缺失记 unknown；汇总解释总预算与各调用之和的差异。
+- 当前阶段：P2 `in_progress`（P2.1 `completed` → 下一工作包 P2.2 交付预算硬保留）；P1 已整体退出。
+- 状态：completed
+- 源码版本：`186dde5`（main；P2.1 改动随本轮提交，见 git log）
+- 允许修改范围：§7.3 列表（model_factory.py / graph_v2.py / __main__.py 的 model_trace 汇总 / tests/test_v3_model_modes.py）+ 本文件状态与检查点部分。本轮未改 research_modes/research_protocol/panel/quality/report（留给 P2.2-P2.5）。
+- 本轮非目标：不启动任何付费模型调用；不开始 P2.2；不改研究 Prompt。
+
+#### 已完成证据
+- 修改文件：`src/conflux/model_factory.py`（CURRENT_CALL_STAGE contextvar + research_call_stage/research_prompt_hash/model_identity；ResearchTokenBudget.telemetry.calls 逐调用账本 + reconciliation() + finalize_token_budget_runtime()；BudgetedChatModel 记录 §7.5 字段；create_research_models 传入 preset/run_id）、`src/conflux/graph_v2.py`（_scoped_node 标注 12 个图节点）、`src/conflux/__main__.py`（model_trace（roles + token_budget_runtime 含 calls/reconciliation）写入 summary.json；replay 置空）、`tests/test_v3_model_modes.py`（6 个新单测）。
+- 测试命令与实际结果：
+  - `python -m pytest -q tests/test_v3_model_modes.py` → **18 passed**（含 6 个新 P2.1 测试）。
+  - 相关回归：`test_v3_budget_replay.py + test_v3_research_rounds.py + test_m3_workbench_query_jobs.py` → 43 passed；P1 三件套 + test_p4_panel → 152 passed。
+  - 全量：`python -m pytest -q` → **784 passed / 0 failed / 550 warnings / 373.79s**（`p21_full_pytest.log`；较 P1 基线 +6）。
+- run ID / Artifact / hash：无 live 运行；账本字段与对账语义由 6 个离线单测断言（fake usage 响应），冒烟示例见 `p21_ledger_evidence.json`。
+- 验证层级：单元 + 集成（真实 graph 节点 stage 标注 + 真实包装器调用链），离线。
+
+#### 关键结论
+- 账本字段齐全：run_id/stage/role/preset/provider/model/revision_evidence/prompt_hash/input_tokens/output_tokens/reserved_tokens/context_bytes/evidence_refs_count/latency_ms/finish_reason/estimated_cost + status/charged_tokens/estimated_input_tokens。
+- 诚实语义：Provider usage 缺失 → input/output/total 记 `unknown`（estimated_input_tokens 独立标注为估算）；revision_evidence 无证据记 `unverified`；estimated_cost 无价格表记 `unknown`。
+- 对账：reconciliation 给出 budget_accounting/sum_call_* 与 difference_explanation（unknown 调用数、preserve 截断、记账差异逐一解释），写入 `<run_id>.summary.json`。
+- 阶段归属：12 个图节点经 contextvar 标注（decompose/retrieve/barrier/arbitration/correction/generate/verification/attribution_audit/synthesize/audit/finalize/factcheck）；panel 成员/裁判继承所在判断点阶段。
+
+#### 未完成或阻塞
+- 无阻塞。P2.1 的逐阶段 token P50/P90 实测需要 P2.2 的离线回放与最小 live pilot（付费，需授权）。
+
+#### 决策、推断与待验证假设
+- 事实：rag/web 子代理复用 run 级 BudgetedChatModel（reranker），阶段经节点 contextvar 传递，无需改造 agent 内部。
+- 推断：evidence_refs_count 用 prompt 内 [RAG:/[WEB: 标记计数（输入侧事实）；真正的按引用去重计数属 P2.3。
+- 假设及验证方法：无新增待验证假设。
+
+#### 唯一下一验收点
+- P2.2 交付预算硬保留：离线回放 + 最小 live pilot（需授权）测各阶段 token P50/P90，synthesis/FactCheck/final commit 保留值取 P90 + 余量；retrieval/analysis/panel/gap 只用扣除硬保留后的预算；预计无法覆盖时先缩减计划而非生成阶段失败。
+
+#### 不应自动扩展
+- 不启动付费模型调用；不开始 P2.3-P2.5；不改研究 Prompt/检索/报告格式。
 
 ### 2026-08-16 18:40 - P1 阶段退出检查点（completed）
 

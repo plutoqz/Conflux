@@ -520,6 +520,18 @@ _STAGE_LABELS = {
 }
 
 
+def _scoped_node(stage: str, fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """把图节点内的模型调用标注为指定阶段（P2.1 逐阶段预算可观测性）。"""
+
+    from .model_factory import research_call_stage
+
+    def run(state: dict[str, Any]) -> dict[str, Any]:
+        with research_call_stage(stage):
+            return fn(state, *args, **kwargs)
+
+    return run
+
+
 def _token_budget_remaining(model: Any) -> tuple[int, int] | None:
     """Best-effort read of the run token budget (used, limit)."""
     try:
@@ -3885,11 +3897,13 @@ def create_v2_research_graph(
         if retriever else web_agent
     )
 
-    graph.add_node("decompose", lambda s: decompose_node(s, planner_model, profile))
+    # P2.1：节点级 stage 标注，模型调用经 research_call_stage 进入逐调用账本。
+    graph.add_node("decompose", _scoped_node("decompose", decompose_node, planner_model, profile))
     graph.add_node(
         "retrieve",
-        lambda s: retrieve_node(
-            s,
+        _scoped_node(
+            "retrieve",
+            retrieve_node,
             rag_tool,
             web_tool,
             rag_available,
@@ -3897,16 +3911,19 @@ def create_v2_research_graph(
             round0_independent_model,
         ),
     )
-    graph.add_node("barrier", barrier_node)
+    graph.add_node("barrier", _scoped_node("barrier", barrier_node))
     graph.add_node(
         "arbitration",
-        lambda s: arbitration_node(s, arbitration_model, panel=arbitration_panel),
+        _scoped_node("arbitration", arbitration_node, arbitration_model, panel=arbitration_panel),
     )
-    graph.add_node("correction", lambda s: correction_node(s, rag_tool, web_tool))
+    graph.add_node(
+        "correction", _scoped_node("correction", correction_node, rag_tool, web_tool)
+    )
     graph.add_node(
         "generate",
-        lambda s: generate_node(
-            s,
+        _scoped_node(
+            "generate",
+            generate_node,
             synthesizer_model,
             profile,
             max_parallel_subquestions=replay_parallelism,
@@ -3914,13 +3931,17 @@ def create_v2_research_graph(
     )
     graph.add_node(
         "verification",
-        lambda s: verification_node(s, verifier_model, panel=verification_panel),
+        _scoped_node("verification", verification_node, verifier_model, panel=verification_panel),
     )
-    graph.add_node("attribution_audit", attribution_audit_node)
-    graph.add_node("synthesize", lambda s: synthesize_node(s, synthesizer_model))
-    graph.add_node("audit", lambda s: audit_node(s, synthesizer_model))
-    graph.add_node("finalize", finalize_node)
-    graph.add_node("factcheck", lambda s: factcheck_v2_node(s, synthesizer_model))
+    graph.add_node("attribution_audit", _scoped_node("attribution_audit", attribution_audit_node))
+    graph.add_node(
+        "synthesize", _scoped_node("synthesize", synthesize_node, synthesizer_model)
+    )
+    graph.add_node("audit", _scoped_node("audit", audit_node, synthesizer_model))
+    graph.add_node("finalize", _scoped_node("finalize", finalize_node))
+    graph.add_node(
+        "factcheck", _scoped_node("factcheck", factcheck_v2_node, synthesizer_model)
+    )
 
     graph.set_entry_point("decompose")
     graph.add_edge("decompose", "retrieve")

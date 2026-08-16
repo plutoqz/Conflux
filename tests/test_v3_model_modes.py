@@ -363,3 +363,191 @@ def test_analysis_only_claims_are_limited_instead_of_diagnostic():
     assert assessment["status"] == "limited"
     assert assessment["hard_failures"] == []
     assert assessment["limitations"] == ["analysis_only_claims"]
+
+# --- P2.1：逐阶段预算可观测性（每次调用记录 §7.5 字段 + 对账） ---
+
+
+def _budget_fake_model(*, usage=None, finish_reason="stop", raise_exc=None):
+    from types import SimpleNamespace
+
+    class FakeModel:
+        def invoke(self, messages):
+            if raise_exc is not None:
+                raise raise_exc
+            response_metadata = {"finish_reason": finish_reason}
+            return SimpleNamespace(
+                usage_metadata=usage or {}, response_metadata=response_metadata, content="ok"
+            )
+
+    return FakeModel()
+
+
+def test_budget_records_per_call_ledger_fields():
+    from conflux.model_factory import (
+        BudgetedChatModel,
+        ResearchTokenBudget,
+        research_call_stage,
+    )
+
+    budget = ResearchTokenBudget(75_000)
+    model = BudgetedChatModel(
+        _budget_fake_model(
+            usage={"input_tokens": 120, "output_tokens": 45, "total_tokens": 165}
+        ),
+        budget,
+        output_reserve=4096,
+        role="planner",
+        downstream_reserve=2000,
+        preset="standard",
+    )
+    from types import SimpleNamespace
+
+    with research_call_stage("decompose"):
+        model.invoke([SimpleNamespace(content="plan [RAG:src-1] [WEB:src-2]")])
+
+    call = budget.telemetry["calls"][0]
+    for field in (
+        "stage", "role", "provider", "model", "revision_evidence", "prompt_hash",
+        "input_tokens", "output_tokens", "reserved_tokens", "context_bytes",
+        "evidence_refs_count", "latency_ms", "finish_reason", "estimated_cost",
+    ):
+        assert field in call, f"缺字段 {field}"
+    assert call["stage"] == "decompose"
+    assert call["role"] == "planner"
+    assert call["revision_evidence"] == "unverified"
+    assert call["prompt_hash"]
+    assert call["input_tokens"] == 120
+    assert call["output_tokens"] == 45
+    assert call["total_tokens"] == 165
+    assert call["reserved_tokens"] == 4096 + call["estimated_input_tokens"] + 2000
+    assert call["context_bytes"] > 0
+    assert call["evidence_refs_count"] == 2
+    assert call["finish_reason"] == "stop"
+    assert call["estimated_cost"] == "unknown"
+    assert call["status"] == "ok"
+
+
+def test_missing_provider_usage_records_unknown_not_estimates():
+    from conflux.model_factory import BudgetedChatModel, ResearchTokenBudget
+
+    budget = ResearchTokenBudget(75_000)
+    model = BudgetedChatModel(
+        _budget_fake_model(usage=None),
+        budget,
+        output_reserve=100,
+        role="analyst",
+        preset="standard",
+    )
+    from types import SimpleNamespace
+
+    model.invoke([SimpleNamespace(content="some input text")])
+
+    call = budget.telemetry["calls"][0]
+    assert call["input_tokens"] == "unknown"
+    assert call["output_tokens"] == "unknown"
+    assert call["total_tokens"] == "unknown"
+    assert isinstance(call["estimated_input_tokens"], int) and call["estimated_input_tokens"] > 0
+    assert budget.reconciliation()["unknown_usage_calls"] == 1
+    assert "unknown" in budget.reconciliation()["difference_explanation"]
+
+
+def test_failed_call_records_failure_ledger_entry():
+    from conflux.model_factory import BudgetedChatModel, ResearchTokenBudget
+
+    budget = ResearchTokenBudget(75_000)
+    model = BudgetedChatModel(
+        _budget_fake_model(raise_exc=RuntimeError("provider down")),
+        budget,
+        output_reserve=100,
+        role="verifier",
+        preset="standard",
+    )
+    from types import SimpleNamespace
+
+    try:
+        model.invoke([SimpleNamespace(content="check")])
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("invoke 应抛错")
+
+    call = budget.telemetry["calls"][0]
+    assert call["status"] == "failed"
+    assert call["role"] == "verifier"
+    assert call["input_tokens"] == "unknown"
+    assert call["charged_tokens"] == 0
+    assert budget.telemetry["failed_calls"] == 1
+
+
+def test_reconciliation_explains_charge_differences():
+    from conflux.model_factory import BudgetedChatModel, ResearchTokenBudget
+    from types import SimpleNamespace
+
+    budget = ResearchTokenBudget(500)
+    model = BudgetedChatModel(
+        _budget_fake_model(usage={"input_tokens": 200, "output_tokens": 200, "total_tokens": 400}),
+        budget,
+        output_reserve=150,
+        role="synthesizer",
+        downstream_reserve=250,
+        preset="standard",
+    )
+    model.invoke([SimpleNamespace(content="synthesize")])
+
+    recon = budget.reconciliation()
+    assert budget.telemetry["preserve_clamps"] >= 1
+    assert budget.telemetry["charged_tokens"] == 250  # 被下游 preserve 截断
+    assert recon["sum_call_charged_tokens"] == recon["budget_accounting"]["charged_tokens"]
+    assert "截断" in recon["difference_explanation"] or "preserve_clamps" in recon[
+        "difference_explanation"
+    ]
+    assert recon["unallocated_tokens"] >= 0
+
+
+def test_finalize_token_budget_runtime_adds_reconciliation():
+    from conflux.model_factory import (
+        BudgetedChatModel,
+        ResearchTokenBudget,
+        finalize_token_budget_runtime,
+    )
+    from types import SimpleNamespace
+
+    budget = ResearchTokenBudget(75_000)
+    model = BudgetedChatModel(
+        _budget_fake_model(usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}),
+        budget,
+        output_reserve=100,
+        role="planner",
+        preset="standard",
+    )
+    model.invoke([SimpleNamespace(content="hello")])
+
+    telemetry = finalize_token_budget_runtime(dict(budget.telemetry))
+    assert "reconciliation" in telemetry
+    assert telemetry["reconciliation"]["sum_call_total_tokens"] == 15
+    assert len(telemetry["calls"]) == 1
+
+
+def test_scoped_node_records_stage_for_nested_model_calls():
+    from conflux.graph_v2 import _scoped_node
+    from conflux.model_factory import BudgetedChatModel, ResearchTokenBudget
+    from types import SimpleNamespace
+
+    budget = ResearchTokenBudget(75_000)
+    model = BudgetedChatModel(
+        _budget_fake_model(usage={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}),
+        budget,
+        output_reserve=10,
+        role="synthesizer",
+        preset="standard",
+    )
+
+    def generate(state, wrapped):
+        wrapped.invoke([SimpleNamespace(content="draft section")])
+        return {"_pipeline_stage": "generated"}
+
+    scoped = _scoped_node("generate", generate, model)
+    scoped({"query": "q"})
+
+    assert budget.telemetry["calls"][0]["stage"] == "generate"
+

@@ -6,18 +6,74 @@
 支持通过 config 自定义 base_url、api_key，也支持环境变量注入。
 """
 
+import hashlib
 import os
 import queue
+import re
 import threading
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from math import ceil
-from typing import Any
+from pathlib import Path
+from typing import Any, Iterator
 
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 
 from . import config
+
+# ---------------------------------------------------------------------------
+# P2.1 逐阶段预算可观测性：每次模型调用记录 run 级调用账本
+# （run_id/stage/role/provider/model/revision_evidence/prompt_hash/input/output
+# tokens/reserved_tokens/context_bytes/evidence_refs_count/latency/finish_reason/
+# estimated_cost）。Provider usage 缺失时记录 "unknown"，不用估算值冒充。
+# ---------------------------------------------------------------------------
+
+CURRENT_CALL_STAGE: ContextVar[str] = ContextVar(
+    "conflux_research_call_stage", default="unknown"
+)
+
+
+@contextmanager
+def research_call_stage(stage: str) -> Iterator[None]:
+    """把当前 research 阶段写入 contextvar，供预算包装器标注每次调用。"""
+    token = CURRENT_CALL_STAGE.set(str(stage or "unknown"))
+    try:
+        yield
+    finally:
+        CURRENT_CALL_STAGE.reset(token)
+
+
+_PROMPT_SOURCE_HASH: str | None = None
+
+
+def research_prompt_hash() -> str:
+    """research_prompts.py 源文件哈希（每次运行懒计算一次）。"""
+    global _PROMPT_SOURCE_HASH
+    if _PROMPT_SOURCE_HASH is None:
+        prompt_file = Path(__file__).resolve().parent / "research_prompts.py"
+        try:
+            text = prompt_file.read_text(encoding="utf-8")
+        except OSError:
+            _PROMPT_SOURCE_HASH = "unavailable"
+        else:
+            _PROMPT_SOURCE_HASH = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return _PROMPT_SOURCE_HASH
+
+
+def model_identity(preset: str) -> dict[str, str]:
+    """模型的 provider/model 身份与 revision 证据（无证据时如实记录 unverified）。"""
+    cfg = config.get("models", str(preset or ""), default={}) or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return {
+        "provider": str(cfg.get("provider") or ""),
+        "model": str(cfg.get("model") or ""),
+        "revision_evidence": str(cfg.get("revision_evidence") or "unverified"),
+    }
+
 
 
 class RunDeadlineExceeded(TimeoutError):
@@ -127,13 +183,15 @@ class BoundedChatModel:
 class ResearchTokenBudget:
     """Thread-safe shared token allowance for one research run."""
 
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, *, run_id: str = "") -> None:
+        self.run_id = str(run_id or "")
         self.limit = max(1, int(limit))
         self.used = 0
         self.actual_used = 0
         self.reserved = 0
         self._lock = threading.Lock()
         self.telemetry: dict[str, Any] = {
+            "run_id": self.run_id,
             "limit_tokens": self.limit,
             "charged_tokens": 0,
             "actual_tokens": 0,
@@ -143,6 +201,8 @@ class ResearchTokenBudget:
             "failed_calls": 0,
             "preserve_clamps": 0,
             "roles": {},
+            # P2.1：每次模型调用的结构化记录（§7.5 字段）。
+            "calls": [],
         }
 
     def reserve(
@@ -191,6 +251,7 @@ class ResearchTokenBudget:
         role: str = "model",
         estimated_input: int = 0,
         elapsed_ms: float = 0.0,
+        call: dict[str, Any] | None = None,
     ) -> None:
         usage = getattr(response, "usage_metadata", None) or {}
         metadata = getattr(response, "response_metadata", None) or {}
@@ -226,6 +287,31 @@ class ResearchTokenBudget:
                 float(role_stats["elapsed_ms"]) + max(0.0, float(elapsed_ms)),
                 2,
             )
+            # P2.1：逐调用记录（usage 缺失字段保持 "unknown"，不得用估算冒充）。
+            call_record = dict(call or {})
+            call_record.update({
+                "run_id": self.run_id,
+                "call_id": len(self.telemetry["calls"]),
+                "status": "ok",
+                "input_tokens": _usage_int(
+                    (usage.get("input_tokens") if hasattr(usage, "get") else None)
+                    or (token_usage.get("input_tokens") if hasattr(token_usage, "get") else None)
+                ),
+                "output_tokens": _usage_int(
+                    (usage.get("output_tokens") if hasattr(usage, "get") else None)
+                    or (token_usage.get("output_tokens") if hasattr(token_usage, "get") else None)
+                ),
+                "total_tokens": consumed if consumed else "unknown",
+                "estimated_input_tokens": max(0, int(estimated_input)),
+                "reserved_tokens": max(0, int(reservation)) + max(0, int(preserve)),
+                "charged_tokens": charged,
+                "latency_ms": round(max(0.0, float(elapsed_ms)), 2),
+                "finish_reason": str(
+                    metadata.get("finish_reason") or usage.get("finish_reason") or "unknown"
+                ),
+                "estimated_cost": "unknown",
+            })
+            self.telemetry["calls"].append(call_record)
 
     def record_failure(
         self,
@@ -233,6 +319,7 @@ class ResearchTokenBudget:
         reservation: int,
         role: str,
         elapsed_ms: float,
+        call: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
             self.reserved = max(0, self.reserved - max(0, int(reservation)))
@@ -244,6 +331,25 @@ class ResearchTokenBudget:
                 float(role_stats["elapsed_ms"]) + max(0.0, float(elapsed_ms)),
                 2,
             )
+            call_record = dict(call or {})
+            call_record.update({
+                "run_id": self.run_id,
+                "call_id": len(self.telemetry["calls"]),
+                "status": "failed",
+                "input_tokens": "unknown",
+                "output_tokens": "unknown",
+                "total_tokens": "unknown",
+                "estimated_input_tokens": max(
+                    0, int((call or {}).get("estimated_input_tokens") or 0)
+                ),
+                "reserved_tokens": max(0, int(reservation))
+                + max(0, int((call or {}).get("preserve_tokens") or 0)),
+                "charged_tokens": 0,
+                "latency_ms": round(max(0.0, float(elapsed_ms)), 2),
+                "finish_reason": "unknown",
+                "estimated_cost": "unknown",
+            })
+            self.telemetry["calls"].append(call_record)
 
     def _role_stats(self, role: str) -> dict[str, int | float]:
         roles = self.telemetry["roles"]
@@ -263,6 +369,91 @@ class ResearchTokenBudget:
             }
         return roles[key]
 
+    def reconciliation(self) -> dict[str, Any]:
+        """解释总预算与各调用之和的差异（P2.1：汇总必须能解释差异）。"""
+        calls = self.telemetry.get("calls") or []
+        with self._lock:
+            snapshot = {
+                "limit_tokens": int(self.telemetry["limit_tokens"]),
+                "charged_tokens": int(self.telemetry["charged_tokens"]),
+                "actual_tokens": int(self.telemetry["actual_tokens"]),
+                "reserved_tokens": int(self.telemetry["reserved_tokens"]),
+                "call_count": int(self.telemetry["call_count"]),
+                "failed_calls": int(self.telemetry["failed_calls"]),
+                "preserve_clamps": int(self.telemetry["preserve_clamps"]),
+            }
+
+        def _num(value: Any) -> int:
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                return 0
+
+        sum_call_charged = sum(_num(call.get("charged_tokens")) for call in calls)
+        sum_call_total = sum(
+            _num(call.get("total_tokens")) for call in calls if call.get("status") == "ok"
+        )
+        sum_estimate_input = sum(
+            _num(call.get("estimated_input_tokens")) for call in calls
+        )
+        unknown_usage_calls = sum(
+            1 for call in calls if call.get("status") == "ok" and call.get("total_tokens") == "unknown"
+        )
+        explanations: list[str] = []
+        if unknown_usage_calls:
+            explanations.append(
+                f"{unknown_usage_calls} 次调用 Provider 未返回 usage，"
+                "对应 token 按 unknown 记录，未计入各调用之和。"
+            )
+        if sum_call_total and sum_call_total != snapshot["actual_tokens"]:
+            explanations.append(
+                "actual_tokens 按 record 时的 usage 累计，"
+                "与各调用 total_tokens 之和的差异来自失败/重试或 usage 缺失。"
+            )
+        if snapshot["preserve_clamps"] > 0:
+            explanations.append(
+                f"{snapshot['preserve_clamps']} 次调用按下游保留截断计费（charged < actual）。"
+            )
+        if sum_call_charged != snapshot["charged_tokens"]:
+            explanations.append(
+                "charged_tokens 按预算记账（含保留与下游 preserve 截断），"
+                "与各调用 charged_tokens 之和的差异来自 preserve_clamps 截断。"
+            )
+        unaccounted = snapshot["limit_tokens"] - (
+            snapshot["charged_tokens"] + snapshot["reserved_tokens"]
+        )
+        return {
+            "budget_accounting": snapshot,
+            "sum_call_charged_tokens": sum_call_charged,
+            "sum_call_total_tokens": sum_call_total,
+            "sum_call_estimated_input_tokens": sum_estimate_input,
+            "unknown_usage_calls": unknown_usage_calls,
+            "unallocated_tokens": unaccounted,
+            "difference_explanation": (
+                "；".join(explanations)
+                if explanations
+                else "各调用之和与预算记账一致，无未解释差异。"
+            ),
+        }
+
+
+def _usage_int(value: Any) -> int | str:
+    """Provider usage 字段 → 整数；缺失/非法时按契约记录 "unknown"。"""
+    if value is None or value == "":
+        return "unknown"
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return "unknown"
+
+
+def finalize_token_budget_runtime(telemetry: dict[str, Any]) -> dict[str, Any]:
+    """把逐调用账本的对账快照并入 token_budget_runtime（写入 run summary 前调用）。"""
+    budget = ResearchTokenBudget(int((telemetry or {}).get("limit_tokens") or 1))
+    budget.telemetry = dict(telemetry or {})
+    telemetry["reconciliation"] = budget.reconciliation()
+    return telemetry
+
 
 class BudgetedChatModel:
     """Share one enforceable token budget across all role models in a run."""
@@ -275,12 +466,14 @@ class BudgetedChatModel:
         output_reserve: int = 0,
         role: str = "model",
         downstream_reserve: int = 0,
+        preset: str = "",
     ) -> None:
         self._model = model
         self._budget = budget
         self._output_reserve = max(0, int(output_reserve))
         self._role = role
         self._downstream_reserve = max(0, int(downstream_reserve))
+        self._preset = str(preset or "")
         self.last_reservation: dict[str, int | str] = {}
 
     def __getattr__(self, name: str) -> Any:
@@ -293,6 +486,7 @@ class BudgetedChatModel:
             output_reserve=self._output_reserve,
             role=self._role,
             downstream_reserve=self._downstream_reserve,
+            preset=self._preset,
         )
 
     def with_downstream_reserve(
@@ -309,6 +503,7 @@ class BudgetedChatModel:
             output_reserve=self._output_reserve,
             role=role or self._role,
             downstream_reserve=downstream_reserve,
+            preset=self._preset,
         )
 
     def with_stage_policy(
@@ -341,10 +536,34 @@ class BudgetedChatModel:
                 if downstream_reserve is None
                 else downstream_reserve
             ),
+            preset=self._preset,
         )
 
+    def _call_context(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
+        """P2.1 调用级字段：stage/身份/prompt/输入度量（usage 由 budget 侧补齐）。"""
+        estimated_input, context_bytes, evidence_refs = _message_metrics(args, kwargs)
+        identity = model_identity(self._preset) if self._preset else {
+            "provider": "",
+            "model": "",
+            "revision_evidence": "unverified",
+        }
+        return {
+            "stage": str(CURRENT_CALL_STAGE.get() or "unknown"),
+            "role": self._role,
+            "preset": self._preset,
+            "provider": identity["provider"],
+            "model": identity["model"],
+            "revision_evidence": identity["revision_evidence"],
+            "prompt_hash": research_prompt_hash(),
+            "context_bytes": int(context_bytes),
+            "evidence_refs_count": int(evidence_refs),
+            "preserve_tokens": max(0, int(self._downstream_reserve)),
+            "estimated_input_tokens": int(estimated_input),
+        }
+
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
-        estimated_input = _estimate_input_tokens(args, kwargs)
+        call = self._call_context(args, kwargs)
+        estimated_input = int(call["estimated_input_tokens"])
         required = self._output_reserve + estimated_input
         self.last_reservation = {
             "role": self._role,
@@ -365,6 +584,7 @@ class BudgetedChatModel:
                 reservation=reservation,
                 role=self._role,
                 elapsed_ms=(time.perf_counter() - started_at) * 1000,
+                call=call,
             )
             raise
         self._budget.record(
@@ -374,6 +594,7 @@ class BudgetedChatModel:
             role=self._role,
             estimated_input=estimated_input,
             elapsed_ms=(time.perf_counter() - started_at) * 1000,
+            call=call,
         )
         return response
 
@@ -381,12 +602,16 @@ class BudgetedChatModel:
 MAX_ESTIMATED_INPUT_TOKENS = 32_000
 
 
-def _estimate_input_tokens(args: tuple[Any, ...], kwargs: dict[str, Any]) -> int:
+def _message_list(args: tuple[Any, ...], kwargs: dict[str, Any]) -> list[Any]:
     messages = args[0] if args else kwargs.get("input") or kwargs.get("messages") or []
     if not isinstance(messages, (list, tuple)):
         messages = [messages]
+    return list(messages)
+
+
+def _estimate_input_tokens(args: tuple[Any, ...], kwargs: dict[str, Any]) -> int:
     characters = 0
-    for message in messages:
+    for message in _message_list(args, kwargs):
         content = getattr(message, "content", message)
         characters += _structured_text_length(content)
     # Mixed Chinese/English prompts typically fall between 1.5 and 4 chars per
@@ -396,6 +621,48 @@ def _estimate_input_tokens(args: tuple[Any, ...], kwargs: dict[str, Any]) -> int
     # remains conservative for mixed Chinese/English prompts without restoring
     # the runaway reservations that the hard cap prevents.
     return min(MAX_ESTIMATED_INPUT_TOKENS, max(1, ceil(characters / 1.5)))
+
+
+def _message_metrics(
+    args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> tuple[int, int, int]:
+    """(estimated_input_tokens, context_bytes, evidence_refs_count) for one call.
+
+    context_bytes 是输入消息的 UTF-8 字节数；evidence_refs_count 统计拼入
+    prompt 的 [RAG:/[WEB: 引用标记数（可观测的输入事实，非 Provider 返回值）。
+    """
+    characters = 0
+    context_bytes = 0
+    evidence_refs = 0
+    for message in _message_list(args, kwargs):
+        content = getattr(message, "content", message)
+        text = (
+            content if isinstance(content, str) else _structured_text(content)
+        )
+        characters += _structured_text_length(content)
+        context_bytes += len(text.encode("utf-8"))
+        evidence_refs += len(re.findall(r"\[(?:RAG|WEB):", text))
+    estimated = min(MAX_ESTIMATED_INPUT_TOKENS, max(1, ceil(characters / 1.5)))
+    return estimated, context_bytes, evidence_refs
+
+
+def _structured_text(value: Any, *, depth: int = 0) -> str:
+    """把任意 message content 展平为可度量文本（度量专用，不改变内容）。"""
+    if value is None or depth > 8:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping):
+        return "".join(
+            f"{key}:{_structured_text(item, depth=depth + 1)}"
+            for key, item in value.items()
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return "".join(_structured_text(item, depth=depth + 1) for item in value)
+    nested = getattr(value, "content", None)
+    if nested is not None and nested is not value:
+        return _structured_text(nested, depth=depth + 1)
+    return str(value) if isinstance(value, (int, float, bool)) else ""
 
 
 def _structured_text_length(value: Any, *, depth: int = 0) -> int:
@@ -513,6 +780,7 @@ def create_research_models(
     deadline_at: float | None = None,
     commit_reserve_seconds: float | None = None,
     preserve_stage_budgets: bool = False,
+    run_id: str = "",
 ) -> tuple[dict[str, BaseChatModel], dict]:
     """Create the role models selected by one P1 research profile."""
 
@@ -526,7 +794,7 @@ def create_research_models(
         "synthesizer": profile.synthesizer_model,
         "verifier": profile.verifier_model,
     }
-    budget = ResearchTokenBudget(profile.token_budget)
+    budget = ResearchTokenBudget(profile.token_budget, run_id=run_id)
     reserve = (
         profile.commit_reserve_seconds
         if commit_reserve_seconds is None
@@ -576,6 +844,7 @@ def create_research_models(
             output_reserve=profile.role_max_tokens[role],
             role=role,
             downstream_reserve=role_token_reserves[role],
+            preset=preset,
         )
         for role, preset in presets.items()
     }
@@ -633,6 +902,7 @@ def create_research_models(
                         budget,
                         output_reserve=member_tokens,
                         role=f"panel_{point}",
+                        preset=preset,
                     ),
                 )
                 for preset in member_presets
@@ -655,6 +925,7 @@ def create_research_models(
                     budget,
                     output_reserve=member_tokens,
                     role="panel_referee",
+                    preset=str(profile.panel_referee),
                 )
             panel_models[point] = {"members": members, "referee": referee}
     diagnostics = research_model_diagnostics(profile.depth)

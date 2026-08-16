@@ -448,6 +448,7 @@ def query_command(
             research_profile.depth,
             deadline_at=deadline_at,
             commit_reserve_seconds=commit_reserve_seconds,
+            run_id=run_id,
         )
         set_model(role_models["analyst"])
         v2_rewriter = QueryRewriteProvider(role_models["verifier"])
@@ -640,6 +641,31 @@ def query_command(
             }
         final_state["_ledger_persistence"] = ledger_result
         summary["evidence_ledger"] = ledger_result
+    # P2.1：逐调用预算账本 + 对账快照进入 run summary（模型对象不入 JSON，
+    # 只取可序列化身份与 telemetry；replay 模式无运行时账本则置空）。
+    if model_trace:
+        from .model_factory import finalize_token_budget_runtime
+
+        summary["model_trace"] = {
+            "roles": dict(model_trace.get("roles") or {}),
+            "token_budget_runtime": finalize_token_budget_runtime(
+                dict(model_trace.get("token_budget_runtime") or {})
+            ),
+            "role_downstream_reserve_seconds": model_trace.get(
+                "role_downstream_reserve_seconds"
+            ),
+            "role_downstream_reserve_tokens": model_trace.get(
+                "role_downstream_reserve_tokens"
+            ),
+            "max_estimated_input_tokens": model_trace.get(
+                "max_estimated_input_tokens"
+            ),
+            "planner_reserve_reclaimed_seconds": model_trace.get(
+                "planner_reserve_reclaimed_seconds"
+            ),
+        }
+    else:
+        summary["model_trace"] = {}
     write_run_summary(summary, summary_path)
     print(f"Trace JSONL: {trace_path.resolve()}")
     print(f"Run summary: {summary_path.resolve()}")
