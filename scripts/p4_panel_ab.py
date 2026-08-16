@@ -7,7 +7,8 @@
 
 指标（对齐 docs/plans/p4/B_多模型评审团.md §6）：
   - 误判率：gold ∈ {insufficient, contradicts, uncertain} 但模型判 supports 的占比
-    （另报全量不一致率与反向误判）；
+    （另报全量不一致率与反向误判；并给出 95% Wilson 置信区间——小样本 n 下 0%
+    的区间往往很宽，勿把点估计读作承诺）；
   - 待核验率：模型判 uncertain 的占比（含缺省对齐）；
   - token 成本：两臂 input/output tokens（BudgetState 记账）；
   - 延迟：每臂墙钟时间（panel 成员并行），多 repeats 取 P95。
@@ -19,13 +20,18 @@
   python scripts/p4_panel_ab.py \
       --gold evaluation/p4_panel_ab/verification_claims_gold.jsonl \
       [--depth deep] [--real | --offline] [--repeats 3] \
+      [--single-preset ds_strong] \
       [--out reports/evaluation/p4/b_panel_ab_20260813.md]
+
+注意：--real 模式下 single 臂默认与 panel 首成员同模型（控制变量，避免
+模型差异混入评审团机制对比）；如需复现旧行为可显式 --single-preset <preset>。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 import time
@@ -71,6 +77,19 @@ def _align(checks: list[dict], claims: list[dict]) -> dict[str, str]:
     return aligned
 
 
+def wilson_95(k: int, n: int) -> tuple[float, float]:
+    """95% Wilson score interval for a proportion (robust at p=0)."""
+    if n <= 0:
+        return (0.0, 0.0)
+    p = k / n
+    z = 1.96
+    z2 = z * z
+    denom = 1 + z2 / n
+    center = (p + z2 / (2 * n)) / denom
+    half = z * math.sqrt(max(0.0, p * (1 - p) / n + z2 / (4 * n * n))) / denom
+    return (max(0.0, center - half), min(1.0, center + half))
+
+
 def _token_cost(budget: BudgetState) -> int:
     return budget.input_tokens + budget.output_tokens
 
@@ -112,11 +131,16 @@ def _aggregate(rows: list[dict], single_costs: list[int], panel_costs: list[int]
     single_cost = int(statistics.mean(single_costs)) if single_costs else 0
     panel_cost = int(statistics.mean(panel_costs)) if panel_costs else 0
     cost_ratio = round(panel_cost / single_cost, 3) if single_cost else 0.0
-    misjudge_ok = rate("panel_misjudged") <= rate("single_misjudged")
+    single_mis = sum(1 for row in rows if row["single_misjudged"])
+    panel_mis = sum(1 for row in rows if row["panel_misjudged"])
+    single_ci, panel_ci = wilson_95(single_mis, len(rows)), wilson_95(panel_mis, len(rows))
+    misjudge_ok = panel_mis <= single_mis
     cost_ok = cost_ratio <= 1.5 or single_cost == 0
     return {
         "n_claims": len(rows),
         "misjudge_rate": {"single": rate("single_misjudged"), "panel": rate("panel_misjudged")},
+        "misjudge_ci95": {"single": [round(v, 4) for v in single_ci], "panel": [round(v, 4) for v in panel_ci]},
+        "misjudge_n": {"single": single_mis, "panel": panel_mis},
         "mismatch_rate": {
             "single": round(
                 sum(1 for row in rows if row["single"] != row["gold"] and row["single"] != "uncertain") / len(rows), 4),
@@ -200,8 +224,8 @@ def run_arm_offline(row: dict, *, panel: bool, budget_state: BudgetState):
         return payload.get("checks") or [], time.perf_counter() - start
     review = run_panel(
         [
-            ("strict-a", _OfflineModel(lenient=False)),
-            ("strict-b", _OfflineModel(lenient=False)),
+            ("lenient", _OfflineModel(lenient=True)),
+            ("strict", _OfflineModel(lenient=False)),
         ],
         input_snapshot={"claims": claims, "ledger_snapshot": row.get("snapshot") or {}},
         budget_state=budget_state,
@@ -238,6 +262,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--real", action="store_true", help="真实 API 模型（默认离线确定性）")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--out", default="reports/evaluation/p4/b_panel_ab_20260813.md")
+    parser.add_argument(
+        "--single-preset",
+        default=None,
+        help="single 臂使用的模型 preset（默认 profile.verifier_model；"
+        "传 ds_strong 等做控制变量对比，隔离评审团机制与模型本身差异）",
+    )
     args = parser.parse_args(argv)
 
     rows = load_gold(args.gold)
@@ -251,21 +281,31 @@ def main(argv: list[str] | None = None) -> int:
 
         profile = resolve_research_profile(args.depth)
         ab_timeout = 240
+        # 默认 single 臂与 panel 首成员同模型（控制变量）：2026-08-14 控制实验
+        # 证明原默认（profile.verifier_model=deepseek-v4-flash-guan）与 panel 成员
+        # （ds_strong=deepseek-v4-flash-0731 等）不同模型，导致 42.9% vs 66.7%
+        # 的表观差异其实是模型差异而非评审团机制（同模型对照下两臂均为 66.7%）。
+        member_presets = profile.panel_members("verification")
+        single_preset = args.single_preset or (member_presets[0] if member_presets else profile.verifier_model)
         models = {
             "verifier": create_chat_model(
-                profile.verifier_model,
+                single_preset,
                 max_tokens=profile.verifier_max_tokens,
                 timeout=ab_timeout,
             ),
         }
         member_tokens = max(300, profile.verifier_max_tokens // 2)
-        panel_models = {
-            "members": [
-                create_chat_model(preset, max_tokens=member_tokens, timeout=ab_timeout)
-                for preset in profile.panel_members("verification")
-            ],
-            "referee": None,  # 2 成员 = 多数票，无裁判调用
-        }
+        members = [
+            create_chat_model(preset, max_tokens=member_tokens, timeout=ab_timeout)
+            for preset in profile.panel_members("verification")
+        ]
+        referee = None
+        if len(members) >= 3:
+            referee = create_chat_model(
+                profile.panel_referee or profile.verifier_model,
+                max_tokens=member_tokens, timeout=ab_timeout,
+            )
+        panel_models = {"members": members, "referee": referee}
         if not panel_models["members"]:
             print("error: depth 档未启用评审团（roster 为空）", file=sys.stderr)
             return 2
@@ -299,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
         "schema": "conflux-p4-panel-ab-v1",
         "mode": "real" if args.real else "offline_pipeline_validation",
         "depth": args.depth,
+        "single_preset": args.single_preset or "profile.verifier_model",
         "gold": str(Path(args.gold).resolve()),
         "repeats": args.repeats,
         "cases": len(rows),
@@ -326,12 +367,14 @@ def write_report(out_path: Path, artifact: dict) -> None:
         "",
         f"> 生成时间：{artifact['generated_at']}　模式：{mode_note}",
         f"> 档位：{artifact['depth']}　数据集：{artifact['gold']}　cases={artifact['cases']} repeats={artifact['repeats']}",
+        f"> single 臂模型：{artifact.get('single_preset', 'profile.verifier_model')}（默认与 panel 首成员同模型，控制变量）",
         "",
         "## 1. 指标对照（同证据快照：单 verifier vs 评审团）",
         "",
         "| 指标 | 单 verifier | 评审团 | 增量 |",
         "|---|---|---|---|",
-        f"| 误判率（本应非 supports 判 supports） | {m['misjudge_rate']['single']:.1%} | {m['misjudge_rate']['panel']:.1%} | {m['misjudge_rate']['panel'] - m['misjudge_rate']['single']:+.1%} |",
+        f"| 误判率（本应非 supports 判 supports） | {m['misjudge_rate']['single']:.1%} (n={m['misjudge_n']['single']}) | {m['misjudge_rate']['panel']:.1%} (n={m['misjudge_n']['panel']}) | {m['misjudge_rate']['panel'] - m['misjudge_rate']['single']:+.1%} |",
+        f"| 误判率 95% Wilson CI | [{m['misjudge_ci95']['single'][0]:.1%}, {m['misjudge_ci95']['single'][1]:.1%}] | [{m['misjudge_ci95']['panel'][0]:.1%}, {m['misjudge_ci95']['panel'][1]:.1%}] | — |",
         f"| 全量不一致率（不含 uncertain） | {m['mismatch_rate']['single']:.1%} | {m['mismatch_rate']['panel']:.1%} | {m['mismatch_rate']['panel'] - m['mismatch_rate']['single']:+.1%} |",
         f"| 待核验率（uncertain） | {m['uncertain_rate']['single']:.1%} | {m['uncertain_rate']['panel']:.1%} | {m['uncertain_rate']['panel'] - m['uncertain_rate']['single']:+.1%} |",
         f"| token 成本（输入+输出均值） | {m['token_cost']['single']} | {m['token_cost']['panel']} | ×{m['token_cost']['ratio']} |",
@@ -351,12 +394,13 @@ def write_report(out_path: Path, artifact: dict) -> None:
     for row in artifact["detail"]:
         rows.append(f"| {row['claim_id']} | {row['gold']} | {row['single']} | {row['panel']} |")
     rows += ["", "## 4. 局限", "",
-             "- 种子集源自冻结 `evaluation/v2_gold/verification_gold.jsonl`（10 条 insufficient 标注）+ 3 条合成正/负对照，"
-             "为小样本烟测；论文级质量结论需扩展到 KG 136 篇终审与 P2 75 篇的 claim 级标注后重跑。",
+             "- 种子集源自冻结 `evaluation/v2_gold/verification_gold.jsonl`（10 条 insufficient 标注）+ 扩展构造子集，"
+             "为小样本；论文级质量结论需扩展到 KG 136 篇终审与 P2 75 篇的 claim 级标注后重跑。",
              "- 离线模式为确定性管道验证，不计入默认化证据。",
-             "- 本脚本以统一宽松超时（240s）隔离模型质量/成本度量；当前 provider 延迟下，deep 档单批 13 claim 的"
-             "verification 墙钟（单 172s / 评审团并行 87s）超出运行级 role_timeout（deep verifier 42s），生产运行"
-             "需上调 role_timeout 或减小单批 claim 数。该问题对两臂对称，不影响评审团质量结论。",
+             "- 真实 API 模式默认 2+ 成员与裁判；成员 max_tokens 减半；延迟受 provider 波动影响，两臂对称。",
+             "- 本脚本以统一宽松超时（240s）隔离模型质量/成本度量；当前 provider 延迟下，deep 档单批 43 claim 的"
+             "verification 墙钟超过运行级 role_timeout（deep verifier 42s），生产运行需上调 role_timeout 或减小单批 claim 数。"
+             "该问题对两臂对称，不影响评审团质量结论。",
              ""]
     out_path.write_text("\n".join(rows), encoding="utf-8")
 

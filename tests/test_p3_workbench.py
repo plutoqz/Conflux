@@ -517,6 +517,47 @@ def test_v1_post_refresh_route(p3_server, tmp_path, monkeypatch):
     assert captured["payload"]["revision"] == 1
 
 
+def test_v1_code_routes_are_post_only(p3_server, tmp_path, monkeypatch):
+    from http.server import BaseHTTPRequestHandler
+
+    _write_project_yaml(tmp_path)
+    monkeypatch.setattr(BaseHTTPRequestHandler, "__init__", lambda s, *a, **kw: None)
+    captured = {}
+    calls = []
+
+    def fake_send_json(self, payload, status=200, headers=None):
+        captured.update(payload=payload, status=status, headers=headers or {})
+
+    monkeypatch.setattr(p3_server.WorkbenchHandler, "_send_json", fake_send_json)
+    monkeypatch.setattr(
+        p3_server,
+        "query_p3_project_code",
+        lambda project_id, payload: calls.append(("query", project_id, payload)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        p3_server,
+        "index_p3_project_code",
+        lambda project_id: calls.append(("index", project_id, {})) or {"ok": True},
+    )
+    handler = p3_server.WorkbenchHandler()
+    handler.client_address = ("127.0.0.1", 9999)
+    body = b'{"query":"where"}'
+    handler.headers = {"Content-Length": str(len(body))}
+    handler.rfile = BytesIO(body)
+    handler.path = "/api/v1/projects/demo/code/query"
+    handler.do_POST()
+    assert captured["status"] == 200
+    assert calls == [("query", "demo", {"query": "where"})]
+
+    body = b"{}"
+    handler.headers = {"Content-Length": str(len(body))}
+    handler.rfile = BytesIO(body)
+    handler.path = "/api/v1/projects/demo/code/index"
+    handler.do_POST()
+    assert captured["status"] == 200
+    assert calls[-1] == ("index", "demo", {})
+
+
 # ── static surface ───────────────────────────────────────────────────
 
 
@@ -541,4 +582,3 @@ def test_legacy_overview_paths_removed_in_p36(p3_server):
         "update_registered_project_settings",
     ):
         assert not hasattr(p3_server, name), name
-

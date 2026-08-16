@@ -37,6 +37,10 @@
           <button class="nav-item" type="button" data-target="query" data-title="研究查询" data-subtitle="协调本地知识、网络证据与模型推理">
             <i data-lucide="search" aria-hidden="true"></i><span>研究查询</span>
           </button>
+          <button class="nav-item" type="button" data-target="assistant" data-title="研究助手" data-subtitle="统一处理对话、审批、文献笔记与个人偏好">
+            <i data-lucide="messages-square" aria-hidden="true"></i><span>研究助手</span>
+            <span class="nav-count" id="assistantApprovalCount">0</span>
+          </button>
           <button class="nav-item" type="button" data-target="projects" data-title="项目" data-subtitle="项目概览、研究工作与统一待处理队列">
             <i data-lucide="folders" aria-hidden="true"></i><span>项目</span>
             <span class="nav-count" id="projectNavCount">0</span>
@@ -360,6 +364,92 @@
         </div>
       </section>
 
+      <section id="assistant" class="view" aria-labelledby="pageTitle">
+        <div class="assistant-workspace">
+          <div class="assistant-tabs" role="tablist" aria-label="研究助手视图">
+            <button class="assistant-tab active" type="button" role="tab" aria-selected="true" data-assistant-tab="chat"><i data-lucide="message-square" aria-hidden="true"></i><span>对话</span></button>
+            <button class="assistant-tab" type="button" role="tab" aria-selected="false" data-assistant-tab="notes"><i data-lucide="notebook-pen" aria-hidden="true"></i><span>文献笔记</span></button>
+            <button class="assistant-tab" type="button" role="tab" aria-selected="false" data-assistant-tab="memory"><i data-lucide="brain" aria-hidden="true"></i><span>记忆与技能</span></button>
+          </div>
+
+          <div class="assistant-tab-panel active" data-assistant-panel="chat" role="tabpanel">
+            <section class="surface chat-surface" aria-labelledby="chatTitle">
+              <div class="section-heading"><div><h2 id="chatTitle">Conflux 对话入口</h2><p>读取项目状态，提交研究任务，并把写操作送入确认队列。</p></div><button id="refreshApprovals" class="icon-button subtle" type="button" aria-label="刷新审批" title="刷新审批"><i data-lucide="refresh-cw" aria-hidden="true"></i></button></div>
+              <div id="chatMessages" class="chat-messages" aria-live="polite">
+                <div class="chat-message assistant"><span class="chat-avatar"><i data-lucide="sparkles" aria-hidden="true"></i></span><div><strong>Conflux</strong><p>选择项目后，可以查询状态、登记实验、生成周报或询问代码。</p></div></div>
+              </div>
+              <form id="chatForm" class="chat-composer">
+                <label><span class="sr-only">项目上下文</span><select id="chatProject"><option value="">不指定项目</option></select></label>
+                <label class="chat-input"><span class="sr-only">消息</span><textarea id="chatMessage" rows="2" required placeholder="输入研究任务或项目问题"></textarea></label>
+                <button id="sendChat" class="button primary" type="submit"><i data-lucide="send" aria-hidden="true"></i><span>发送</span></button>
+              </form>
+            </section>
+            <section class="surface approval-surface" aria-labelledby="approvalTitle">
+              <div class="section-heading"><div><h2 id="approvalTitle">待确认操作</h2><p>雷达与实验登记只有确认后才会执行。</p></div><span id="approvalCount" class="status-pill neutral">0</span></div>
+              <div id="approvalList" class="approval-list"></div>
+              <div id="approvalEmpty" class="empty-state"><i data-lucide="shield-check" aria-hidden="true"></i><strong>没有待确认操作</strong></div>
+            </section>
+          </div>
+
+          <div class="assistant-tab-panel" data-assistant-panel="notes" role="tabpanel" hidden>
+            <div class="assistant-two-column">
+              <section class="surface" aria-labelledby="noteFormTitle">
+                <div class="section-heading"><div><h2 id="noteFormTitle">结构化笔记</h2><p>笔记字段与原文定位分开保存。</p></div></div>
+                <form id="noteForm" class="stack-form">
+                  <div class="field-grid two">
+                    <label>论文标识<input id="notePaperKey" required placeholder="arxiv:xxxx 或数据库 key"></label>
+                    <label>标题<input id="noteTitle" required></label>
+                    <label>目标<textarea id="noteGoal" rows="2"></textarea></label>
+                    <label>方法<textarea id="noteMethod" rows="2"></textarea></label>
+                    <label>结论<textarea id="noteConclusion" rows="2"></textarea></label>
+                    <label>局限<textarea id="noteLimitations" rows="2"></textarea></label>
+                    <label class="field-wide">与我的项目关系<textarea id="noteRelevance" rows="2"></textarea></label>
+                    <label>原文页码<input id="notePage" placeholder="例如 3"></label>
+                    <label>原文区间<input id="noteSegment" placeholder="例如 Results, paragraph 2"></label>
+                    <label class="field-wide">补充笔记<textarea id="noteText" rows="3"></textarea></label>
+                  </div>
+                  <div class="form-actions"><button id="saveNote" class="button primary" type="submit"><i data-lucide="save" aria-hidden="true"></i><span>保存笔记</span></button></div>
+                </form>
+              </section>
+              <section class="surface" aria-labelledby="noteAuditTitle">
+                <div class="section-heading"><div><h2 id="noteAuditTitle">一致性审计</h2><p>将选中笔记的结构化字段与原文片段逐项比对。</p></div></div>
+                <label>待审计笔记<select id="noteAuditSelect"><option value="">选择笔记</option></select></label>
+                <label>原文片段<textarea id="noteAuditSource" rows="9" placeholder="粘贴笔记引用的原文片段"></textarea></label>
+                <div class="form-actions"><button id="runNoteAudit" class="button secondary" type="button"><i data-lucide="scan-search" aria-hidden="true"></i><span>运行审计</span></button></div>
+                <div id="noteAuditResult" class="tool-output" hidden></div>
+              </section>
+            </div>
+            <section class="surface notes-library" aria-labelledby="notesLibraryTitle">
+              <div class="section-heading"><div><h2 id="notesLibraryTitle">笔记库</h2><p id="notesSummary">0 条 active 笔记</p></div><button id="generateRelatedWork" class="button secondary compact" type="button"><i data-lucide="file-pen-line" aria-hidden="true"></i><span>生成 Related Work</span></button></div>
+              <div id="notesList" class="notes-list"></div>
+              <div id="notesEmpty" class="empty-state"><i data-lucide="notebook" aria-hidden="true"></i><strong>还没有文献笔记</strong></div>
+              <pre id="relatedWorkOutput" class="tool-output" hidden></pre>
+            </section>
+          </div>
+
+          <div class="assistant-tab-panel" data-assistant-panel="memory" role="tabpanel" hidden>
+            <div class="assistant-two-column">
+              <section class="surface" aria-labelledby="memoryTitle">
+                <div class="section-heading"><div><h2 id="memoryTitle">用户记忆</h2><p>偏好、反馈与术语引用保存在本地。</p></div><span id="memoryCount" class="status-pill neutral">0 / 500</span></div>
+                <form id="memoryForm" class="inline-create-form">
+                  <label>类型<select id="memoryKind"><option value="preference">偏好</option><option value="feedback">反馈</option><option value="reference">术语与引用</option></select></label>
+                  <label class="grow">描述<input id="memoryDescription" required placeholder="一句话描述"></label>
+                  <label class="grow">内容<input id="memoryContent" required></label>
+                  <button id="saveMemory" class="button primary compact" type="submit"><i data-lucide="plus" aria-hidden="true"></i><span>添加</span></button>
+                </form>
+                <div id="memoryList" class="memory-list"></div>
+                <div id="memoryEmpty" class="empty-state"><i data-lucide="brain" aria-hidden="true"></i><strong>还没有用户记忆</strong></div>
+              </section>
+              <section class="surface" aria-labelledby="skillsTitle">
+                <div class="section-heading"><div><h2 id="skillsTitle">技能库</h2><p>已通过声明式合同校验的本地工作流。</p></div><span id="skillsCount" class="status-pill neutral">0</span></div>
+                <div id="skillsList" class="skills-list"></div>
+                <div id="skillsProblems" class="inbox-error" hidden></div>
+              </section>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section id="projects" class="view" aria-labelledby="pageTitle">
         <div class="project-commandbar">
           <div class="project-summary" aria-live="polite">
@@ -432,6 +522,7 @@
               <button class="project-tab active" type="button" role="tab" aria-selected="true" data-p3-tab="overview">概览</button>
               <button class="project-tab" type="button" role="tab" aria-selected="false" data-p3-tab="work">研究工作</button>
               <button class="project-tab" type="button" role="tab" aria-selected="false" data-p3-tab="evidence">证据与知识</button>
+              <button class="project-tab" type="button" role="tab" aria-selected="false" data-p3-tab="tools">研究工具</button>
               <button class="project-tab" type="button" role="tab" aria-selected="false" data-p3-tab="activity">活动与运行</button>
               <button class="project-tab" type="button" role="tab" aria-selected="false" data-p3-tab="inbox">待处理<span class="nav-count" id="p3InboxTabCount">0</span></button>
             </div>
@@ -541,6 +632,32 @@
               <section class="project-detail-section" aria-labelledby="p3EvidenceTitle">
                 <div class="project-section-heading"><div><h3 id="p3EvidenceTitle">证据来源变化</h3><p>Evidence Ledger 的来源变化映射到待处理队列，确认前不改变计划。</p></div></div>
                 <div id="p3EvidenceSources" class="audit-list"></div>
+              </section>
+            </div>
+
+            <div class="project-tab-panel" data-p3-panel="tools" role="tabpanel" hidden>
+              <section class="project-detail-section" aria-labelledby="p3ExperimentsTitle">
+                <div class="project-section-heading"><div><h3 id="p3ExperimentsTitle">实验追踪</h3><p>登记假设、参数、指标、提交和产物，并进入周期证据链。</p></div><div class="project-section-actions"><button id="p3ScanExperiments" class="button secondary compact" type="button"><i data-lucide="folder-search" aria-hidden="true"></i><span>扫描结果文件</span></button></div></div>
+                <form id="p3ExperimentForm" class="tool-inline-form">
+                  <label>实验名称<input id="p3ExperimentName" required></label>
+                  <label>状态<select id="p3ExperimentStatus"><option value="draft">草稿</option><option value="running">运行中</option><option value="done">完成</option><option value="failed">失败</option></select></label>
+                  <label>Commit<input id="p3ExperimentCommit" placeholder="Git hash"></label>
+                  <label class="wide">假设<input id="p3ExperimentHypothesis"></label>
+                  <label class="wide">参数 JSON<textarea id="p3ExperimentParams" rows="2" placeholder='{"seed": 42}'></textarea></label>
+                  <label class="wide">指标 JSON<textarea id="p3ExperimentMetrics" rows="2" placeholder='{"accuracy": 0.91}'></textarea></label>
+                  <button id="p3RegisterExperiment" class="button primary compact" type="submit"><i data-lucide="plus" aria-hidden="true"></i><span>登记实验</span></button>
+                </form>
+                <div class="table-wrap compact-table"><table id="p3ExperimentsTable"><thead><tr><th>实验</th><th>状态</th><th>指标</th><th>提交</th><th>更新时间</th></tr></thead><tbody id="p3ExperimentsBody"></tbody></table></div>
+                <div id="p3ExperimentsEmpty" class="inline-empty">还没有实验记录。</div>
+              </section>
+              <section class="project-detail-section" aria-labelledby="p3MentorTitle">
+                <div class="project-section-heading"><div><h3 id="p3MentorTitle">导师周报</h3><p>仅使用已登记进展、实验和风险生成，经确定性校验后导出。</p></div><div class="project-section-actions"><button id="p3LoadMentor" class="button secondary compact" type="button"><i data-lucide="refresh-cw" aria-hidden="true"></i><span>整理数据</span></button><button id="p3ConfirmMentor" class="button primary compact" type="button"><i data-lucide="file-check" aria-hidden="true"></i><span>生成并导出</span></button></div></div>
+                <pre id="p3MentorOutput" class="tool-output">尚未整理周报数据。</pre>
+              </section>
+              <section class="project-detail-section" aria-labelledby="p3CodeTitle">
+                <div class="project-section-heading"><div><h3 id="p3CodeTitle">代码问答</h3><p>AST 感知检索与确定性调用链，答案绑定源码文件和行号。</p></div><div class="project-section-actions"><button id="p3IndexCode" class="button secondary compact" type="button"><i data-lucide="scan-line" aria-hidden="true"></i><span>更新代码索引</span></button></div></div>
+                <form id="p3CodeForm" class="tool-query-form"><label class="grow"><span class="sr-only">代码问题</span><input id="p3CodeQuestion" required placeholder="例如：哪个函数负责构建项目状态？"></label><button id="p3AskCode" class="button primary compact" type="submit"><i data-lucide="search-code" aria-hidden="true"></i><span>查询</span></button></form>
+                <div id="p3CodeOutput" class="tool-output" hidden></div>
               </section>
             </div>
 

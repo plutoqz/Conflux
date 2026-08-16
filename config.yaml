@@ -52,6 +52,38 @@ models:
     max_retries: 1
     extra_body:
       enable_thinking: false
+  # P4-B 真异构评审团成员（2026-08-14）：同一网关、三个不同模型，
+  # 能力大致递减：ds_strong > mimo > qwen_weak。风格/知识差异用于去偏，
+  # 角色按能力分配（见 docs/plans/p4/B_多模型评审团.md v1.1）。
+  ds_strong:
+    provider: openai_compatible
+    model: deepseek-v4-flash-0731
+    base_url: https://www.dmxapi.cn/v1
+    api_key: null
+    temperature: 0.2
+    max_tokens: 4096
+    timeout: 90
+    max_retries: 1
+    extra_body:
+      enable_thinking: false
+  mimo:
+    provider: openai_compatible
+    model: mimo-v2.5
+    base_url: https://www.dmxapi.cn/v1
+    api_key: null
+    temperature: 0.2
+    max_tokens: 4096
+    timeout: 90
+    max_retries: 1
+  qwen_weak:
+    provider: openai_compatible
+    model: qwen3.7-flash
+    base_url: https://www.dmxapi.cn/v1
+    api_key: null
+    temperature: 0.0
+    max_tokens: 2048
+    timeout: 60
+    max_retries: 1
 embedding:
   provider: openai_compatible
   model: text-embedding-v4
@@ -103,10 +135,16 @@ research:
   # arbitration 评审团仅 deep 档挂载（第二判断点）。
   panel:
     enabled_by_depth: {quick: false, standard: true, deep: true}
+    # 真异构评审团（v1.1）：三模型不同厂商风格，能力大致递减
+    # ds_strong > mimo > qwen_weak；成员顺序 = 能力降序，persona 按 index
+    # 轮换（strict critic / domain pragmatist / risk sensitive）与能力对齐：
+    # verification 2 成员多数票（强+中，无裁判，成本可控）；
+    # arbitration 3 成员 + 裁判（仅 deep 档；弱模型任 risk-sensitive 否决票，
+    # 最强模型任裁判与批判成员）。
     roster:
-      verification: [verifier, balanced]
-      arbitration: [planner, flash]
-    referee: balanced
+      verification: [ds_strong, mimo]
+      arbitration: [ds_strong, mimo, qwen_weak]
+    referee: ds_strong
     quorum: majority
   generalization:
     enabled: true

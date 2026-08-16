@@ -1,0 +1,127 @@
+{
+  "documents": [
+    {
+      "path": "D:\\code\\Conflux\\data\\documents\\papers\\paper-2305.06453v4#summary.md",
+      "chunk_id": "paper:2305.06453v4#summary",
+      "citation_ref": "LocalPaper:2305.06453v4:paper:2305.06453v4#summary",
+      "paper_section": "summary",
+      "full_text_requested": false,
+      "full_text_downloaded": false,
+      "full_text_extracted": false,
+      "full_text_indexed": false,
+      "content_hash": "550b1d839fa14ac2346354d0bc463ecfe89263c2acc548ac4128a05679f8cc2f"
+    },
+    {
+      "path": "D:\\code\\Conflux\\data\\documents\\papers\\paper-2410.12376v2#summary.md",
+      "chunk_id": "paper:2410.12376v2#summary",
+      "citation_ref": "LocalPaper:2410.12376v2:paper:2410.12376v2#summary",
+      "paper_section": "summary",
+      "full_text_requested": false,
+      "full_text_downloaded": false,
+      "full_text_extracted": false,
+      "full_text_indexed": false,
+      "content_hash": "52ccf693c5a1017bf9b084fb650e1b74c3e1b00d74b79127057f00580ed33409"
+    },
+    {
+      "path": "D:\\code\\Conflux\\data\\documents\\papers\\paper-2508.04846v1#summary.md",
+      "chunk_id": "paper:2508.04846v1#summary",
+      "citation_ref": "LocalPaper:2508.04846v1:paper:2508.04846v1#summary",
+      "paper_section": "summary",
+      "full_text_requested": false,
+      "full_text_downloaded": false,
+      "full_text_extracted": false,
+      "full_text_indexed": false,
+      "content_hash": "1270714dd09f7a002ea26d173e927da76cd2f48679d20ad4a43eb3e56960c688"
+    },
+    {
+      "path": "D:\\code\\Conflux\\data\\documents\\papers\\paper-2504.19678v2#summary.md",
+      "chunk_id": "paper:2504.19678v2#summary",
+      "citation_ref": "LocalPaper:2504.19678v2:paper:2504.19678v2#summary",
+      "paper_section": "summary",
+      "full_text_requested": false,
+      "full_text_downloaded": false,
+      "full_text_extracted": false,
+      "full_text_indexed": false,
+      "content_hash": "74e3ede8d5d95cf6817ba0c929309ce8260d57a5190178db2fd2e4ccce570a25"
+    }
+  ],
+  "decisions": [
+    {
+      "paper_id": "2305.06453v4",
+      "action": "summary_only",
+      "reason": "High relevance paper selected for abstract and analysis indexing.",
+      "priority": 80,
+      "metadata": {
+        "relevance_score": 0.81,
+        "reading_level": "deep",
+        "citation_value": "high"
+      }
+    },
+    {
+      "paper_id": "2410.12376v2",
+      "action": "summary_only",
+      "reason": "High relevance paper selected for abstract and analysis indexing.",
+      "priority": 80,
+      "metadata": {
+        "relevance_score": 0.765,
+        "reading_level": "deep",
+        "citation_value": "high"
+      }
+    },
+    {
+      "paper_id": "2508.04846v1",
+      "action": "summary_only",
+      "reason": "High relevance paper selected for abstract and analysis indexing.",
+      "priority": 80,
+      "metadata": {
+        "relevance_score": 0.643,
+        "reading_level": "deep",
+        "citation_value": "high"
+      }
+    },
+    {
+      "paper_id": "2504.19678v2",
+      "action": "summary_only",
+      "reason": "High relevance paper selected for abstract and analysis indexing.",
+      "priority": 80,
+      "metadata": {
+        "relevance_score": 0.643,
+        "reading_level": "deep",
+        "citation_value": "high"
+      }
+    },
+    {
+      "paper_id": "2409.14516v1",
+      "action": "metadata_only",
+      "reason": "Moderately relevant paper retained as metadata only.",
+      "priority": 40,
+      "metadata": {
+        "relevance_score": 0.42,
+        "reading_level": "skim",
+        "citation_value": "medium"
+      }
+    },
+    {
+      "paper_id": "2505.08163v1",
+      "action": "metadata_only",
+      "reason": "Moderately relevant paper retained as metadata only.",
+      "priority": 40,
+      "metadata": {
+        "relevance_score": 0.36,
+        "reading_level": "skim",
+        "citation_value": "medium"
+      }
+    },
+    {
+      "paper_id": "2503.14109v2",
+      "action": "skip",
+      "reason": "Paper did not pass the metadata relevance threshold.",
+      "priority": 0,
+      "metadata": {
+        "relevance_score": 0.255,
+        "reading_level": "skip",
+        "citation_value": "low"
+      }
+    }
+  ]
+}

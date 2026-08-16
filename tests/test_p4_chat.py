@@ -56,6 +56,15 @@ class TestIntentRouting:
         assert classify_intent("本周进展周报").action == "mentor_report"  # D：导师周报动作
         assert classify_intent("本周周期总结").action == "cycle_summary"
         assert classify_intent("我有什么偏好记忆").action == "memory_query"
+        assert classify_intent("代码问答：哪个函数构建项目状态").action == "code_query"
+        assert classify_intent("从文献笔记生成 related work").action == "paper_notes"
+
+    def test_experiment_rule_extracts_fields(self):
+        result = classify_intent("登记实验 消融A，accuracy=0.91，commit abc1234")
+        assert result.action == "experiment"
+        assert result.params["name"] == "消融A"
+        assert result.params["metrics"] == {"accuracy": 0.91}
+        assert result.params["commit"] == "abc1234"
 
     def test_llm_non_whitelist_action_is_clarify(self):
         result = classify_intent("随便聊聊", llm=_FakeLLM("delete_all_projects"))
@@ -172,7 +181,7 @@ class TestStreaming:
     def test_multiplex_interleaves_token_and_progress(self):
         events = [
             {"id": 1, "status": "running"},
-            {"id": 2, "status": "completed"},
+            {"id": 2, "stage": "job", "status": "completed"},
         ]
         items = list(multiplex(["你", "好"], event_source=lambda: events, run_id="run-1"))
         kinds = [kind for kind, _ in items]
@@ -186,7 +195,7 @@ class TestStreaming:
         def slow_poll():
             seen.append("poll")
             time.sleep(0.05)
-            return [{"id": 1, "status": "completed"}]
+            return [{"id": 1, "stage": "job", "status": "completed"}]
 
         items = list(multiplex(["t1", "t2"], event_source=slow_poll, run_id="run-1"))
         tokens = [payload for kind, payload in items if kind == "token"]
@@ -221,7 +230,10 @@ class _FakeManager:
         }
 
     def events(self, run_id, *, after_id=0, limit=200):
-        return [{"id": 1, "run_id": run_id, "status": "completed"}]
+        return [{"id": 1, "run_id": run_id, "stage": "job", "status": "completed"}]
+
+    def get(self, run_id):
+        return {"run_id": run_id, "status": "completed"}
 
 
 class TestChatApi:
@@ -252,6 +264,24 @@ class TestChatApi:
         for route in ("/api/chat/messages", "/api/chat/messages/stream",
                       "/api/chat/intent", "/api/chat/approvals/{approval_id}"):
             assert route in paths, route
+
+    def test_openapi_covers_integrated_p4_routes(self, monkeypatch):
+        client = self._client(monkeypatch)
+        paths = client.get("/openapi.json").json()["paths"]
+        for route in ("/api/v1/memory", "/api/v1/skills", "/api/v1/notes",
+                      "/api/v1/notes/related-work"):
+            assert route in paths, route
+
+    def test_skill_name_rejects_path_segments(self, monkeypatch):
+        client = self._client(monkeypatch)
+        body = client.post("/api/v1/skills", json={
+            "name": "../outside",
+            "description": "unsafe",
+            "steps": [{"tool": "builtin.rag.search"}],
+            "tools": ["builtin.rag.search"],
+        }).json()
+        assert body["ok"] is False
+        assert "仅允许" in body["error"]
 
     def test_clarify_when_unclassifiable(self, monkeypatch):
         client = self._client(monkeypatch)
@@ -296,3 +326,19 @@ class TestChatApi:
             body = "".join(response.iter_text())
         assert "event: intent" in body
         assert "event: done" in body
+
+
+def test_p4_static_surface_exposes_unified_workspaces():
+    root = Path(__file__).resolve().parents[1] / "src/conflux/workbench/static"
+    html = (root / "index.html").read_text(encoding="utf-8")
+    app = (root / "app.js").read_text(encoding="utf-8")
+    for marker in (
+        'id="assistant"', 'id="chatForm"', 'id="noteForm"', 'id="memoryForm"',
+        'data-p3-panel="tools"', 'id="p3ExperimentForm"', 'id="p3CodeForm"',
+    ):
+        assert marker in html, marker
+    for endpoint in (
+        "/api/chat/messages", "/api/chat/approvals", "/api/v1/notes",
+        "/api/v1/memory", "/experiments", "/mentor-report", "/code/query",
+    ):
+        assert endpoint in app, endpoint

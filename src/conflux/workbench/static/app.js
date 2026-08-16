@@ -21,6 +21,8 @@ let p3RefreshTimer = null;
 let p3ConfirmTarget = null;
 let activeP3Tab = 'overview';
 let queryProjectContext = null;
+let activeAssistantTab = 'chat';
+let assistantNotes = [];
 const MODEL_TIERS = ['quick', 'standard', 'deep'];
 const FEATURE_MODELS = [
   { key: 'profile_optimization', prefix: 'profileOptimization' },
@@ -251,6 +253,7 @@ function nav(target, options = {}) {
   if (window.location.hash !== '#' + target) history.replaceState(null, '', '#' + target);
   closeSidebar();
   if (target !== 'projects') closeP3Sse();
+  if (target === 'assistant') loadAssistantData();
   if (options.focus) $('pageTitle').focus({ preventScroll: true });
   window.scrollTo({ top: 0, behavior: 'instant' });
 }
@@ -618,6 +621,7 @@ async function loadProjects(options = {}) {
     const data = await response.json().catch(() => ({}));
     if (!data.ok) throw new Error(data.error || '项目状态加载失败');
     p3ProjectsCache = data.projects || [];
+    populateAssistantProjects();
     if (!p3ProjectsCache.some((item) => item.id === selectedProjectId)) {
       selectedProjectId = p3ProjectsCache[0] ? p3ProjectsCache[0].id : '';
     }
@@ -755,6 +759,7 @@ function selectP3Tab(tabName) {
     panel.classList.toggle('active', active);
     panel.hidden = !active;
   });
+  if (tabName === 'tools') loadP3Tools();
 }
 
 function renderP3Header(data) {
@@ -1396,6 +1401,12 @@ function bindP3Events() {
   $('p3RunRadar').addEventListener('click', () => runP3Radar());
   $('p3IndexDocs').addEventListener('click', () => indexP3KnowledgeDocs());
   $('p3RunAudit').addEventListener('click', () => runP3Audit());
+  $('p3ExperimentForm').addEventListener('submit', registerP3Experiment);
+  $('p3ScanExperiments').addEventListener('click', scanP3Experiments);
+  $('p3LoadMentor').addEventListener('click', loadP3MentorReport);
+  $('p3ConfirmMentor').addEventListener('click', confirmP3MentorReport);
+  $('p3IndexCode').addEventListener('click', indexP3Code);
+  $('p3CodeForm').addEventListener('submit', queryP3Code);
   $('p3SettingsForm').addEventListener('submit', saveP3Settings);
   $('p3SettingsCancel').addEventListener('click', () => $('p3SettingsDialog').close());
   $('p3ConfirmForm').addEventListener('submit', runP3Confirm);
@@ -2221,6 +2232,421 @@ function sendQuickQuery() {
   $('queryText').focus();
 }
 
+function selectAssistantTab(tabName) {
+  const tabs = Array.from(document.querySelectorAll('[data-assistant-tab]'));
+  if (!tabs.some((tab) => tab.dataset.assistantTab === tabName)) tabName = 'chat';
+  activeAssistantTab = tabName;
+  tabs.forEach((tab) => {
+    const active = tab.dataset.assistantTab === tabName;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', String(active));
+  });
+  document.querySelectorAll('[data-assistant-panel]').forEach((panel) => {
+    const active = panel.dataset.assistantPanel === tabName;
+    panel.classList.toggle('active', active);
+    panel.hidden = !active;
+  });
+  if (tabName === 'notes') loadNotes();
+  if (tabName === 'memory') Promise.all([loadMemories(), loadSkills()]);
+  refreshIcons();
+}
+
+function populateAssistantProjects() {
+  const select = $('chatProject');
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = '<option value="">不指定项目</option>' + (p3ProjectsCache || []).map((project) =>
+    '<option value="' + escapeHtml(project.id) + '">' + escapeHtml(project.name || project.id) + '</option>'
+  ).join('');
+  if ((p3ProjectsCache || []).some((project) => project.id === previous)) select.value = previous;
+}
+
+function appendChatMessage(role, text, meta = '') {
+  const messages = $('chatMessages');
+  const row = document.createElement('div');
+  row.className = 'chat-message ' + role;
+  row.innerHTML = '<span class="chat-avatar"><i data-lucide="' + (role === 'user' ? 'user' : 'sparkles') + '" aria-hidden="true"></i></span>' +
+    '<div><strong>' + (role === 'user' ? '你' : 'Conflux') + '</strong><p></p>' +
+    (meta ? '<small>' + escapeHtml(meta) + '</small>' : '') + '</div>';
+  row.querySelector('p').textContent = text;
+  messages.appendChild(row);
+  messages.scrollTop = messages.scrollHeight;
+  refreshIcons();
+}
+
+async function sendChatMessage(event) {
+  event.preventDefault();
+  const message = $('chatMessage').value.trim();
+  if (!message) return;
+  const button = $('sendChat');
+  appendChatMessage('user', message);
+  $('chatMessage').value = '';
+  enterBusy(button, '助手处理中');
+  try {
+    const data = await api('/api/chat/messages', {
+      message,
+      project_id: $('chatProject').value || null,
+      depth: 'standard'
+    });
+    if (data.error) throw new Error(data.error);
+    const meta = data.run_id ? '任务 ' + data.run_id : data.requires_approval ? '等待确认 ' + data.approval_id : '';
+    appendChatMessage('assistant', data.reply || '操作已处理。', meta);
+    await loadApprovals();
+  } catch (error) {
+    appendChatMessage('assistant', '请求失败：' + error.message);
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+async function loadApprovals() {
+  try {
+    const response = await authFetch('/api/chat/approvals', { cache: 'no-store' });
+    const data = await response.json();
+    const approvals = data.pending || [];
+    $('approvalCount').textContent = String(approvals.length);
+    $('assistantApprovalCount').textContent = String(approvals.length);
+    $('approvalCount').className = 'status-pill ' + (approvals.length ? 'warn' : 'neutral');
+    $('approvalList').innerHTML = approvals.map((item) =>
+      '<div class="approval-row" data-approval-id="' + escapeHtml(item.approval_id) + '">' +
+      '<div><strong>' + escapeHtml(item.operation) + '</strong><small>' + escapeHtml(JSON.stringify(item.diff || {})) + '</small></div>' +
+      '<span class="status-pill ' + (item.risk === 'high' ? 'error' : item.risk === 'medium' ? 'warn' : 'neutral') + '">' + escapeHtml(item.risk) + '</span>' +
+      '<div class="approval-actions"><button class="button secondary compact approval-decision" type="button" data-decision="rejected"><i data-lucide="x" aria-hidden="true"></i><span>拒绝</span></button>' +
+      '<button class="button primary compact approval-decision" type="button" data-decision="approved"><i data-lucide="check" aria-hidden="true"></i><span>确认</span></button></div></div>'
+    ).join('');
+    $('approvalEmpty').hidden = approvals.length > 0;
+    document.querySelectorAll('.approval-decision').forEach((button) => button.addEventListener('click', () => decideApproval(button)));
+    refreshIcons();
+  } catch (error) {
+    toast('审批列表加载失败：' + error.message, 'err');
+  }
+}
+
+async function decideApproval(button) {
+  const row = button.closest('.approval-row');
+  enterBusy(button, '处理中');
+  try {
+    const data = await api('/api/chat/approvals/' + encodeURIComponent(row.dataset.approvalId), { decision: button.dataset.decision });
+    if (!data.ok) throw new Error(data.error || '审批失败');
+    toast(button.dataset.decision === 'approved' ? '操作已确认执行' : '操作已拒绝', 'ok');
+    await loadApprovals();
+    if (selectedProjectId) loadP3Tools();
+  } catch (error) {
+    toast('审批处理失败：' + error.message, 'err');
+    leaveBusy(button);
+  }
+}
+
+async function loadNotes() {
+  try {
+    const response = await authFetch('/api/v1/notes?status=active', { cache: 'no-store' });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || '笔记加载失败');
+    assistantNotes = data.notes || [];
+    $('notesSummary').textContent = assistantNotes.length + ' 条 active 笔记';
+    $('notesEmpty').hidden = assistantNotes.length > 0;
+    $('notesList').innerHTML = assistantNotes.map((note) => {
+      const fields = note.fields || {};
+      return '<article class="note-row"><div><strong>' + escapeHtml(note.title || note.note_id) + '</strong><small>' + escapeHtml(note.paper_key || '') + ' · ' + escapeHtml(note.note_id || '') + '</small>' +
+        '<p>' + escapeHtml(fields['结论'] || fields['目标'] || note.note_text || '未填写摘要') + '</p></div>' +
+        '<div class="note-actions"><button class="icon-button subtle note-bibtex" type="button" data-paper-key="' + escapeHtml(note.paper_key || '') + '" aria-label="导出 BibTeX" title="导出 BibTeX"><i data-lucide="quote" aria-hidden="true"></i></button></div></article>';
+    }).join('');
+    $('noteAuditSelect').innerHTML = '<option value="">选择笔记</option>' + assistantNotes.map((note) => '<option value="' + escapeHtml(note.note_id) + '">' + escapeHtml(note.title || note.note_id) + '</option>').join('');
+    document.querySelectorAll('.note-bibtex').forEach((button) => button.addEventListener('click', () => loadBibtex(button.dataset.paperKey)));
+    refreshIcons();
+  } catch (error) {
+    toast('文献笔记加载失败：' + error.message, 'err');
+  }
+}
+
+async function saveNote(event) {
+  event.preventDefault();
+  const button = $('saveNote');
+  enterBusy(button, '保存笔记');
+  const refs = $('notePage').value.trim() || $('noteSegment').value.trim()
+    ? [{ page: $('notePage').value.trim(), segment: $('noteSegment').value.trim() }] : [];
+  try {
+    const data = await api('/api/v1/notes', {
+      paper_key: $('notePaperKey').value.trim(),
+      title: $('noteTitle').value.trim(),
+      note_text: $('noteText').value.trim(),
+      fields: {
+        '目标': $('noteGoal').value.trim(), '方法': $('noteMethod').value.trim(),
+        '结论': $('noteConclusion').value.trim(), '局限': $('noteLimitations').value.trim(),
+        '与我的项目关系': $('noteRelevance').value.trim()
+      },
+      source_refs: refs,
+      status: 'active'
+    });
+    if (!data.ok) throw new Error(data.error || '保存失败');
+    $('noteForm').reset();
+    toast('文献笔记已保存', 'ok');
+    await loadNotes();
+  } catch (error) {
+    toast('笔记保存失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+async function runNoteAudit() {
+  const note = assistantNotes.find((item) => item.note_id === $('noteAuditSelect').value);
+  const source = $('noteAuditSource').value.trim();
+  if (!note || !source) {
+    toast('请选择笔记并填写原文片段', 'warn');
+    return;
+  }
+  const button = $('runNoteAudit');
+  enterBusy(button, '审计中');
+  try {
+    const data = await api('/api/v1/notes/audit', { note, source });
+    $('noteAuditResult').hidden = false;
+    $('noteAuditResult').textContent = data.ok
+      ? '审计通过 · 检查 ' + data.checked + ' 个字段 · 无支撑比例 ' + Math.round(Number(data.unsupported_ratio || 0) * 100) + '%'
+      : '审计未通过 · ' + (data.issues || []).map((item) => item.field + '：' + item.text).join('\n');
+  } catch (error) {
+    toast('笔记审计失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+async function loadBibtex(paperKey) {
+  try {
+    const response = await authFetch('/api/v1/notes/bibtex?paper_key=' + encodeURIComponent(paperKey));
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || 'BibTeX 导出失败');
+    $('relatedWorkOutput').hidden = false;
+    $('relatedWorkOutput').textContent = data.bibtex;
+  } catch (error) {
+    toast('BibTeX 导出失败：' + error.message, 'err');
+  }
+}
+
+async function generateRelatedWork() {
+  const button = $('generateRelatedWork');
+  enterBusy(button, '生成草稿');
+  try {
+    const data = await api('/api/v1/notes/related-work', { note_ids: assistantNotes.map((note) => note.note_id) });
+    if (!data.ok) throw new Error(data.error || (data.problems || []).join('；') || '生成失败');
+    $('relatedWorkOutput').hidden = false;
+    $('relatedWorkOutput').textContent = data.draft;
+  } catch (error) {
+    toast('Related Work 生成失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+async function loadMemories() {
+  try {
+    const response = await authFetch('/api/v1/memory', { cache: 'no-store' });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || '记忆加载失败');
+    const entries = data.entries || [];
+    $('memoryCount').textContent = entries.length + ' / ' + (data.capacity || 500);
+    $('memoryEmpty').hidden = entries.length > 0;
+    $('memoryList').innerHTML = entries.map((entry) =>
+      '<div class="memory-row"><span class="p3-kind-tag">' + escapeHtml(entry.kind) + '</span><div><strong>' + escapeHtml(entry.description) + '</strong><small>' + escapeHtml(entry.status) + (entry.project_id ? ' · ' + entry.project_id : '') + '</small></div>' +
+      (entry.status === 'pending' ? '<div class="memory-actions"><button class="icon-button subtle memory-decision" type="button" data-id="' + escapeHtml(entry.id) + '" data-decision="reject" aria-label="拒绝记忆" title="拒绝"><i data-lucide="x"></i></button><button class="icon-button subtle memory-decision" type="button" data-id="' + escapeHtml(entry.id) + '" data-decision="confirm" aria-label="确认记忆" title="确认"><i data-lucide="check"></i></button></div>' : '') + '</div>'
+    ).join('');
+    document.querySelectorAll('.memory-decision').forEach((button) => button.addEventListener('click', () => decideMemory(button)));
+    refreshIcons();
+  } catch (error) {
+    toast('用户记忆加载失败：' + error.message, 'err');
+  }
+}
+
+async function saveMemory(event) {
+  event.preventDefault();
+  const button = $('saveMemory');
+  enterBusy(button, '保存记忆');
+  try {
+    const data = await api('/api/v1/memory', {
+      kind: $('memoryKind').value,
+      description: $('memoryDescription').value.trim(),
+      content: { text: $('memoryContent').value.trim() },
+      project_id: $('chatProject').value || '',
+      status: 'active'
+    });
+    if (!data.ok) throw new Error(data.error || '保存失败');
+    $('memoryForm').reset();
+    toast('用户记忆已保存', 'ok');
+    await loadMemories();
+  } catch (error) {
+    toast('记忆保存失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+async function decideMemory(button) {
+  const decision = button.dataset.decision;
+  const data = await api('/api/v1/memory/' + encodeURIComponent(button.dataset.id) + '/' + decision, {});
+  if (!data.ok) toast(data.error || '记忆处理失败', 'err');
+  else await loadMemories();
+}
+
+async function loadSkills() {
+  try {
+    const response = await authFetch('/api/v1/skills', { cache: 'no-store' });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || '技能加载失败');
+    const skills = data.skills || [];
+    $('skillsCount').textContent = String(skills.length);
+    $('skillsList').innerHTML = skills.map((skill) =>
+      '<div class="skill-row"><i data-lucide="workflow" aria-hidden="true"></i><div><strong>' + escapeHtml(skill.name) + '</strong><p>' + escapeHtml(skill.description || '') + '</p><small>' + escapeHtml((skill.tools || []).join(' · ')) + '</small></div><span class="status-pill ok">v' + escapeHtml(skill.version || '') + '</span></div>'
+    ).join('');
+    $('skillsProblems').hidden = !(data.problems || []).length;
+    $('skillsProblems').textContent = (data.problems || []).join('\n');
+    refreshIcons();
+  } catch (error) {
+    toast('技能库加载失败：' + error.message, 'err');
+  }
+}
+
+async function loadAssistantData() {
+  populateAssistantProjects();
+  await loadApprovals();
+  if (activeAssistantTab === 'notes') await loadNotes();
+  if (activeAssistantTab === 'memory') await Promise.all([loadMemories(), loadSkills()]);
+}
+
+function parseJsonField(id) {
+  const raw = $(id).value.trim();
+  if (!raw) return {};
+  const parsed = JSON.parse(raw);
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('JSON 必须是对象');
+  return parsed;
+}
+
+function renderP3Experiments(experiments) {
+  $('p3ExperimentsBody').innerHTML = (experiments || []).map((item) =>
+    '<tr><td><strong>' + escapeHtml(item.name || item.id) + '</strong><small class="table-subtext">' + escapeHtml(item.hypothesis || item.id) + '</small></td>' +
+    '<td><span class="status-pill ' + (item.status === 'failed' ? 'error' : item.status === 'done' ? 'ok' : item.status === 'running' ? 'warn' : 'neutral') + '">' + escapeHtml(item.status) + '</span></td>' +
+    '<td><code>' + escapeHtml(JSON.stringify(item.metrics || {})) + '</code></td><td><code>' + escapeHtml(item.commit_hash || '-') + '</code></td><td>' + escapeHtml(fmtDate(item.updated_at)) + '</td></tr>'
+  ).join('');
+  $('p3ExperimentsEmpty').hidden = Boolean((experiments || []).length);
+  $('p3ExperimentsTable').style.display = (experiments || []).length ? '' : 'none';
+}
+
+async function loadP3Tools() {
+  if (!selectedProjectId) return;
+  try {
+    const response = await authFetch('/api/v1/projects/' + encodeURIComponent(selectedProjectId) + '/experiments', { cache: 'no-store' });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || '实验列表加载失败');
+    renderP3Experiments(data.experiments || []);
+  } catch (error) {
+    toast('研究工具加载失败：' + error.message, 'err');
+  }
+}
+
+async function registerP3Experiment(event) {
+  event.preventDefault();
+  if (!selectedProjectId) return;
+  const button = $('p3RegisterExperiment');
+  enterBusy(button, '登记实验');
+  try {
+    const data = await api('/api/v1/projects/' + encodeURIComponent(selectedProjectId) + '/experiments', {
+      name: $('p3ExperimentName').value.trim(),
+      status: $('p3ExperimentStatus').value,
+      commit_hash: $('p3ExperimentCommit').value.trim(),
+      hypothesis: $('p3ExperimentHypothesis').value.trim(),
+      params: parseJsonField('p3ExperimentParams'),
+      metrics: parseJsonField('p3ExperimentMetrics')
+    });
+    if (!data.ok) throw new Error(data.error || '登记失败');
+    $('p3ExperimentForm').reset();
+    toast('实验已登记并进入项目证据链', 'ok');
+    await loadP3Tools();
+  } catch (error) {
+    toast('实验登记失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+async function scanP3Experiments() {
+  if (!selectedProjectId) return;
+  const button = $('p3ScanExperiments');
+  enterBusy(button, '扫描结果');
+  try {
+    const data = await api('/api/v1/projects/' + encodeURIComponent(selectedProjectId) + '/experiments/scan', {});
+    if (!data.ok) throw new Error(data.error || '扫描失败');
+    renderP3Experiments(data.experiments || []);
+    toast('结果文件扫描完成，新增 ' + (data.registered || []).length + ' 条', 'ok');
+  } catch (error) {
+    toast('实验结果扫描失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+async function loadP3MentorReport() {
+  if (!selectedProjectId) return;
+  const button = $('p3LoadMentor');
+  enterBusy(button, '整理周报');
+  try {
+    const response = await authFetch('/api/v1/projects/' + encodeURIComponent(selectedProjectId) + '/mentor-report', { cache: 'no-store' });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || '周报数据加载失败');
+    $('p3MentorOutput').textContent = data.data_block || '当前周期没有可用数据。';
+  } catch (error) {
+    toast('周报数据加载失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+async function confirmP3MentorReport() {
+  if (!selectedProjectId) return;
+  const button = $('p3ConfirmMentor');
+  enterBusy(button, '生成周报');
+  try {
+    const data = await api('/api/v1/projects/' + encodeURIComponent(selectedProjectId) + '/mentor-report/confirm', { report: '' });
+    if (!data.ok) throw new Error(data.error || (data.failures || []).join('；') || '周报导出失败');
+    $('p3MentorOutput').textContent = data.report || '';
+    toast('导师周报已校验并导出', 'ok');
+  } catch (error) {
+    toast('导师周报生成失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+async function indexP3Code() {
+  if (!selectedProjectId) return;
+  const button = $('p3IndexCode');
+  enterBusy(button, '索引代码');
+  try {
+    const data = await api('/api/v1/projects/' + encodeURIComponent(selectedProjectId) + '/code/index', {});
+    if (!data.ok) throw new Error(data.error || '代码索引失败');
+    toast('代码索引已更新：' + (data.indexed || data.symbols || 0) + ' 个条目', 'ok');
+  } catch (error) {
+    toast('代码索引失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+}
+
+async function queryP3Code(event) {
+  event.preventDefault();
+  if (!selectedProjectId) return;
+  const button = $('p3AskCode');
+  enterBusy(button, '查询代码');
+  try {
+    const data = await api('/api/v1/projects/' + encodeURIComponent(selectedProjectId) + '/code/query', { query: $('p3CodeQuestion').value.trim() });
+    if (!data.ok) throw new Error(data.error || '代码查询失败');
+    $('p3CodeOutput').hidden = false;
+    $('p3CodeOutput').textContent = data.answer || ((data.refs || []).join('\n')) || '未找到匹配代码。';
+  } catch (error) {
+    toast('代码查询失败：' + error.message, 'err');
+  } finally {
+    leaveBusy(button);
+  }
+}
+
 function bindEvents() {
   document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => nav(button.dataset.target)));
   document.querySelectorAll('[data-nav-target]').forEach((button) => button.addEventListener('click', () => nav(button.dataset.navTarget)));
@@ -2239,6 +2665,13 @@ function bindEvents() {
   $('sidebarClose').addEventListener('click', closeSidebar);
   $('sidebarBackdrop').addEventListener('click', closeSidebar);
   $('quickQueryBtn').addEventListener('click', sendQuickQuery);
+  document.querySelectorAll('[data-assistant-tab]').forEach((button) => button.addEventListener('click', () => selectAssistantTab(button.dataset.assistantTab)));
+  $('chatForm').addEventListener('submit', sendChatMessage);
+  $('refreshApprovals').addEventListener('click', loadApprovals);
+  $('noteForm').addEventListener('submit', saveNote);
+  $('runNoteAudit').addEventListener('click', runNoteAudit);
+  $('generateRelatedWork').addEventListener('click', generateRelatedWork);
+  $('memoryForm').addEventListener('submit', saveMemory);
   $('paperSource').addEventListener('change', updatePaperSourceFields);
   $('projectRegisterPanel').addEventListener('toggle', () => {
     $('projectRegisterForm').hidden = !$('projectRegisterPanel').open;

@@ -265,6 +265,48 @@ def execute_intent(intent: IntentResult, request: Any) -> ChatMessageResponse:
             payload=payload,
         )
 
+    if intent.action == "code_query":
+        from conflux.workbench.server import query_p3_project_code
+
+        if not project_id:
+            return ChatMessageResponse(
+                reply="请先选择项目，我才能查询该项目的源码。",
+                action="clarify",
+            )
+        payload = query_p3_project_code(project_id, {"query": message})
+        return ChatMessageResponse(
+            reply=str(payload.get("answer") or payload.get("error") or "未找到相关代码。"),
+            action="code_query",
+            payload=payload,
+        )
+
+    if intent.action == "paper_notes":
+        from conflux.paper_notes import generate_related_work, open_notes_repo
+
+        repo, db = open_notes_repo()
+        try:
+            notes = repo.list(status="active")
+        finally:
+            db.close()
+        if not notes:
+            return ChatMessageResponse(
+                reply="当前没有 active 文献笔记。请先在文献笔记页登记并审计笔记。",
+                action="paper_notes",
+                payload={"notes": []},
+            )
+        if "related work" in message.casefold() or "相关工作" in message:
+            draft, problems = generate_related_work(notes)
+            return ChatMessageResponse(
+                reply=draft,
+                action="paper_notes",
+                payload={"note_ids": [note.get("note_id") for note in notes], "problems": problems},
+            )
+        return ChatMessageResponse(
+            reply=f"当前有 {len(notes)} 条 active 文献笔记。",
+            action="paper_notes",
+            payload={"notes": notes},
+        )
+
     return ChatMessageResponse(reply="暂不支持该动作。", action="clarify")
 
 

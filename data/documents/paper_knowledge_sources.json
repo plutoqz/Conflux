@@ -1,0 +1,54 @@
+[
+  {
+    "id": "2305.06453v4",
+    "source_type": "LocalPaper",
+    "title": "Autonomous GIS: the next-generation AI-powered GIS",
+    "locator": "http://arxiv.org/abs/2305.06453v4",
+    "metadata": {
+      "paper_id": "2305.06453v4",
+      "chunk_id": "paper:2305.06453v4#summary",
+      "citation_ref": "LocalPaper:2305.06453v4:paper:2305.06453v4#summary",
+      "pdf_url": "https://arxiv.org/pdf/2305.06453v4",
+      "ingestion_action": "summary_only"
+    }
+  },
+  {
+    "id": "2410.12376v2",
+    "source_type": "LocalPaper",
+    "title": "ShapefileGPT: A Multi-Agent Large Language Model Framework for Automated Shapefile Processing",
+    "locator": "http://arxiv.org/abs/2410.12376v2",
+    "metadata": {
+      "paper_id": "2410.12376v2",
+      "chunk_id": "paper:2410.12376v2#summary",
+      "citation_ref": "LocalPaper:2410.12376v2:paper:2410.12376v2#summary",
+      "pdf_url": "https://arxiv.org/pdf/2410.12376v2",
+      "ingestion_action": "summary_only"
+    }
+  },
+  {
+    "id": "2508.04846v1",
+    "source_type": "LocalPaper",
+    "title": "Fine-Tuning Small Language Models (SLMs) for Autonomous Web-based Geographical Information Systems (AWebGIS)",
+    "locator": "http://arxiv.org/abs/2508.04846v1",
+    "metadata": {
+      "paper_id": "2508.04846v1",
+      "chunk_id": "paper:2508.04846v1#summary",
+      "citation_ref": "LocalPaper:2508.04846v1:paper:2508.04846v1#summary",
+      "pdf_url": "https://arxiv.org/pdf/2508.04846v1",
+      "ingestion_action": "summary_only"
+    }
+  },
+  {
+    "id": "2504.19678v2",
+    "source_type": "LocalPaper",
+    "title": "From LLM Reasoning to Autonomous AI Agents: A Comprehensive Review",
+    "locator": "http://arxiv.org/abs/2504.19678v2",
+    "metadata": {
+      "paper_id": "2504.19678v2",
+      "chunk_id": "paper:2504.19678v2#summary",
+      "citation_ref": "LocalPaper:2504.19678v2:paper:2504.19678v2#summary",
+      "pdf_url": "https://arxiv.org/pdf/2504.19678v2",
+      "ingestion_action": "summary_only"
+    }
+  }
+]

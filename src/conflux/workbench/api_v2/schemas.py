@@ -18,6 +18,8 @@ ChatAction = Literal[
     "memory_query",
     "experiment",
     "mentor_report",
+    "code_query",
+    "paper_notes",
     "clarify",
 ]
 

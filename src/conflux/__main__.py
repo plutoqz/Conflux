@@ -41,6 +41,89 @@ from .trace import (
 )
 
 
+def _note_command(args: argparse.Namespace) -> int:
+    """P4.5 E2 literature notes CLI: add / list / audit / bibtex."""
+    import json as _json
+
+    from conflux.paper_notes import (
+        audit_note_consistency,
+        open_notes_repo,
+        paper_to_bibtex,
+    )
+
+    action = str(getattr(args, "note_action", "") or "")
+    if action in ("add", "list"):
+        repo, db = open_notes_repo()
+        try:
+            if action == "add":
+                try:
+                    fields = _json.loads(getattr(args, "fields", "{}") or "{}")
+                    refs = _json.loads(getattr(args, "refs", "[]") or "[]")
+                except ValueError as exc:
+                    print(f"fields/refs 必须是合法 JSON：{exc}")
+                    return 2
+                entry = repo.add(
+                    paper_key=args.paper_key,
+                    title=args.title,
+                    note_text=getattr(args, "text", "") or "",
+                    fields=fields if isinstance(fields, dict) else {},
+                    source_refs=refs if isinstance(refs, list) else [],
+                )
+                print(f"已登记文献笔记 {entry['note_id']}：{entry['title']}（{entry['status']}）")
+                print(_json.dumps(entry, ensure_ascii=False, indent=2))
+                return 0
+            # list
+            entries = repo.list(status=getattr(args, "status", None) or None)
+            print(f"共 {len(entries)} 条文献笔记")
+            for entry in entries:
+                fields = entry.get("fields") or {}
+                print(f"- [{entry['status']}] {entry['note_id']} {entry.get('title')} "
+                      f"(目标={fields.get('目标', '')[:30]})")
+            return 0
+        finally:
+            db.close()
+    if action == "audit":
+        source = str(getattr(args, "source", "") or "")
+        if getattr(args, "source_file", ""):
+            source = Path(args.source_file).read_text(encoding="utf-8", errors="replace")
+        if not source.strip():
+            print("audit 需要 --source 或 --source-file")
+            return 2
+        repo, db = open_notes_repo()
+        try:
+            notes = repo.by_paper(args.paper_key)
+            if not notes:
+                print(f"暂无 {args.paper_key} 的笔记")
+                return 0
+            for note in notes:
+                result = audit_note_consistency(note, source)
+                print(f"- {note['note_id']} {note.get('title')}: "
+                      f"ok={result['ok']} unsupported={result['unsupported_ratio']:.0%}"
+                      f" checked={result['checked']}")
+                for issue in result.get("issues", [])[:3]:
+                    print(f"    ✗ {issue['field']}: {issue['text'][:60]}")
+        finally:
+            db.close()
+        return 0
+    if action == "bibtex":
+        from conflux.adapters.sqlite_store import PaperStore, SQLiteDatabase
+        from conflux.core.runtime_home import database_path
+
+        db = SQLiteDatabase(database_path()).connect()
+        db.bootstrap_schema()
+        try:
+            paper = PaperStore(db).get(args.paper_key)
+        finally:
+            db.close()
+        if paper is None:
+            print(f"论文不存在：{args.paper_key}")
+            return 2
+        print(paper_to_bibtex(paper))
+        return 0
+    print("未知 note 子命令")
+    return 2
+
+
 def _clean_text(text: str) -> str:
     """Remove invalid Unicode code points that vector stores cannot encode."""
 
@@ -901,6 +984,28 @@ def main() -> None:
     mentor_confirm_parser.add_argument("--project", required=True, help="Project id")
     mentor_confirm_parser.add_argument("--report-file", default="", help="Pre-written report file (skips LLM)")
 
+    # ── P4.5 E2 literature notes (paper notes) ─────────────────
+    note_parser = sub.add_parser("note", help="Literature notes & writing loop (P4.5 E2)")
+    note_sub = note_parser.add_subparsers(dest="note_action")
+
+    note_add_parser = note_sub.add_parser("add", help="Add a structured note for a paper")
+    note_add_parser.add_argument("--paper-key", required=True, help="Paper key (e.g. arxiv:xxxx)")
+    note_add_parser.add_argument("--title", required=True, help="Paper title")
+    note_add_parser.add_argument("--text", default="", help="Note body text")
+    note_add_parser.add_argument("--fields", default="{}", help="JSON fields {目标,方法,结论,局限,与我的项目关系}")
+    note_add_parser.add_argument('--refs', default='[]', help='JSON source refs page/segment pairs')
+
+    note_list_parser = note_sub.add_parser("list", help="List notes (optionally by paper status)")
+    note_list_parser.add_argument("--status", choices=["active", "uncertain", "archived"], default=None)
+
+    note_audit_parser = note_sub.add_parser("audit", help="Run E2.2 consistency audit for a paper's notes")
+    note_audit_parser.add_argument("--paper-key", required=True, help="Paper key")
+    note_audit_parser.add_argument("--source", default="", help="Source text to audit against (or --source-file)")
+    note_audit_parser.add_argument("--source-file", default="", help="Read source text from a file")
+
+    note_bib_parser = note_sub.add_parser("bibtex", help="Export BibTeX for a paper")
+    note_bib_parser.add_argument("--paper-key", required=True, help="Paper key")
+
     # ── legacy research CLI (preserved) ─────────────────────────
     research_parser = sub.add_parser("research", help="Run a research query (default)")
     research_parser.add_argument("query_positional", nargs="?", help="Research question")
@@ -950,6 +1055,8 @@ def main() -> None:
         raise SystemExit(_experiment_command(args))
     elif args.command == "mentor":
         raise SystemExit(_mentor_command(args))
+    elif args.command == "note":
+        raise SystemExit(_note_command(args))
     elif args.command == "research" or (not args.command and (args.query or args.query_opt or args.index)):
         actual_query = getattr(args, "query_positional", None) or args.query or args.query_opt
         if args.index:

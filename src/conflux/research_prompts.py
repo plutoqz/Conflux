@@ -93,10 +93,15 @@ Final immutable Ledger snapshot:
 {snapshot_json}
 
 Use only these verdicts: supports, contradicts, insufficient, uncertain.
+You MUST take a stance on every claim: verdict must never be blank or skipped.
+- If the evidence clearly supports / contradicts / is insufficient, say so directly.
+- Only when you genuinely cannot decide may you answer "uncertain", and then you
+  MUST also provide "likely_verdict" (your best concrete guess, one of the other
+  three) with a low confidence. Never leave the claim without a concrete lean.
 Return JSON:
 {{
   "checks": [
-    {{"claim_id": "...", "claim": "...", "verdict": "supports|contradicts|insufficient|uncertain", "evidence_ids": [], "reason": "...", "confidence": 0.0}}
+    {{"claim_id": "...", "claim": "...", "verdict": "supports|contradicts|insufficient|uncertain", "likely_verdict": "supports|contradicts|insufficient", "evidence_ids": [], "reason": "...", "confidence": 0.0}}
   ]
 }}
 """
@@ -107,6 +112,45 @@ REFEREE_SYSTEM = (
     "rationale for the aggregated result. You cannot change any tallied verdict. "
     "Return valid JSON only."
 )
+
+# P4-B v1.1：arbitration 判断点的评审团成员（deep 档）。输入与单模型仲裁一致
+# （subquestions + 不可变 Ledger 快照），输出 judgments + action_proposals；
+# 聚合后仍走 arbitration_node 的 subquestion_id/source/trigger 白名单校验。
+PANEL_ARBITRATION_MEMBER_SYSTEM = (
+    "You are one independent member of Conflux's evidence arbitration panel. "
+    "Persona: {persona}. "
+    "Read only the immutable Ledger snapshot and the listed subquestions. "
+    "You cannot see other members' outputs and must not discuss with them. "
+    "You may propose a bounded RAG or Web correction, but you cannot create, "
+    "modify, or cite evidence records. Return valid JSON only."
+)
+
+PANEL_ARBITRATION_MEMBER_PROMPT = """As an independent panel member, arbitrate the research subquestions against the evidence snapshot.
+
+Subquestions:
+{subquestions_json}
+
+Immutable Ledger snapshot:
+{snapshot_json}
+
+For each material gap or conflict, propose at most one focused correction action.
+Only use triggers: no_evidence, low_relevance, conflict, critical_claim_uncovered.
+Use only these verdicts: covered, gap, conflict, uncertain.
+You MUST take a stance on every subquestion: verdict must never be blank or skipped.
+- If the evidence clearly covers / reveals a gap / a conflict, say so directly.
+- Only when you genuinely cannot decide may you answer "uncertain", and then you
+  MUST also provide "likely_verdict" (your best concrete guess, one of the other
+  three) with a low confidence. Never leave the subquestion without a concrete lean.
+Return JSON:
+{{
+  "judgments": [
+    {{"subquestion_id": "...", "verdict": "covered|gap|conflict|uncertain", "likely_verdict": "covered|gap|conflict", "reason": "...", "confidence": 0.0}}
+  ],
+  "action_proposals": [
+    {{"subquestion_id": "...", "source": "RAG|Web", "query": "...", "trigger": "..."}}
+  ]
+}}
+"""
 
 CLAIM_GENERATION_SYSTEM = (
     "You are Conflux's structured research claim generator. "

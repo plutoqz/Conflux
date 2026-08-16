@@ -398,8 +398,10 @@ def validate_research_model_profiles() -> list[str]:
             "具体 provider/model 可由用户按需复用"
         )
 
-    # P4-B panel 校验：同一判断点成员必须来自不同 preset（防"同一模型多采样"
-    # 伪多样性）；quick 档强制关闭；arbitration 评审团仅 deep 档挂载。
+    # P4-B panel 校验：同一判断点成员必须来自不同 preset，且解析后的
+    # (provider, model) 必须互异（防"preset 不同但底层同一模型"的伪多样性，
+    # 见 2026-08-14 A/B 教训：verifier/balanced 同指 deepseek-v4-flash-guan）；
+    # quick 档强制关闭；arbitration 评审团仅 deep 档挂载。
     panel_cfg = get("research", "panel", default={}) or {}
     if isinstance(panel_cfg, dict):
         quorum = str(panel_cfg.get("quorum") or "majority")
@@ -427,12 +429,20 @@ def validate_research_model_profiles() -> list[str]:
                 problems.append(
                     f"research.panel.roster.{point} 成员必须来自不同 preset（depth={depth}）：{raw_members}"
                 )
+            resolved_identities: list[str] = []
             for preset in members:
                 cfg = get("models", preset, default={}) or {}
                 if not isinstance(cfg, dict) or not cfg.get("provider") or not cfg.get("model"):
                     problems.append(
                         f"research.panel.roster.{point} 引用的 models.{preset} 缺少 provider/model 配置"
                     )
+                    continue
+                resolved_identities.append(f"{cfg['provider']}|{cfg['model']}")
+            if len(set(resolved_identities)) != len(resolved_identities):
+                problems.append(
+                    f"research.panel.roster.{point} 成员解析后的 (provider, model) 必须互异"
+                    f"（防伪多样性；depth={depth}）：{resolved_identities}"
+                )
         referee = profile.panel_referee
         if not referee:
             problems.append(f"research.panel.referee 未配置（depth={depth}）")

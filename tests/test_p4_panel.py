@@ -82,11 +82,11 @@ class TestPanelConfig:
 
     def test_profile_parses_roster_and_referee(self):
         standard = resolve_research_profile("standard")
-        assert standard.panel_members("verification") == ["verifier", "balanced"]
-        assert standard.panel_referee == "balanced"
+        # v1.1 真异构 roster：verification 强+中 2 成员；referee 最强模型
+        assert standard.panel_members("verification") == ["ds_strong", "mimo"]
+        assert standard.panel_referee == "ds_strong"
         deep = resolve_research_profile("deep")
-        # "planner" 非 preset → 回退为 deep 档 planner 绑定的 preset
-        assert deep.panel_members("arbitration") == ["reasoning", "flash"]
+        assert deep.panel_members("arbitration") == ["ds_strong", "mimo", "qwen_weak"]
 
     def test_default_config_passes_validation(self):
         assert validate_research_model_profiles() == []
@@ -111,6 +111,35 @@ class TestPanelConfig:
         monkeypatch.setattr(rm, "get", patched_get)
         problems = validate_research_model_profiles()
         assert any("必须来自不同 preset" in problem for problem in problems)
+
+    def test_heterogeneous_roster_rejects_same_resolved_model(self, monkeypatch):
+        """v1.1：preset 不同但解析后 (provider, model) 相同 → 伪多样性被拒。"""
+        import conflux.research_modes as rm
+        from conflux import config
+
+        real_get = config.get
+        fake_panel = {
+            "enabled_by_depth": {"quick": False, "standard": True, "deep": True},
+            "roster": {"verification": ["flash", "balanced"]},  # 不同 preset
+            "referee": "balanced",
+            "quorum": "majority",
+        }
+        # flash/balanced 都指向同一模型（历史伪多样性场景）
+        fake_models = {
+            "flash": {"provider": "openai_compatible", "model": "same-model-x"},
+            "balanced": {"provider": "openai_compatible", "model": "same-model-x"},
+        }
+
+        def patched_get(*path, default=None):
+            if path[:2] == ("research", "panel"):
+                return fake_panel
+            if path[:1] == ("models",) and len(path) == 2:
+                return fake_models.get(path[1], default)
+            return real_get(*path, default=default)
+
+        monkeypatch.setattr(rm, "get", patched_get)
+        problems = validate_research_model_profiles()
+        assert any("(provider, model) 必须互异" in problem for problem in problems)
 
     def test_unsupported_quorum_rejected(self, monkeypatch):
         import conflux.research_modes as rm
@@ -253,9 +282,9 @@ class TestRunPanel:
             ),
             input_snapshot=_snapshot(),
         )
-        # 非法 verdict 视为 uncertain 票 → 均分 → 待核验
+        # 非法 verdict 视为弃权票（权重 0）→ 唯一表态者胜出（v1.2 强制表态）
         check = review.result["checks"][0]
-        assert check["verdict"] == "uncertain"
+        assert check["verdict"] == "supports"
         assert {vote["verdict"] for vote in check["panel_votes"]} == {"supports", "uncertain"}
 
     def test_malformed_member_output_is_abstain(self):
@@ -266,9 +295,9 @@ class TestRunPanel:
             ),
             input_snapshot=_snapshot(),
         )
-        # 仅 1 张有效票 → 待核验（安全方向）
+        # 仅 1 张有效票 → 采纳唯一表态（v1.2 强制表态，弃权不阻断结论）
         check = review.result["checks"][0]
-        assert check["verdict"] == "uncertain"
+        assert check["verdict"] == "supports"
 
     def test_members_cannot_see_each_other_outputs(self):
         member_a = _PanelModel(_check("supports", 0.9, reason="SECRET_MEMBER_A"))
@@ -462,3 +491,202 @@ class TestPanelBudget:
         verification = result["_claim_records"][0]["verification_result"]
         assert verification["verdict"] == "supports"  # model_analysis 确定性放行
         assert verification["verifier_version"] == "rules-v1"
+
+
+# ============================================================
+# B3.1 arbitration 判断点（v1.1）
+# ============================================================
+
+class TestArbitrationPanel:
+    def _arb_state(self) -> dict:
+        state = _new_state("arbitration panel test")
+        state["_run_id"] = "r-arb"
+        state["_sub_questions"] = [
+            {"id": "sq-1", "question": "q1", "importance": "high"},
+            {"id": "sq-2", "question": "q2", "importance": "medium"},
+        ]
+        state["_ledger_snapshot"] = {
+            "snapshot_id": "s1",
+            "records": [{"evidence_id": "e1", "claim": "c", "source_identity": "src", "evidence_class": "x"}],
+        }
+        return state
+
+    def _judgments(self, verdict_by_sq: dict, proposals: list | None = None) -> dict:
+        return {
+            "judgments": [
+                {"subquestion_id": sq, "verdict": v, "reason": "r", "confidence": 0.8}
+                for sq, v in verdict_by_sq.items()
+            ],
+            "action_proposals": proposals or [],
+        }
+
+    def test_arbitration_majority_and_proposal_majority(self):
+        from conflux.graph_v2 import arbitration_node
+
+        state = self._arb_state()
+        panel = {
+            "members": [
+                ("ds_strong", _PanelModel(self._judgments({"sq-1": "gap", "sq-2": "covered"},
+                                                          [{"subquestion_id": "sq-1", "source": "RAG", "query": "q?", "trigger": "no_evidence"}]))),
+                ("mimo", _PanelModel(self._judgments({"sq-1": "gap", "sq-2": "uncertain"},
+                                                     [{"subquestion_id": "sq-1", "source": "RAG", "query": "q?", "trigger": "no_evidence"}]))),
+                ("qwen_weak", _PanelModel(self._judgments({"sq-1": "covered", "sq-2": "covered"}, []))),
+            ],
+            "referee": None,
+        }
+        out = arbitration_node(state, None, panel=panel)
+        arb = out["_model_arbitration"]
+        assert arb["status"] == "completed"
+        js = {j["subquestion_id"]: j["verdict"] for j in arb["judgments"]}
+        assert js == {"sq-1": "gap", "sq-2": "covered"}, js  # 2/3 多数
+        # action_proposals 仅采纳 2 名成员共同提出的 sq-1（多数制）
+        assert len(arb["action_proposals"]) == 1
+        assert arb["action_proposals"][0]["subquestion_id"] == "sq-1"
+        assert arb["action_proposals"][0]["members"] == ["ds_strong", "mimo"]
+        assert "panel" in arb
+
+    def test_arbitration_single_member_proposal_not_adopted(self):
+        from conflux.graph_v2 import arbitration_node
+
+        state = self._arb_state()
+        panel = {
+            "members": [
+                ("ds_strong", _PanelModel(self._judgments({"sq-1": "gap"}, [{"subquestion_id": "sq-1", "source": "Web", "query": "w?", "trigger": "no_evidence"}]))),
+                ("mimo", _PanelModel(self._judgments({"sq-1": "covered"}, []))),
+                ("qwen_weak", _PanelModel(self._judgments({"sq-1": "gap"}, []))),
+            ],
+            "referee": None,
+        }
+        out = arbitration_node(state, None, panel=panel)
+        arb = out["_model_arbitration"]
+        js = {j["subquestion_id"]: j["verdict"] for j in arb["judgments"]}
+        assert js == {"sq-1": "gap"}  # 2/3
+        # Web 提案只有 ds_strong 提出（1/3），不采纳，避免噪声消耗检索预算
+        assert arb["action_proposals"] == []
+
+    def test_arbitration_no_panel_regression_single_model(self):
+        from conflux.graph_v2 import arbitration_node
+
+        state = self._arb_state()
+        out = arbitration_node(state, None, panel=None)
+        arb = out["_model_arbitration"]
+        assert arb["status"] == "unavailable"  # 无 model 且无 panel → 空
+
+    def test_arbitration_whitelist_filters_invalid_proposals(self):
+        from conflux.graph_v2 import arbitration_node
+
+        state = self._arb_state()
+        panel = {
+            "members": [
+                ("ds_strong", _PanelModel(self._judgments({"sq-1": "gap"},
+                                                          [{"subquestion_id": "sq-1", "source": "RAG", "query": "q?", "trigger": "no_evidence"},
+                                                           {"subquestion_id": "sq-1", "source": "Bogus", "query": "x", "trigger": "bad"}]))),
+                ("mimo", _PanelModel(self._judgments({"sq-1": "gap"},
+                                                     [{"subquestion_id": "sq-1", "source": "RAG", "query": "q?", "trigger": "no_evidence"}]))),
+            ],
+            "referee": None,
+        }
+        out = arbitration_node(state, None, panel=panel)
+        arb = out["_model_arbitration"]
+        # 白名单校验：Bogus/bad 提案被拒；RAG 提案 2/2 成员 → 采纳
+        assert len(arb["action_proposals"]) == 1
+        assert arb["action_proposals"][0]["source"] == "RAG"
+
+
+class TestJsonTolerance:
+    def test_truncated_json_repaired(self):
+        from conflux.panel import _extract_json
+        # mimo 截断 JSON 场景
+        payload = _extract_json('{"checks": [{"claim_id": "c1", "verdict": "contradicts", "confidence": 1.0')
+        assert payload == {"checks": [{"claim_id": "c1", "verdict": "contradicts", "confidence": 1.0}]}
+
+    def test_markdown_fence_stripped(self):
+        from conflux.panel import _extract_json
+        payload = _extract_json('```json\n{"checks": [{"claim_id": "c1", "verdict": "supports"}]}\n```')
+        assert payload.get("checks")[0]["verdict"] == "supports"
+
+    def test_think_block_stripped_then_repaired(self):
+        from conflux.panel import _extract_json
+        payload = _extract_json('<think>reasoning...</think>\n{"checks": [{"claim_id": "c1", "verdict": "uncertain"')
+        assert payload.get("checks")[0]["verdict"] == "uncertain"
+
+    def test_garbage_returns_empty(self):
+        from conflux.panel import _extract_json
+        assert _extract_json("no json here") == {}
+
+
+class TestWeightedStance:
+    """v1.2 强制表态协议：uncertain 必须带 likely_verdict 才计票（权重减半）。"""
+
+    def _uncertain_check(self, likely: str, confidence: float) -> dict:
+        return {
+            "checks": [{
+                "claim_id": "run-panel:claim:sq-1:01",
+                "claim": "atomic claim",
+                "verdict": "uncertain",
+                "likely_verdict": likely,
+                "confidence": confidence,
+                "evidence_ids": [],
+                "reason": "unsure but leaning",
+            }],
+        }
+
+    def test_uncertain_with_likely_verdict_joins_tally_half_weight(self):
+        # supports 0.8 直接表态 vs uncertain(lean contradicts) 0.9 → 0.45 加权
+        review = run_panel(
+            _members(
+                ("a", _PanelModel(_check("supports", 0.8))),
+                ("b", _PanelModel(self._uncertain_check("contradicts", 0.9))),
+            ),
+            input_snapshot=_snapshot(),
+        )
+        check = review.result["checks"][0]
+        assert check["verdict"] == "supports"  # 0.8 > 0.45
+
+    def test_uncertain_without_likely_verdict_is_abstain(self):
+        # 纯 uncertain（无 likely_verdict）→ 弃权，唯一表态者胜出
+        review = run_panel(
+            _members(
+                ("a", _PanelModel(_check("insufficient", 0.7))),
+                ("b", _PanelModel({"checks": [{
+                    "claim_id": "run-panel:claim:sq-1:01",
+                    "claim": "atomic claim",
+                    "verdict": "uncertain",
+                    "confidence": 0.9,
+                    "evidence_ids": [],
+                }]})),
+            ),
+            input_snapshot=_snapshot(),
+        )
+        check = review.result["checks"][0]
+        assert check["verdict"] == "insufficient"
+
+    def test_likely_verdict_winner_marks_dissent(self):
+        # a: supports 0.6；b: uncertain(lean insufficient) 0.9 → 0.45；c: supports 0.7
+        review = run_panel(
+            _members(
+                ("a", _PanelModel(_check("supports", 0.6))),
+                ("b", _PanelModel(self._uncertain_check("insufficient", 0.9))),
+                ("c", _PanelModel(_check("supports", 0.7))),
+            ),
+            input_snapshot=_snapshot(),
+        )
+        check = review.result["checks"][0]
+        assert check["verdict"] == "supports"  # 1.3 > 0.45
+        dissent = review.result["dissent"]
+        assert len(dissent) == 1
+        assert dissent[0]["member"] == "b"
+        assert dissent[0]["likely_verdict"] == "insufficient"
+
+    def test_weighted_tie_stays_uncertain(self):
+        # supports 0.5 vs uncertain(lean contradicts) 0.9→0.45 不相上下不触发；
+        # 用支持 0.5 vs 0.5 直接平局验证
+        review = run_panel(
+            _members(
+                ("a", _PanelModel(_check("supports", 0.5))),
+                ("b", _PanelModel(_check("contradicts", 0.5))),
+            ),
+            input_snapshot=_snapshot(),
+        )
+        check = review.result["checks"][0]
+        assert check["verdict"] == "uncertain"

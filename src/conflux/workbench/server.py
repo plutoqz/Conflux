@@ -132,6 +132,16 @@ _ACCESS_TOKEN = os.environ.get("CONFLUX_ACCESS_TOKEN", "").strip()
 # Cookie name used for browser-based auth when bound to a non-loopback address.
 _AUTH_COOKIE = "conflux_token"
 
+# FastAPI runs on loopback and is exposed to the browser only through the
+# authenticated workbench origin.
+_V2_BASE_URL = ""
+_V2_PROXY_PREFIXES = (
+    "/api/chat/",
+    "/api/v1/memory",
+    "/api/v1/skills",
+    "/api/v1/notes",
+)
+
 
 def _load_runtime_env() -> None:
     """Load persisted workbench settings only when the server is started."""
@@ -3439,6 +3449,9 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         if not self._authorize():
             self._send_json({"ok": False, "error": "authentication required"}, status=401)
             return
+        if any(parsed.path.startswith(prefix) for prefix in _V2_PROXY_PREFIXES):
+            self._proxy_v2(parsed)
+            return
         if parsed.path == "/api/status":
             self._send_json(build_status())
             return
@@ -3588,6 +3601,9 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
+            if any(parsed.path.startswith(prefix) for prefix in _V2_PROXY_PREFIXES):
+                self._proxy_v2(parsed, payload)
+                return
             if parsed.path.startswith("/api/v1/projects/"):
                 self._route_p3_post(parsed, payload)
                 return
@@ -3687,6 +3703,51 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
+    def _proxy_v2(
+        self,
+        parsed: urllib.parse.ParseResult,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Relay P4 APIs through the authenticated workbench origin."""
+
+        if not _V2_BASE_URL:
+            self._send_json({"ok": False, "error": "P4 API service is unavailable"}, status=503)
+            return
+        target = f"{_V2_BASE_URL}{parsed.path}"
+        if parsed.query:
+            target = f"{target}?{parsed.query}"
+        data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            target,
+            data=data,
+            method="GET" if payload is None else "POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            response = urllib.request.urlopen(request, timeout=310)
+        except urllib.error.HTTPError as exc:
+            response = exc
+        except (OSError, TimeoutError) as exc:
+            self._send_json({"ok": False, "error": f"P4 API request failed: {exc}"}, status=502)
+            return
+        with response:
+            status = int(getattr(response, "status", 502))
+            content_type = str(response.headers.get("Content-Type") or "application/json")
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Security-Policy", CSP_HEADER)
+            self.end_headers()
+            try:
+                while True:
+                    chunk = response.read(4096)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+
     def _route_p3_get(self, parsed: urllib.parse.ParseResult) -> None:
         """GET /api/v1/projects/{id}/... — snapshot-driven reads only."""
         parts = parsed.path[len("/api/v1/projects/"):].strip("/").split("/")
@@ -3744,14 +3805,6 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             result = build_p3_mentor_report(project_id)
             self._send_json(result, status=200 if result.get("ok") else 404)
             return
-        if len(parts) == 3 and parts[1] == "code" and parts[2] == "query":
-            result = query_p3_project_code(project_id, payload)
-            self._send_json(result, status=200 if result.get("ok") else 400)
-            return
-        if len(parts) == 3 and parts[1] == "code" and parts[2] == "index":
-            result = index_p3_project_code(project_id)
-            self._send_json(result, status=200 if result.get("ok") else 400)
-            return
         if len(parts) == 2 and parts[1] == "events":
             self._send_project_sse(project_id)
             return
@@ -3806,6 +3859,14 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             return
         if len(parts) == 3 and parts[1] == "mentor-report" and parts[2] == "confirm":
             result = confirm_p3_mentor_report(project_id, payload)
+            self._send_json(result, status=200 if result.get("ok") else 400)
+            return
+        if len(parts) == 3 and parts[1] == "code" and parts[2] == "query":
+            result = query_p3_project_code(project_id, payload)
+            self._send_json(result, status=200 if result.get("ok") else 400)
+            return
+        if len(parts) == 3 and parts[1] == "code" and parts[2] == "index":
+            result = index_p3_project_code(project_id)
             self._send_json(result, status=200 if result.get("ok") else 400)
             return
         self.send_error(404)
@@ -3953,6 +4014,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
 
 
 def main(argv: list[str] | None = None) -> None:
+    global _V2_BASE_URL
     _load_runtime_env()
     parser = argparse.ArgumentParser(description="Run the Conflux local research workbench.")
     parser.add_argument("--host", default="127.0.0.1")
@@ -4023,10 +4085,13 @@ def main(argv: list[str] | None = None) -> None:
         try:
             from conflux.workbench.api_v2 import serve_api_v2
 
-            v2_port = _available_port(args.host, args.v2_port or port + 1000)
-            serve_api_v2(host=args.host, port=v2_port)
-            print(f"Conflux chat API v2: http://{args.host}:{v2_port} (docs: /docs)", flush=True)
+            v2_host = args.host if args.host in ("127.0.0.1", "localhost", "::1") else "127.0.0.1"
+            v2_port = _available_port(v2_host, args.v2_port or port + 1000)
+            serve_api_v2(host=v2_host, port=v2_port)
+            _V2_BASE_URL = f"http://{v2_host}:{v2_port}"
+            print(f"Conflux chat API v2: {_V2_BASE_URL} (docs: /docs)", flush=True)
         except Exception as exc:  # v2 失败不拖垮老端点
+            _V2_BASE_URL = ""
             print(f"[workbench] chat API v2 failed to start: {exc}", flush=True)
     try:
         server.serve_forever()

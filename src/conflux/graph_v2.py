@@ -756,8 +756,11 @@ def _arbitration_payload(
     state: dict[str, Any],
     model: Any,
     budget_state: BudgetState | None = None,
+    panel: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if model is None or not _model_available(state, minimum=15.0):
+    if not _model_available(state, minimum=15.0):
+        return {}
+    if model is None and not panel:
         return {}
     budget_state = budget_state or _budget_state_for(state)
     subquestions = [
@@ -768,6 +771,34 @@ def _arbitration_payload(
         }
         for item in state.get("_sub_questions") or []
     ]
+    if not subquestions:
+        return {}
+
+    # P4-B v1.1：arbitration 评审团路径（deep 档）。成员并行单轮评审 +
+    # 确定性分歧规则（covered/gap/conflict/uncertain 多数票）+ action_proposals
+    # 多数采纳 + 裁判叙事；quick/standard 不传 panel → 原单 planner 路径。
+    if panel:
+        from .panel import run_panel
+
+        review = run_panel(
+            [(str(label), member) for label, member in (panel.get("members") or [])],
+            input_snapshot={
+                "subquestions": subquestions,
+                "ledger_snapshot": state.get("_ledger_snapshot") or {},
+            },
+            referee=panel.get("referee"),
+            budget_state=budget_state,
+            judgment_point="arbitration",
+        )
+        payload = dict(review.result or {})
+        if payload:
+            payload["judgments"] = payload.pop("checks", [])
+            payload["panel"] = {
+                "members": review.members,
+                "referee": review.referee,
+            }
+        return payload
+
     prompt = ARBITRATION_PROMPT.format(
         subquestions_json=json.dumps(subquestions, ensure_ascii=False),
         snapshot_json=json.dumps(state.get("_ledger_snapshot") or {}, ensure_ascii=False),
@@ -783,9 +814,13 @@ def _arbitration_payload(
     return payload if isinstance(payload, dict) else {}
 
 
-def arbitration_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
+def arbitration_node(
+    state: dict[str, Any],
+    model: Any,
+    panel: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     budget_state = _budget_state_for(state)
-    payload = _arbitration_payload(state, model, budget_state)
+    payload = _arbitration_payload(state, model, budget_state, panel=panel)
     ledger = EvidenceLedger.from_dict(state.get("_evidence_ledger") or {})
     snapshot_id = str((state.get("_ledger_snapshot") or {}).get("snapshot_id") or "")
     subquestion_ids = {
@@ -3813,6 +3848,7 @@ def create_v2_research_graph(
     # P4-B：panel_models = {"verification": {"members": [...], "referee": ...}, ...}；
     # 未启用/quick 档为 None/空 → verification 走原单模型路径。
     verification_panel = (kwargs.get("panel_models") or {}).get("verification")
+    arbitration_panel = (kwargs.get("panel_models") or {}).get("arbitration")
     run_id = kwargs.get("run_id")
     baseline_variant = _normalize_baseline_variant(kwargs.get("baseline_variant"))
     replay_parallelism = kwargs.get("max_parallel_subquestions")
@@ -3862,7 +3898,10 @@ def create_v2_research_graph(
         ),
     )
     graph.add_node("barrier", barrier_node)
-    graph.add_node("arbitration", lambda s: arbitration_node(s, arbitration_model))
+    graph.add_node(
+        "arbitration",
+        lambda s: arbitration_node(s, arbitration_model, panel=arbitration_panel),
+    )
     graph.add_node("correction", lambda s: correction_node(s, rag_tool, web_tool))
     graph.add_node(
         "generate",

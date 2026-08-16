@@ -1,0 +1,72 @@
+[
+  {
+    "case_id": "evidenceledger-limitations-smoke",
+    "subquestion_id": "sq-1",
+    "evidence_id": "3b4390afe7b3:ev-0001",
+    "gold_verdict": "insufficient",
+    "reason": "Contextual provenance evidence does not support a specific EvidenceLedger limitation."
+  },
+  {
+    "case_id": "evidenceledger-limitations-smoke",
+    "subquestion_id": "sq-1",
+    "evidence_id": "3b4390afe7b3:ev-0003",
+    "gold_verdict": "insufficient",
+    "reason": "Related provenance security evidence is not direct support for the target system."
+  },
+  {
+    "case_id": "evidenceledger-limitations-smoke",
+    "subquestion_id": "sq-1",
+    "evidence_id": "3b4390afe7b3:ev-0006",
+    "gold_verdict": "insufficient",
+    "reason": "The item identifies a related ledger system but does not establish the requested limitation."
+  },
+  {
+    "case_id": "evidenceledger-limitations-smoke",
+    "subquestion_id": "sq-2",
+    "evidence_id": "3b4390afe7b3:ev-0005",
+    "gold_verdict": "insufficient",
+    "reason": "General RAG background cannot support a specific EvidenceLedger verification failure claim."
+  },
+  {
+    "case_id": "evidenceledger-limitations-smoke",
+    "subquestion_id": "sq-2",
+    "evidence_id": "3b4390afe7b3:ev-0014",
+    "gold_verdict": "insufficient",
+    "reason": "The evidence is off-domain."
+  },
+  {
+    "case_id": "evidenceledger-limitations-smoke",
+    "subquestion_id": "sq-2",
+    "evidence_id": "3b4390afe7b3:ev-0017",
+    "gold_verdict": "insufficient",
+    "reason": "The evidence is off-domain."
+  },
+  {
+    "case_id": "evidenceledger-limitations-smoke",
+    "subquestion_id": "sq-3",
+    "evidence_id": "3b4390afe7b3:ev-0009",
+    "gold_verdict": "insufficient",
+    "reason": "Implementation documentation does not establish a large-scale performance limit."
+  },
+  {
+    "case_id": "evidenceledger-limitations-smoke",
+    "subquestion_id": "sq-3",
+    "evidence_id": "3b4390afe7b3:ev-0010",
+    "gold_verdict": "insufficient",
+    "reason": "Verification context is not a scalability result."
+  },
+  {
+    "case_id": "evidenceledger-limitations-smoke",
+    "subquestion_id": "sq-3",
+    "evidence_id": "3b4390afe7b3:ev-0013",
+    "gold_verdict": "insufficient",
+    "reason": "Related verification context is not a direct scalability result."
+  },
+  {
+    "case_id": "evidenceledger-limitations-smoke",
+    "subquestion_id": "sq-3",
+    "evidence_id": "3b4390afe7b3:ev-0018",
+    "gold_verdict": "insufficient",
+    "reason": "Related provenance evidence is insufficient for a performance claim."
+  }
+]

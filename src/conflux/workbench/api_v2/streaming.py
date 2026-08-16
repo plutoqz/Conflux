@@ -42,7 +42,12 @@ def _emit(queue: "queue.Queue[tuple[str, Any]]", source: Any, poll: EventSource 
                 for event in events:
                     queue.put(("progress", event))
                     cursor = max(cursor, int(event.get("id") or 0))
-                if events and str(events[-1].get("status") or "") in {"completed", "failed", "cancelled"}:
+                terminal = {
+                    "completed", "completed_with_warnings", "completed_diagnostic",
+                    "failed", "cancelled", "timed_out",
+                }
+                if events and str(events[-1].get("stage") or "") == "job" \
+                        and str(events[-1].get("status") or "") in terminal:
                     break
                 time.sleep(0.25)
     finally:

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from typing import Any, Iterator
 
@@ -41,25 +42,14 @@ def _get_classifier() -> Any:
 
 
 def _reply_tokens(message: str, response: ChatMessageResponse) -> Iterator[str]:
-    """回复 token 源：有模型时走模型流，否则按字符切片（确定性兜底）。"""
+    """Stream the executed action response without invoking a second model."""
 
-    model = _get_classifier()
-    if model is not None:
-        try:
-            for chunk in model.stream([
-                {
-                    "role": "system",
-                    "content": "You are Conflux's chat assistant. Reply concisely in the user's language.",
-                },
-                {"role": "user", "content": message},
-            ]):
-                text = str(getattr(chunk, "content", chunk) or "")
-                if text:
-                    yield text
-            return
-        except Exception:
-            pass
-    yield response.reply
+    del message
+    text = str(response.reply or "")
+    if not text:
+        return
+    for start in range(0, len(text), 24):
+        yield text[start:start + 24]
 
 
 def _chat_response(request: ChatMessageRequest) -> ChatMessageResponse:
@@ -102,7 +92,23 @@ def create_app() -> FastAPI:
 
                 def poll() -> list[dict[str, Any]]:
                     try:
-                        return manager.events(response.run_id or "", after_id=0)
+                        run_id = response.run_id or ""
+                        events = manager.events(run_id, after_id=0)
+                        job = manager.get(run_id) or {}
+                        status = str(job.get("status") or "")
+                        terminal = {
+                            "completed", "completed_with_warnings", "completed_diagnostic",
+                            "failed", "cancelled", "timed_out",
+                        }
+                        if status in terminal:
+                            last_id = max((int(item.get("id") or 0) for item in events), default=0)
+                            events.append({
+                                "id": last_id + 1,
+                                "run_id": run_id,
+                                "stage": "job",
+                                "status": status,
+                            })
+                        return events
                     except Exception:
                         return []
 
@@ -194,6 +200,8 @@ def create_app() -> FastAPI:
         name = str(payload.get("name") or "").strip()
         if not name or not str(payload.get("description") or "").strip():
             return {"ok": False, "error": "name 与 description 必填"}
+        if re.fullmatch(r"[A-Za-z0-9_-]+", name) is None:
+            return {"ok": False, "error": "name 仅允许字母、数字、下划线和连字符"}
         if any(skill.name == name for skill in skills):
             return {"ok": False, "error": f"技能已存在：{name}"}
         skill_path = Path(DEFAULT_SKILLS_DIR) / f"{name}.yaml"
@@ -208,6 +216,92 @@ def create_app() -> FastAPI:
             return {"ok": False, "error": str(exc)}
         _, problems = SkillLibrary().load()
         return {"ok": True, "name": name, "path": str(skill_path), "problems": problems}
+
+    # ── P4.5 E2 文献笔记与写作闭环 ─────────────────────────────
+
+    @app.get("/api/v1/notes")
+    def notes_list(status: str | None = None) -> dict[str, Any]:
+        from conflux.paper_notes import open_notes_repo
+
+        repo, db = open_notes_repo()
+        try:
+            entries = repo.list(status=status)
+            return {"ok": True, "count": len(entries), "notes": entries}
+        finally:
+            db.close()
+
+    @app.post("/api/v1/notes")
+    def notes_add(payload: dict[str, Any]) -> dict[str, Any]:
+        from conflux.paper_notes import NoteCapacityError, open_notes_repo
+
+        repo, db = open_notes_repo()
+        try:
+            entry = repo.add(
+                paper_key=str(payload.get("paper_key") or ""),
+                title=str(payload.get("title") or ""),
+                note_text=str(payload.get("note_text") or ""),
+                fields=dict(payload.get("fields") or {}),
+                source_refs=[dict(item) for item in (payload.get("source_refs") or [])],
+                status=str(payload.get("status") or "active"),
+            )
+            return {"ok": True, "note": entry}
+        except (ValueError, NoteCapacityError) as exc:
+            return {"ok": False, "error": str(exc)}
+        finally:
+            db.close()
+
+    @app.post("/api/v1/notes/audit")
+    def notes_audit(payload: dict[str, Any]) -> dict[str, Any]:
+        """E2.2 一致性审计：笔记字段 vs 原文片段（确定性，零 LLM）。"""
+        from conflux.paper_notes import audit_note_consistency
+
+        note = dict(payload.get("note") or {})
+        source = str(payload.get("source") or "")
+        result = audit_note_consistency(note, source)
+        return {"ok": True, **result}
+
+    @app.get("/api/v1/notes/bibtex")
+    def notes_bibtex(paper_key: str = "") -> dict[str, Any]:
+        """E2.1 BibTeX 导出：从论文元数据确定性生成。"""
+        if not paper_key:
+            return {"ok": False, "error": "paper_key 必填"}
+        from conflux.adapters.sqlite_store import PaperStore, SQLiteDatabase
+        from conflux.core.runtime_home import database_path
+        from conflux.paper_notes import paper_to_bibtex
+
+        db = SQLiteDatabase(database_path()).connect()
+        db.bootstrap_schema()
+        try:
+            paper = PaperStore(db).get(paper_key)
+        finally:
+            db.close()
+        if paper is None:
+            return {"ok": False, "error": f"论文不存在：{paper_key}"}
+        return {"ok": True, "paper_key": paper_key, "bibtex": paper_to_bibtex(paper)}
+
+    @app.post("/api/v1/notes/related-work")
+    def notes_related_work(payload: dict[str, Any]) -> dict[str, Any]:
+        """Generate a traceable draft from selected notes."""
+
+        from conflux.paper_notes import generate_related_work, open_notes_repo
+
+        selected_ids = {str(value) for value in (payload.get("note_ids") or []) if value}
+        repo, db = open_notes_repo()
+        try:
+            notes = repo.list(status="active")
+        finally:
+            db.close()
+        if selected_ids:
+            notes = [note for note in notes if str(note.get("note_id") or "") in selected_ids]
+        if not notes:
+            return {"ok": False, "error": "没有可用于 related work 的 active 笔记"}
+        draft, problems = generate_related_work(notes)
+        return {
+            "ok": not problems,
+            "draft": draft,
+            "problems": problems,
+            "note_ids": [str(note.get("note_id") or "") for note in notes],
+        }
 
     return app
 
