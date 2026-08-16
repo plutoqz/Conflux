@@ -82,7 +82,11 @@ from conflux.workbench.config_store import (
     save_config_field,
     save_workbench_env,
 )
-from conflux.workbench.jobs import get_job_manager
+from conflux.workbench.jobs import (
+    IdempotencyConflict,
+    JobManager,
+    get_job_manager,
+)
 from conflux.workbench.sessions import build_session_index, get_session_detail
 
 
@@ -3657,10 +3661,40 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "query required"}, status=400)
                     return
                 mgr = get_job_manager()
+                idempotency_key = (self.headers.get("Idempotency-Key") or "").strip() or None
                 try:
-                    result = mgr.submit(query, payload)
+                    result = mgr.submit(query, payload, idempotency_key=idempotency_key)
+                except IdempotencyConflict as exc:
+                    self._send_json(
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "idempotency_conflict",
+                                "message": "同一 Idempotency-Key 对应了不同请求。",
+                                "retryable": False,
+                                "action": "生成新的提交键或恢复原任务。",
+                                "details_ref": None,
+                            },
+                        },
+                        status=409,
+                    )
+                    return
                 except RuntimeError as exc:
-                    self._send_json({"ok": False, "error": str(exc)}, status=503)
+                    active_count = mgr.active_count()
+                    self._send_json(
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "queue_capacity_exceeded",
+                                "message": str(exc),
+                                "retryable": True,
+                                "action": "等待队列中有任务完成后再提交。",
+                                "active_count": active_count,
+                            },
+                        },
+                        status=429,
+                        headers={"Retry-After": "30"},
+                    )
                     return
                 self._send_json(result, status=202)
                 return

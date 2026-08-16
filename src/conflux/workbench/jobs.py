@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -41,6 +42,45 @@ class _JobCancelled(RuntimeError):
 
 class _JobTimedOut(RuntimeError):
     pass
+
+
+class IdempotencyConflict(RuntimeError):
+    """Same idempotency key submitted with a different semantic request."""
+
+    def __init__(self, idempotency_key: str) -> None:
+        super().__init__(f"idempotency conflict for key {idempotency_key!r}")
+        self.idempotency_key = idempotency_key
+
+
+def _request_hash(query: str, payload: dict[str, Any]) -> str:
+    """Stable semantic hash of a submit request (secrets excluded)."""
+    semantic = {
+        "query": str(query or "").strip(),
+        "payload": _sanitize_payload(dict(payload)),
+    }
+    return hashlib.sha256(
+        json.dumps(semantic, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _wait_estimate(queue: Any, run_id: str, own_timeout_seconds: float) -> dict[str, int]:
+    """Coarse wait range until run_id starts: 0 to remaining budgets ahead plus own timeout."""
+    now = time.time()
+    ahead_seconds = 0.0
+    for item in queue.list(kind=RESEARCH_JOB_KIND, status="pending", limit=1000):
+        if str(item.get("job_id") or "") == run_id:
+            break
+        payload = item.get("payload") or {}
+        try:
+            started = float(payload.get("started_at") or 0.0)
+            timeout = float(payload.get("timeout_seconds") or 300.0)
+        except (TypeError, ValueError):
+            started, timeout = 0.0, 300.0
+        ahead_seconds += max(0.0, started + timeout - now) if started else timeout
+    return {
+        "min_seconds": 0,
+        "max_seconds": int(round(ahead_seconds + max(0.0, own_timeout_seconds))),
+    }
 
 
 class _EventLog:
@@ -455,8 +495,16 @@ class JobManager:
         db.bootstrap_schema()
         return db
 
-    def submit(self, query: str, payload: dict[str, Any], *, run_id: str | None = None) -> dict[str, Any]:
+    def submit(
+        self,
+        query: str,
+        payload: dict[str, Any],
+        *,
+        run_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
         run_id = run_id or new_run_id()
+        request_hash = _request_hash(query, payload)
         depth = str(payload.get("depth") or "standard")
         try:
             from conflux.research_modes import resolve_research_profile
@@ -494,14 +542,10 @@ class JobManager:
             )
             if active >= self.MAX_JOBS:
                 raise RuntimeError(f"Job limit reached ({self.MAX_JOBS}). Wait for active jobs to finish.")
-            RunStore(db).create_run(
-                run_id=run_id,
-                workspace=str(config.PROJECT_ROOT),
-                status="pending",
-                thread_id=run_id,
-                metadata=_job_metadata(job),
-            )
-            queue.enqueue(
+            # The job row and its RunStore row are created in one transaction: the
+            # idempotency_key UNIQUE constraint is the concurrency gate, so N duplicate
+            # submits race to exactly one job + one run.
+            row = queue.enqueue(
                 RESEARCH_JOB_KIND,
                 {
                     "query": query,
@@ -514,7 +558,37 @@ class JobManager:
                 job_id=run_id,
                 run_id=run_id,
                 max_attempts=2,
+                request_hash=request_hash,
+                idempotency_key=idempotency_key,
+                run={
+                    "run_id": run_id,
+                    "workspace": str(config.PROJECT_ROOT),
+                    "status": "pending",
+                    "thread_id": run_id,
+                    "metadata": _job_metadata(job),
+                },
             )
+            if idempotency_key and str(row.get("job_id") or "") != run_id:
+                # Our insert lost the unique-key race: this is a replay of an earlier
+                # submit. Same semantic hash -> return the original run; different
+                # request -> surface a 409 conflict to the caller.
+                prev_hash = str(row.get("request_hash") or "")
+                if prev_hash and prev_hash != request_hash:
+                    raise IdempotencyConflict(idempotency_key)
+                existing_run_id = str(row.get("run_id") or row.get("job_id") or run_id)
+                return {
+                    "run_id": existing_run_id,
+                    "status": str(row.get("status") or ""),
+                    "queue_position": self.queue_position(existing_run_id),
+                    "active_count": self.active_count(),
+                    "idempotent_replay": True,
+                    "wait_estimate": _wait_estimate(queue, existing_run_id, timeout_seconds),
+                    "events_url": f"/api/query/jobs/{existing_run_id}/events",
+                    "status_url": f"/api/query/jobs/{existing_run_id}",
+                }
+            wait_estimate = _wait_estimate(queue, run_id, timeout_seconds)
+            queue_position = self.queue_position(run_id)
+            active_count = self.active_count()
         finally:
             db.close()
         if secrets:
@@ -524,11 +598,15 @@ class JobManager:
         return {
             "run_id": run_id,
             "status": "pending",
+            "queue_position": queue_position,
+            "active_count": active_count,
+            "wait_estimate": wait_estimate,
             "events_url": f"/api/query/jobs/{run_id}/events",
             "status_url": f"/api/query/jobs/{run_id}",
             "timeout_seconds": job.timeout_seconds,
             "deadline_at": job.deadline_at,
             "commit_reserve_seconds": job.commit_reserve_seconds,
+            "request_hash": request_hash,
         }
 
     def get(self, run_id: str) -> dict[str, Any] | None:
@@ -549,6 +627,42 @@ class JobManager:
         if queued.get("error") and not job.error:
             job.error = str(queued["error"])
         return _public_status(job)
+
+    def get_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        """Return the previously submitted job row for a key (or None)."""
+        db = self._database()
+        try:
+            queue = JobQueue(db, lease_seconds=self._lease_seconds)
+            return queue.get_by_idempotency_key(idempotency_key)
+        finally:
+            db.close()
+
+    def queue_position(self, run_id: str) -> int | None:
+        """0-based position among pending jobs ahead of (or at) run_id."""
+        db = self._database()
+        try:
+            rows = JobQueue(db, lease_seconds=self._lease_seconds).list(
+                kind=RESEARCH_JOB_KIND, status="pending", limit=self.MAX_JOBS + 1
+            )
+        finally:
+            db.close()
+        for idx, item in enumerate(rows):
+            if str(item.get("job_id")) == run_id:
+                return idx
+        return None
+
+    def active_count(self) -> int:
+        db = self._database()
+        try:
+            return sum(
+                1
+                for item in JobQueue(db, lease_seconds=self._lease_seconds).list(
+                    kind=RESEARCH_JOB_KIND, limit=self.MAX_JOBS + 1
+                )
+                if item["status"] in {"pending", "running"}
+            )
+        finally:
+            db.close()
 
     def cancel(self, run_id: str, *, reason: str = "user") -> bool:
         db = self._database()

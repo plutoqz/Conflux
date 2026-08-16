@@ -45,6 +45,7 @@ temp_*.txt
 temp_*.json
 workbench-*.log
 workbench-*.pid
+.pytest_*/
 
 # Ad-hoc smoke/eval scripts (P2.6 and earlier)
 .tmp/

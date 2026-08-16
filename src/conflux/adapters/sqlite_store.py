@@ -398,6 +398,12 @@ SCHEMA_MIGRATIONS = [
             "CREATE INDEX IF NOT EXISTS idx_retrieval_cursors_profile ON retrieval_cursors(profile_id, last_retrieved_at)",
         ],
     ),
+    (
+        "0007_job_idempotency_hash",
+        [
+            "ALTER TABLE jobs ADD COLUMN request_hash TEXT NOT NULL DEFAULT ''",
+        ],
+    ),
 ]
 
 
@@ -527,6 +533,7 @@ class RunStore:
         status: str = "running",
         thread_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        commit: bool = True,
     ) -> dict[str, Any]:
         run_id = run_id or uuid.uuid4().hex[:12]
         now = time.time()
@@ -537,7 +544,8 @@ class RunStore:
             """,
             (run_id, workspace, status, thread_id, _json_dumps(metadata or {}), now, now),
         )
-        self.db.connection.commit()
+        if commit:
+            self.db.connection.commit()
         return self.get(run_id) or {}
 
     def update_status(self, run_id: str, status: str) -> bool:
@@ -1316,21 +1324,31 @@ class JobQueue:
         *,
         job_id: str | None = None,
         idempotency_key: str | None = None,
+        request_hash: str = "",
         run_id: str = "",
         priority: int = 0,
         scheduled_at: float | None = None,
         max_attempts: int = 3,
         commit: bool = True,
+        run: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Insert a job row, optionally creating its RunStore row in the same transaction.
+
+        The 'run' mapping carries RunStore.create_run kwargs
+        (run_id/workspace/status/thread_id/metadata). It is only written when this call
+        actually inserted the job row; on an idempotency-key conflict the pre-existing
+        job wins and no run row is created, which keeps "one user action -> one job ->
+        one run" atomic under concurrency.
+        """
         now = time.time()
         job_id = job_id or uuid.uuid4().hex[:16]
         scheduled_at = scheduled_at if scheduled_at is not None else now
-        self.db.connection.execute(
+        cursor = self.db.connection.execute(
             """
             INSERT INTO jobs (
-                job_id, kind, payload_json, idempotency_key, run_id, status,
+                job_id, kind, payload_json, idempotency_key, request_hash, run_id, status,
                 priority, scheduled_at, attempts, max_attempts, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, 0, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, 0, ?, ?, ?)
             ON CONFLICT(idempotency_key) DO NOTHING
             """,
             (
@@ -1338,6 +1356,7 @@ class JobQueue:
                 kind,
                 _json_dumps(payload or {}),
                 idempotency_key,
+                request_hash,
                 run_id,
                 priority,
                 scheduled_at,
@@ -1346,6 +1365,9 @@ class JobQueue:
                 now,
             ),
         )
+        inserted = cursor.rowcount > 0
+        if inserted and run is not None:
+            RunStore(self.db).create_run(commit=False, **run)
         if commit:
             self.db.connection.commit()
         if idempotency_key:
@@ -1537,6 +1559,27 @@ class JobQueue:
             "SELECT * FROM jobs WHERE job_id = ?", (job_id,)
         ).fetchone()
         return _job_row(row) if row is not None else None
+
+    def get_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        row = self.db.connection.execute(
+            "SELECT * FROM jobs WHERE idempotency_key = ?", (idempotency_key,)
+        ).fetchone()
+        return _job_row(row) if row is not None else None
+
+    def queue_position(self, job_id: str, *, kind: str | None = None) -> int | None:
+        """0-based position of a pending job among pending jobs (None if not pending)."""
+        pending = self.list(kind=kind, status="pending", limit=10000)
+        for index, item in enumerate(pending):
+            if str(item.get("job_id")) == job_id:
+                return index
+        return None
+
+    def active_count(self, *, kind: str | None = None) -> int:
+        return sum(
+            1
+            for item in self.list(kind=kind, limit=10000)
+            if item["status"] in {"pending", "running"}
+        )
 
     def list(
         self,

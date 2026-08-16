@@ -11,6 +11,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
+
 from conflux import config
 from conflux.adapters.sqlite_store import (
     CheckpointStore,
@@ -429,3 +431,113 @@ def test_query_job_path_has_no_global_execution_patch() -> None:
     assert "_EXECUTION_LOCK" not in source
     assert "_temporary_env" not in source
     assert "_run_phase2_graph =" not in source
+
+
+# --- P1.2: submit idempotency + queue backpressure ---
+
+
+def test_submit_idempotency_same_key_returns_same_run_without_duplicate(tmp_path: Path) -> None:
+    manager = JobManager(db_path=tmp_path / "conflux.db", start_worker=False)
+    first = manager.submit("idempotent query", {"depth": "quick"}, idempotency_key="key-1")
+    second = manager.submit("idempotent query", {"depth": "quick"}, idempotency_key="key-1")
+
+    assert second["run_id"] == first["run_id"]
+    assert second["status"] == first["status"]
+    assert second.get("idempotent_replay") is True
+
+    db = SQLiteDatabase(tmp_path / "conflux.db").connect()
+    try:
+        jobs = JobQueue(db).list(kind=RESEARCH_JOB_KIND)
+        assert len(jobs) == 1
+        assert jobs[0]["run_id"] == first["run_id"]
+        runs = RunStore(db).list()
+        assert len(runs) == 1
+    finally:
+        db.close()
+
+
+def test_submit_idempotency_same_key_different_request_conflicts(tmp_path: Path) -> None:
+    from conflux.workbench.jobs import IdempotencyConflict
+
+    manager = JobManager(db_path=tmp_path / "conflux.db", start_worker=False)
+    manager.submit("query A", {"depth": "quick"}, idempotency_key="key-conflict")
+    with pytest.raises(IdempotencyConflict):
+        manager.submit("query B", {"depth": "quick"}, idempotency_key="key-conflict")
+
+
+def test_submit_without_key_creates_distinct_runs(tmp_path: Path) -> None:
+    manager = JobManager(db_path=tmp_path / "conflux.db", start_worker=False)
+    first = manager.submit("no key", {"depth": "quick"})
+    second = manager.submit("no key", {"depth": "quick"})
+    assert first["run_id"] != second["run_id"]
+
+    db = SQLiteDatabase(tmp_path / "conflux.db").connect()
+    try:
+        assert len(JobQueue(db).list(kind=RESEARCH_JOB_KIND)) == 2
+    finally:
+        db.close()
+
+
+def test_submit_queue_position_and_active_count(tmp_path: Path) -> None:
+    manager = JobManager(db_path=tmp_path / "conflux.db", start_worker=False)
+    r1 = manager.submit("first", {"depth": "quick"})
+    r2 = manager.submit("second", {"depth": "quick"})
+    # active_count includes the job being submitted itself.
+    assert r1["active_count"] == 1
+    assert r2["active_count"] == 2
+    assert r1["queue_position"] == 0
+    assert r2["queue_position"] == 1
+
+    mgr2 = JobManager(db_path=tmp_path / "conflux.db", start_worker=False)
+    r3 = mgr2.submit("third", {"depth": "quick"})
+    assert r3["queue_position"] == 2
+    assert r3["active_count"] == 3
+
+
+def test_submit_backpressure_at_job_limit(tmp_path: Path) -> None:
+    manager = JobManager(db_path=tmp_path / "conflux.db", start_worker=False)
+    manager.MAX_JOBS = 2
+    manager.submit("one", {"depth": "quick"})
+    manager.submit("two", {"depth": "quick"})
+    with pytest.raises(RuntimeError, match="Job limit reached"):
+        manager.submit("three", {"depth": "quick"})
+
+
+def test_submit_idempotency_concurrent_duplicates_produce_single_run(tmp_path: Path) -> None:
+    manager = JobManager(db_path=tmp_path / "conflux.db", start_worker=False)
+    barrier = threading.Barrier(20)
+    run_ids: list[str] = []
+    errors: list[str] = []
+    lock = threading.Lock()
+
+    def submit_duplicate() -> None:
+        barrier.wait()
+        try:
+            result = manager.submit(
+                "concurrent duplicate", {"depth": "quick"}, idempotency_key="key-concurrent"
+            )
+            with lock:
+                run_ids.append(result["run_id"])
+        except Exception as exc:  # pragma: no cover - failure diagnostics only
+            with lock:
+                errors.append(type(exc).__name__)
+
+    threads = [threading.Thread(target=submit_duplicate) for _ in range(20)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert len(run_ids) == 20
+    assert len(set(run_ids)) == 1
+
+    db = SQLiteDatabase(tmp_path / "conflux.db").connect()
+    try:
+        jobs = JobQueue(db).list(kind=RESEARCH_JOB_KIND)
+        assert len(jobs) == 1
+        assert jobs[0]["run_id"] == run_ids[0]
+        assert len(RunStore(db).list()) == 1
+    finally:
+        db.close()
+

@@ -1675,3 +1675,105 @@ def test_frontend_exposes_three_model_tiers_markdown_result_and_ingestion_audit(
     assert 'id="paperIngestionAudit"' in html
     assert "tier_models: allTierModelsPayload()" in app
     assert "'/api/markdown?path=' + encodeURIComponent(reportPath)" in app
+
+
+def _post_query_jobs_handler(monkeypatch, manager, payload, headers=None):
+    """Drive do_POST for /api/query/jobs against a temp-db JobManager."""
+    from http.server import BaseHTTPRequestHandler
+    from conflux.workbench import server as server_mod
+
+    monkeypatch.setattr(server_mod, "_ACCESS_TOKEN", "")
+    monkeypatch.setattr(server_mod, "get_job_manager", lambda: manager)
+    monkeypatch.setattr(BaseHTTPRequestHandler, "__init__", lambda s, *a, **kw: None)
+    handler = server_mod.WorkbenchHandler()
+    handler.client_address = ("127.0.0.1", 9999)
+    handler.headers = dict(headers or {})
+    handler.path = "/api/query/jobs"
+    monkeypatch.setattr(handler, "_read_json", lambda: payload)
+    sent = {}
+
+    def fake_send_json(data, status=200, headers=None):
+        sent["payload"] = data
+        sent["status"] = status
+        sent["headers"] = dict(headers or {})
+
+    monkeypatch.setattr(handler, "_send_json", fake_send_json)
+    handler.do_POST()
+    return sent
+
+
+def test_post_query_jobs_idempotency_key_replays_same_run(tmp_path, monkeypatch):
+    from conflux.adapters.sqlite_store import JobQueue, RunStore, SQLiteDatabase
+    from conflux.workbench.jobs import JobManager
+
+    manager = JobManager(db_path=tmp_path / "conflux.db", start_worker=False)
+    payload = {"query": "重复提交测试", "depth": "quick"}
+
+    first = _post_query_jobs_handler(
+        monkeypatch, manager, payload, {"Idempotency-Key": "wb-key-1"}
+    )
+    assert first["status"] == 202
+    assert first["payload"]["status"] == "pending"
+    run_id = first["payload"]["run_id"]
+
+    second = _post_query_jobs_handler(
+        monkeypatch, manager, payload, {"Idempotency-Key": "wb-key-1"}
+    )
+    assert second["status"] == 202
+    assert second["payload"]["run_id"] == run_id
+    assert second["payload"].get("idempotent_replay") is True
+
+    db = SQLiteDatabase(tmp_path / "conflux.db").connect()
+    try:
+        jobs = JobQueue(db).list(kind="research_query")
+        assert len(jobs) == 1
+        assert jobs[0]["run_id"] == run_id
+        assert len(RunStore(db).list()) == 1
+    finally:
+        db.close()
+
+
+def test_post_query_jobs_same_key_different_request_conflicts(tmp_path, monkeypatch):
+    from conflux.workbench.jobs import JobManager
+
+    manager = JobManager(db_path=tmp_path / "conflux.db", start_worker=False)
+
+    first = _post_query_jobs_handler(
+        monkeypatch,
+        manager,
+        {"query": "问题A", "depth": "quick"},
+        {"Idempotency-Key": "wb-key-1"},
+    )
+    assert first["status"] == 202
+
+    second = _post_query_jobs_handler(
+        monkeypatch,
+        manager,
+        {"query": "问题B", "depth": "quick"},
+        {"Idempotency-Key": "wb-key-1"},
+    )
+    assert second["status"] == 409
+    assert second["payload"]["error"]["code"] == "idempotency_conflict"
+    assert second["payload"]["error"]["retryable"] is False
+
+
+def test_post_query_jobs_queue_backpressure_returns_429_with_retry_after(tmp_path, monkeypatch):
+    from conflux.workbench.jobs import JobManager
+
+    manager = JobManager(db_path=tmp_path / "conflux.db", start_worker=False)
+    manager.MAX_JOBS = 2
+
+    for index in range(2):
+        result = _post_query_jobs_handler(
+            monkeypatch, manager, {"query": f"任务{index}", "depth": "quick"}
+        )
+        assert result["status"] == 202
+
+    third = _post_query_jobs_handler(
+        monkeypatch, manager, {"query": "任务3", "depth": "quick"}
+    )
+    assert third["status"] == 429
+    assert third["payload"]["error"]["code"] == "queue_capacity_exceeded"
+    assert third["payload"]["error"]["retryable"] is True
+    assert third["headers"]["Retry-After"] == "30"
+

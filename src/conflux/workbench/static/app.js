@@ -1926,6 +1926,18 @@ async function requestQueryCancellation(runId, reason = 'user') {
   return data;
 }
 
+function submitIdempotencyKey(bodyText) {
+  // Stable key for one user action: an identical retry (e.g. after a lost response)
+  // reuses the same run via server-side replay instead of creating a duplicate.
+  let h1 = 5381, h2 = 52711;
+  for (let i = 0; i < bodyText.length; i++) {
+    const c = bodyText.charCodeAt(i);
+    h1 = ((h1 * 33) ^ c) >>> 0;
+    h2 = ((h2 * 31) ^ c) >>> 0;
+  }
+  return 'wb-' + h1.toString(16) + h2.toString(16);
+}
+
 async function runQuery() {
   const button = $('runQuery');
   const query = $('queryText').value.trim();
@@ -1956,23 +1968,40 @@ async function runQuery() {
   let runTimeoutSeconds = 300;
   const projectContext = queryProjectContext;
   try {
+    const bodyText = JSON.stringify(Object.assign(modelPayload(queryDepth), {
+      query,
+      output_dir: $('queryOut').value,
+      embedding_base_url: $('embeddingBaseUrl').value,
+      embedding_api_key: $('embeddingApiKey').value,
+      embedding_model: $('embeddingModel').value,
+      depth: queryDepth,
+      project_id: projectContext ? (projectContext.project_id || '') : '',
+      work_item_id: projectContext ? (projectContext.work_item_id || '') : ''
+    }));
     const submitRes = await authFetch('/api/query/jobs', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(Object.assign(modelPayload(queryDepth), {
-        query,
-        output_dir: $('queryOut').value,
-        embedding_base_url: $('embeddingBaseUrl').value,
-        embedding_api_key: $('embeddingApiKey').value,
-        embedding_model: $('embeddingModel').value,
-        depth: queryDepth,
-        project_id: projectContext ? (projectContext.project_id || '') : '',
-        work_item_id: projectContext ? (projectContext.work_item_id || '') : ''
-      }))
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': submitIdempotencyKey(bodyText)
+      },
+      body: bodyText
     });
-    const submitData = await submitRes.json();
+    const submitData = await submitRes.json().catch(() => ({}));
     if (!submitRes.ok) {
-      throw new Error(submitData.error || '提交失败（HTTP ' + submitRes.status + '）');
+      const err = submitData.error;
+      let message;
+      if (err && typeof err === 'object') {
+        message = err.message || '提交失败';
+        if (err.action) message += '。' + err.action;
+        if (err.code) message += '（' + err.code + '）';
+      } else {
+        message = err || ('提交失败（HTTP ' + submitRes.status + '）');
+      }
+      if (submitRes.status === 429) {
+        const retryAfter = submitRes.headers.get('Retry-After');
+        if (retryAfter) message += '。建议 ' + retryAfter + ' 秒后重试';
+      }
+      throw new Error(message);
     }
     runId = submitData.run_id;
     runTimeoutSeconds = Math.max(1, Number(submitData.timeout_seconds || 300));
