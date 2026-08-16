@@ -1150,7 +1150,7 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 - 当前目标：P1.4 所有终态结构化诊断——`conflux.research_failure.v1` 覆盖 lease 超限 / Worker 初始化失败 / 凭证恢复失败 / 配置与模型构建失败 / 用户取消 / 系统 deadline / Artifact final commit 失败；终态与诊断引用同一事务可见。
 - 当前阶段：P1 `in_progress`（P1.1-P1.4 全部 `completed` → 下一验收点 P1 阶段退出：§6.8 故障注入矩阵 + §6.9 最小验证集 + 全量离线）。
 - 状态：completed
-- 源码版本：`9de97fd`（main；P1.4 改动随本轮提交，见 git log）
+- 源码版本：`9ade69d`（main；P1.4 改动已提交并推送 origin/main，见 git log）
 - 允许修改范围：P1 §6.2 列表（jobs.py / sqlite_store.py / server.py / 三个测试文件）+ 本文件状态与检查点部分。
 - 本轮非目标：不修改研究 Prompt/检索/报告；不启动真实模型调用；不开始 P2/ASGI 迁移。
 
