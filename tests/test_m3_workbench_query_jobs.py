@@ -691,4 +691,388 @@ def test_restart_detects_frozen_config_drift_and_fails_closed(
     assert status["has_report"] is False
     assert "frozen_config_mismatch" in status["error"]
     assert "credential_unavailable_after_restart" not in status["error"]
+# --- P1.4: 所有终态结构化诊断（conflux.research_failure.v1 扩展） ---
+
+
+def test_lease_overrun_persists_failure_diagnostic_and_terminal(tmp_path: Path) -> None:
+    db_path = tmp_path / "conflux.db"
+    submitter = JobManager(db_path=db_path, start_worker=False)
+    run_id = submitter.submit(
+        "lease overrun probe",
+        {"depth": "quick", "output_dir": str(tmp_path / "reports")},
+    )["run_id"]
+
+    # 两次死 worker claim 耗尽 max_attempts(2) 后租约过期 → 终态 lease 超限。
+    db = SQLiteDatabase(db_path).connect()
+    try:
+        queue = JobQueue(db, lease_seconds=0.01)
+        assert queue.claim("dead-worker-1", kind=RESEARCH_JOB_KIND) is not None
+        time.sleep(0.03)
+        assert queue.claim("dead-worker-2", kind=RESEARCH_JOB_KIND) is not None
+        time.sleep(0.03)
+    finally:
+        db.close()
+
+    worker = JobManager(db_path=db_path, poll_interval=0.02)
+    status = _wait_for_status(worker, run_id, {"failed"})
+    worker.close()
+
+    assert "lease" in status["error"]
+    diagnostic = json.loads(
+        Path(status["artifacts"]["diagnostic_json_path"]).read_text(encoding="utf-8")
+    )
+    assert diagnostic["schema_version"] == "conflux.research_failure.v1"
+    assert diagnostic["failure_code"] == "lease_overrun"
+    assert diagnostic["failure_stage"] == "lease"
+    assert diagnostic["run_id"] == run_id
+    assert diagnostic["query"] == "lease overrun probe"
+    assert len(diagnostic["code_revision"]) == 40
+    assert diagnostic["input_config_hash"]
+    assert diagnostic["preserved_artifacts"] == {}
+
+    db = SQLiteDatabase(db_path).connect()
+    try:
+        queued = JobQueue(db).get(run_id)
+        run = RunStore(db).get(run_id)
+        events = EventStore(db).list(run_id=run_id)
+    finally:
+        db.close()
+    assert queued["status"] == "failed"
+    assert run["status"] == "failed"
+    assert any(e["stage"] == "lease_overrun" and e["status"] == "failed" for e in events)
+    # 终态与诊断引用同一 RunStore 行可见：status 与 artifacts 诊断引用同时落地。
+    metadata = dict(run.get("metadata") or {})
+    assert metadata["public_status"] == "failed"
+    assert metadata["artifacts"]["diagnostic_json_path"]
+
+
+def test_user_cancel_persists_structured_diagnostic(tmp_path: Path, monkeypatch) -> None:
+    from conflux import __main__ as cli
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def cancellable_query(query: str, **kwargs):
+        entered.set()
+        assert release.wait(2.0)
+        kwargs["should_stop"]()
+        return {"_delivery_status": "diagnostic_only", "_run_summary": {"mode": "answer_first"}}
+
+    monkeypatch.setattr(cli, "query_command", cancellable_query)
+    output_dir = tmp_path / "reports"
+    manager = JobManager(db_path=tmp_path / "conflux.db", poll_interval=0.02)
+    run_id = manager.submit(
+        "cancel diagnostic", {"depth": "quick", "output_dir": str(output_dir)}
+    )["run_id"]
+    assert entered.wait(2.0)
+    assert manager.cancel(run_id) is True
+    release.set()
+    status = _wait_for_status(manager, run_id, {"cancelled"})
+    manager.close()
+
+    assert status["status"] == "cancelled"
+    assert status["cancel_reason"] == "user"
+    # 取消终态立即生效；结构化诊断由 worker 在同一终态事务内补齐 —— 轮询等待。
+    diagnostic_path = ""
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        status = manager.get(run_id)
+        diagnostic_path = str((status or {}).get("artifacts", {}).get("diagnostic_json_path") or "")
+        if diagnostic_path:
+            break
+        time.sleep(0.02)
+    assert diagnostic_path, "取消终态必须补齐结构化诊断引用"
+    diagnostic = json.loads(Path(diagnostic_path).read_text(encoding="utf-8"))
+    assert diagnostic["failure_code"] == "user_cancelled"
+    assert diagnostic["failure_stage"] == "user_cancel"
+    assert diagnostic["status"] == "cancelled"
+    assert diagnostic["recovery"]["retryable"] is False
+    assert diagnostic["run_id"] == run_id
+    db = SQLiteDatabase(tmp_path / "conflux.db").connect()
+    try:
+        events = EventStore(db).list(run_id=run_id)
+    finally:
+        db.close()
+    assert any(e["stage"] == "user_cancel" and e["status"] == "cancelled" for e in events)
+
+
+def test_system_deadline_persists_structured_diagnostic(tmp_path: Path, monkeypatch) -> None:
+    from conflux import __main__ as cli
+    from conflux.workbench.jobs import _JobTimedOut
+
+    def deadline_query(*_args, **_kwargs):
+        raise _JobTimedOut("研究任务超过 180 秒档位时限")
+
+    monkeypatch.setattr(cli, "query_command", deadline_query)
+    output_dir = tmp_path / "reports"
+    manager = JobManager(db_path=tmp_path / "conflux.db", poll_interval=0.02)
+    run_id = manager.submit(
+        "deadline probe", {"depth": "quick", "output_dir": str(output_dir)}
+    )["run_id"]
+    status = _wait_for_status(manager, run_id, {"timed_out", "timed_out_with_report"})
+    manager.close()
+
+    assert status["status"].startswith("timed_out")
+    diagnostic = json.loads(
+        Path(status["artifacts"]["diagnostic_json_path"]).read_text(encoding="utf-8")
+    )
+    assert diagnostic["failure_code"] == "system_deadline"
+    assert diagnostic["failure_stage"] == "system_deadline"
+    assert diagnostic["status"] == "timed_out"
+    assert diagnostic["recovery"]["retryable"] is True
+    db = SQLiteDatabase(tmp_path / "conflux.db").connect()
+    try:
+        events = EventStore(db).list(run_id=run_id)
+    finally:
+        db.close()
+    assert any(e["stage"] == "system_deadline" for e in events)
+
+
+def test_config_build_failure_persists_structured_diagnostic(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from conflux import __main__ as cli
+
+    def config_failure(*_args, **_kwargs):
+        raise SystemExit(2)
+
+    monkeypatch.setattr(cli, "query_command", config_failure)
+    output_dir = tmp_path / "reports"
+    manager = JobManager(db_path=tmp_path / "conflux.db", poll_interval=0.02)
+    run_id = manager.submit(
+        "config probe", {"depth": "quick", "output_dir": str(output_dir)}
+    )["run_id"]
+    status = _wait_for_status(manager, run_id, {"failed"})
+    manager.close()
+
+    assert status["status"] == "failed"
+    diagnostic = json.loads(
+        Path(status["artifacts"]["diagnostic_json_path"]).read_text(encoding="utf-8")
+    )
+    assert diagnostic["failure_code"] == "config_build_failure"
+    assert diagnostic["failure_stage"] == "config_build"
+    assert diagnostic["recovery"]["retryable"] is False
+    db = SQLiteDatabase(tmp_path / "conflux.db").connect()
+    try:
+        events = EventStore(db).list(run_id=run_id)
+    finally:
+        db.close()
+    assert any(e["stage"] == "config_build" and e["status"] == "failed" for e in events)
+
+
+def test_model_build_failure_persists_structured_diagnostic(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from conflux import __main__ as cli
+
+    def model_failure(*_args, **_kwargs):
+        raise ValueError("openai_compatible 模型构建失败：无法解析 base_url")
+
+    monkeypatch.setattr(cli, "query_command", model_failure)
+    output_dir = tmp_path / "reports"
+    manager = JobManager(db_path=tmp_path / "conflux.db", poll_interval=0.02)
+    run_id = manager.submit(
+        "model probe", {"depth": "quick", "output_dir": str(output_dir)}
+    )["run_id"]
+    status = _wait_for_status(manager, run_id, {"failed"})
+    manager.close()
+
+    assert status["status"] == "failed"
+    diagnostic = json.loads(
+        Path(status["artifacts"]["diagnostic_json_path"]).read_text(encoding="utf-8")
+    )
+    assert diagnostic["failure_code"] == "model_build_failure"
+    assert diagnostic["failure_stage"] == "model_build"
+    assert diagnostic["error_type"] == "ValueError"
+    assert diagnostic["recovery"]["retryable"] is False
+
+
+def test_final_commit_failure_never_publishes_completed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from conflux import __main__ as cli
+    import conflux.report as report_module
+
+    def almost_done_query(query: str, **kwargs):
+        state = {
+            "query": query,
+            "_pipeline_stage": "completed",
+            "_run_status": "completed",
+            "_delivery_status": "report_ready",
+            "_run_summary": {"mode": "answer_first"},
+            "_source_statuses": {},
+            "_audit_metrics": {},
+            "final_answer": "draft answer content",
+        }
+        kwargs["should_stop"]()
+        kwargs["on_graph_state"](state, [])
+        kwargs["should_stop"]()
+        return state
+
+    def broken_write(*_args, **_kwargs):
+        raise OSError("disk full during final artifact commit")
+
+    monkeypatch.setattr(cli, "query_command", almost_done_query)
+    monkeypatch.setattr(report_module, "write_staged_markdown_report", broken_write)
+    output_dir = tmp_path / "reports"
+    manager = JobManager(db_path=tmp_path / "conflux.db", poll_interval=0.02)
+    run_id = manager.submit(
+        "final commit probe", {"depth": "quick", "output_dir": str(output_dir)}
+    )["run_id"]
+    status = _wait_for_status(manager, run_id, {"failed"})
+    manager.close()
+
+    assert status["status"] == "failed"
+    assert status["has_report"] is False
+    assert "final_commit_failure" in status["error"]
+    diagnostic = json.loads(
+        Path(status["artifacts"]["diagnostic_json_path"]).read_text(encoding="utf-8")
+    )
+    assert diagnostic["failure_code"] == "final_commit_failure"
+    assert diagnostic["failure_stage"] == "final_commit"
+    db = SQLiteDatabase(tmp_path / "conflux.db").connect()
+    try:
+        queued = JobQueue(db).get(run_id)
+        events = EventStore(db).list(run_id=run_id)
+    finally:
+        db.close()
+    assert queued["status"] == "failed"
+    assert any(e["stage"] == "final_commit" and e["status"] == "failed" for e in events)
+
+
+def test_worker_init_failure_is_observable_without_corrupting_jobs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from conflux import __main__ as cli
+
+    monkeypatch.setattr(cli, "query_command", _fake_query_command)
+    db_path = tmp_path / "conflux.db"
+    submitter = JobManager(db_path=db_path, start_worker=False)
+    run_id = submitter.submit("survives worker init failure", {"depth": "quick"})["run_id"]
+
+    # 补丁必须在 worker 线程启动前生效（否则首轮 claim 已经成功）。
+    worker = JobManager(db_path=db_path, poll_interval=0.02, start_worker=False)
+    original_claim = worker._claim_next
+    state_box = {"calls": 0}
+
+    def flaky_claim():
+        state_box["calls"] += 1
+        if state_box["calls"] <= 4:
+            raise RuntimeError("worker bootstrap: database bootstrap failed")
+        return original_claim()
+
+    monkeypatch.setattr(worker, "_claim_next", flaky_claim)
+    worker._worker_thread = threading.Thread(target=worker._worker_loop, daemon=True)
+    worker._worker_thread.start()
+    status = _wait_for_status(worker, run_id, {"completed_diagnostic"})
+    worker.close()
+
+    # 任务不受 worker 初始化故障影响：保持 pending 直到恢复并正常完成。
+    assert status["status"] == "completed_diagnostic"
+    deadline = time.time() + 2.0
+    while time.time() < deadline and worker.worker_error:
+        time.sleep(0.02)
+    assert worker.worker_error == ""
+    assert worker.worker_consecutive_failures == 0
+    db = SQLiteDatabase(db_path).connect()
+    try:
+        events = EventStore(db).list(run_id="")
+    finally:
+        db.close()
+    init_events = [
+        event for event in events if event["stage"] == "worker_init" and event["status"] == "failed"
+    ]
+    assert len(init_events) >= 1
+    metadata = dict(init_events[0].get("metadata") or {})
+    assert metadata.get("failure_code") == "worker_init_failure"
+    assert "bootstrap" in str(metadata.get("error") or "")
+
+
+def test_terminal_and_diagnostic_reference_share_one_transaction(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """终态写入与诊断引用原子性：任一写入失败时全部回滚，不出现半提交终态。"""
+    from conflux.workbench.jobs import _job_from_metadata, _persist_terminal
+
+    db_path = tmp_path / "conflux.db"
+    manager = JobManager(db_path=db_path, start_worker=False)
+    run_id = manager.submit("atomic terminal", {"depth": "quick"})["run_id"]
+
+    db = SQLiteDatabase(db_path).connect()
+    try:
+        queue = JobQueue(db, lease_seconds=30.0)
+        run_store = RunStore(db)
+        event_store = EventStore(db)
+        run_before = run_store.get(run_id)
+        claimed = queue.claim(manager._worker_id, kind=RESEARCH_JOB_KIND)
+        assert claimed is not None
+        job = _job_from_metadata(
+            run_id, dict((run_store.get(run_id) or {}).get("metadata") or {})
+        )
+        job.status = "failed"
+        job.error = "probe failure"
+        job.current_stage = "execution"
+        job.ended_at = time.time()
+        job.artifacts["diagnostic_json_path"] = str(tmp_path / "probe.diagnostic.json")
+
+        original_append = EventStore.append
+
+        def failing_append(self, event, *, commit=True):
+            raise RuntimeError("events table write failure")
+
+        monkeypatch.setattr(EventStore, "append", failing_append)
+        try:
+            with pytest.raises(RuntimeError):
+                _persist_terminal(
+                    db,
+                    queue,
+                    run_store,
+                    event_store,
+                    run_id,
+                    job,
+                    worker_id=manager._worker_id,
+                    terminal="failed",
+                    error="probe failure",
+                    event=TraceEvent(
+                        stage="execution",
+                        status="failed",
+                        summary="probe",
+                        run_id=run_id,
+                        thread_id=run_id,
+                    ),
+                )
+        finally:
+            monkeypatch.setattr(EventStore, "append", original_append)
+
+        # 回滚验证：queue 行、run 行、事件行都不得出现终态。
+        assert JobQueue(db).get(run_id)["status"] == "running"
+        run_after = RunStore(db).get(run_id)
+        assert run_after["status"] == run_before["status"]
+        assert run_after["metadata"] == run_before["metadata"]
+        assert EventStore(db).list(run_id=run_id) == []
+    finally:
+        db.close()
+
+
+def test_completed_diagnostic_run_still_has_no_failure_diagnostic(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """正常完成（含 completed_diagnostic）不产生失败诊断 artifact。"""
+    from conflux import __main__ as cli
+
+    monkeypatch.setattr(cli, "query_command", _fake_query_command)
+    manager = JobManager(db_path=tmp_path / "conflux.db", poll_interval=0.02)
+    run_id = manager.submit("clean completion", {"depth": "quick"})["run_id"]
+    status = _wait_for_status(manager, run_id, {"completed_diagnostic"})
+    manager.close()
+
+    assert status["status"] == "completed_diagnostic"
+    assert "diagnostic_json_path" not in status["artifacts"]
+    db = SQLiteDatabase(tmp_path / "conflux.db").connect()
+    try:
+        events = EventStore(db).list(run_id=run_id)
+    finally:
+        db.close()
+    assert any(e["stage"] == "final_commit" and e["status"] == "completed" for e in events)
+
 

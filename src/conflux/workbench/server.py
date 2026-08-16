@@ -228,6 +228,20 @@ def _invalidate_expensive_cache(*keys: str) -> None:
             _AUDIT_CACHE.pop(key, None)
 
 
+def _workbench_worker_status() -> dict[str, Any]:
+    """P1.4: worker 初始化/claim 健康度，供 /api/status 观测（不初始化新 worker）。"""
+    import conflux.workbench.jobs as workbench_jobs
+
+    manager = workbench_jobs._job_manager
+    if manager is None:
+        return {"initialized": False, "error": "", "consecutive_failures": 0}
+    return {
+        "initialized": True,
+        "error": str(manager.worker_error or ""),
+        "consecutive_failures": int(manager.worker_consecutive_failures or 0),
+    }
+
+
 def build_status() -> dict[str, Any]:
     """Return sanitized local workbench status."""
 
@@ -293,6 +307,7 @@ def build_status() -> dict[str, Any]:
             "overview_enabled": True,
             "protocol_version": P3_PROTOCOL_VERSION,
         },
+        "workbench_worker": _workbench_worker_status(),
         "credentials": {
             "openai_api_key": _has_env("OPENAI_API_KEY"),
             "reasoning_api_key": _has_env("CONFLUX_MODELS__REASONING__API_KEY"),

@@ -26,6 +26,8 @@ from conflux.trace import TraceEvent, new_run_id
 
 
 RESEARCH_JOB_KIND = "research_query"
+# P1.4: 连续 claim/bootstrap 失败达到该阈值时记录 worker 初始化失败诊断事件。
+WORKER_INIT_FAILURE_THRESHOLD = 3
 _SECRET_FIELDS = {
     "api_key",
     "embedding_api_key",
@@ -488,20 +490,183 @@ def _persist_trace_snapshot(job: ResearchJob, events: list[Any], output_dir: str
     job.artifacts["trace_path"] = str(path.resolve())
 
 
+# ---------------------------------------------------------------------------
+# P1.4 终态结构化诊断（conflux.research_failure.v1）：每个终态产出包含
+# run ID/请求摘要/源码版本/失败阶段/已完成进度/输入配置哈希/重试安全性/
+# 保留产物/恢复动作/原始错误类型的诊断，终态与诊断引用同一事务可见。
+# ---------------------------------------------------------------------------
+
+FAILURE_CODES: dict[str, dict[str, Any]] = {
+    "lease_overrun": {
+        "stage": "lease",
+        "retryable": False,
+        "action": (
+            "Worker 租约超限且尝试次数耗尽：确认 worker 存活与数据库锁状态后重新提交新 run。"
+        ),
+    },
+    "worker_init_failure": {
+        "stage": "worker_init",
+        "retryable": False,
+        "action": (
+            "Worker 初始化/claim 连续失败：修复启动错误后重启服务；"
+            "受影响任务保持 pending，恢复后可继续执行。"
+        ),
+    },
+    "credential_recovery_failure": {
+        "stage": "credential_recovery",
+        "retryable": False,
+        "action": (
+            "重启后凭证不可解析：恢复原始凭证或改用可持久化凭证后重新提交；"
+            "系统不会静默切换到其他密钥或 Provider。"
+        ),
+    },
+    "config_build_failure": {
+        "stage": "config_build",
+        "retryable": False,
+        "action": "修复配置/凭证校验错误后重新提交该请求。",
+    },
+    "model_build_failure": {
+        "stage": "model_build",
+        "retryable": False,
+        "action": "修复模型构建错误（Provider/模型 ID/密钥/网络）后重新提交该请求。",
+    },
+    "user_cancelled": {
+        "stage": "user_cancel",
+        "retryable": False,
+        "action": "用户主动取消：无需重试；如仍需要结果，重新提交一个新的请求。",
+    },
+    "system_deadline": {
+        "stage": "system_deadline",
+        "retryable": True,
+        "action": "达到档位系统时限：提高档位预算或缩小问题范围后重试。",
+    },
+    "final_commit_failure": {
+        "stage": "final_commit",
+        "retryable": False,
+        "action": "最终产物提交失败：修复产物写入问题后重试；已生成的草稿产物已保留。",
+    },
+    "execution_failure": {
+        "stage": "execution",
+        "retryable": False,
+        "action": "研究执行失败：检查诊断中的失败阶段与外部依赖后重试。",
+    },
+}
+
+
+def _failure_profile(failure_code: str) -> dict[str, Any]:
+    return FAILURE_CODES.get(failure_code) or FAILURE_CODES["execution_failure"]
+
+
+def _classify_failure(
+    job: ResearchJob,
+    exc: BaseException,
+    *,
+    cancel_reason: str,
+    deadline_exceeded: bool,
+) -> tuple[str, str, bool]:
+    """Map an in-flight failure to (failure_code, failure_stage, retryable)."""
+    if cancel_reason == "user":
+        return "user_cancelled", "user_cancel", False
+    if cancel_reason == "timeout" or deadline_exceeded:
+        return "system_deadline", "system_deadline", True
+    if isinstance(exc, SystemExit):
+        if exc.code == 2:
+            return "config_build_failure", "config_build", False
+        return "execution_failure", "execution", False
+    if job.current_stage == "model_build":
+        return "model_build_failure", "model_build", False
+    if job.current_stage == "final_commit" or job.progress.get("final_commit") == "running":
+        return "final_commit_failure", "final_commit", False
+    return "execution_failure", "execution", False
+
+
+def _terminal_event(
+    job: ResearchJob,
+    stage: str,
+    status: str,
+    summary: str,
+    metadata: dict[str, Any] | None = None,
+) -> TraceEvent:
+    return TraceEvent(
+        stage=stage,
+        status=status,
+        elapsed_ms=round((time.time() - job.started_at) * 1000, 2),
+        summary=summary,
+        run_id=job.run_id,
+        thread_id=job.run_id,
+        metadata=metadata or {},
+    )
+
+
+def _persist_terminal(
+    db: SQLiteDatabase,
+    queue: JobQueue,
+    run_store: RunStore,
+    event_store: EventStore,
+    run_id: str,
+    job: ResearchJob,
+    *,
+    worker_id: str,
+    terminal: str,
+    error: str = "",
+    event: TraceEvent | None = None,
+) -> None:
+    """Persist queue transition + RunStore terminal row + terminal event in one
+    transaction.  The RunStore row carries the diagnostic artifact references in
+    its metadata, so a reader can never observe a terminal status without its
+    diagnostic reference (P1.4)."""
+    with db.transaction():
+        if terminal == "cancelled":
+            queue.cancel(run_id, commit=False)
+        elif terminal == "failed":
+            queue.fail(
+                run_id,
+                worker_id,
+                error,
+                retryable=False,
+                result=_job_metadata(job),
+                commit=False,
+            )
+        else:
+            queue.complete(run_id, worker_id, result=_job_metadata(job), commit=False)
+        run_store.update_metadata(run_id, _job_metadata(job), status=job.status, commit=False)
+        if event is not None:
+            event_store.append(event, commit=False)
+
+
 def _write_failure_diagnostic(
     job: ResearchJob,
     output_dir: str,
     *,
     status: str,
     error: str,
-    retryable: bool,
+    failure_code: str,
+    retryable: bool | None = None,
 ) -> None:
-    """Persist a user-readable failure artifact without treating it as a report."""
+    """Persist a user-readable failure artifact without treating it as a report.
 
+    P1.4 contract fields: run ID, request summary, source revision, failure
+    stage, completed progress, input config hash, retry safety, preserved
+    artifacts, recovery action and the original error type.
+    """
+    profile = _failure_profile(failure_code)
+    retryable = bool(profile["retryable"]) if retryable is None else bool(retryable)
+    formal_report_preserved = bool(
+        job.artifacts.get("markdown_path")
+        or job.artifacts.get("verified_markdown_path")
+        or job.artifacts.get("draft_markdown_path")
+    )
+    preserved_artifacts = {
+        str(key): str(value) for key, value in (job.artifacts or {}).items()
+    }
     diagnostic = {
         "schema_version": "conflux.research_failure.v1",
+        "failure_code": failure_code,
+        "failure_stage": str(profile["stage"]),
         "run_id": job.run_id,
         "query": job.query,
+        "code_revision": str((job.run_manifest or {}).get("code_revision") or ""),
+        "input_config_hash": str((job.run_manifest or {}).get("semantic_hash") or ""),
         "status": status,
         "error_type": str(error).partition(":")[0],
         "error": str(error),
@@ -509,30 +674,34 @@ def _write_failure_diagnostic(
         "current_stage": job.current_stage,
         "progress": dict(job.progress),
         "source_statuses": dict(job.source_statuses),
-        "formal_report_preserved": bool(
-            job.has_report or job.final_answer or job.artifacts.get("markdown_path")
-        ),
+        "formal_report_preserved": formal_report_preserved,
+        "preserved_artifacts": preserved_artifacts,
+        "retryable": bool(retryable),
         "recovery": {
             "retryable": bool(retryable),
-            "action": (
-                "Retry the run after checking the failed stage and external dependencies."
-                if retryable
-                else "Fix the recorded contract or configuration error before submitting a new run."
-            ),
+            "action": str(profile["action"]),
         },
+        "recovery_action": str(profile["action"]),
     }
     root = Path(output_dir)
     json_path = root / f"{job.run_id}.diagnostic.json"
     markdown_path = root / f"{job.run_id}.diagnostic.md"
+    preserved_lines = "\n".join(
+        f"- `{key}`: {value}" for key, value in preserved_artifacts.items()
+    ) or "- （无保留产物）"
     markdown = "\n".join(
         [
             "# Conflux research failure diagnostic",
             "",
             f"- Run ID: `{job.run_id}`",
             f"- Status: `{status}`",
+            f"- Failure code: `{failure_code}`",
+            f"- Failure stage: `{profile['stage']}`",
             f"- Failed stage: `{job.current_stage or 'unknown'}`",
             f"- Retryable: `{'yes' if retryable else 'no'}`",
-            f"- Formal report preserved: `{'yes' if diagnostic['formal_report_preserved'] else 'no'}`",
+            f"- Formal report preserved: `{'yes' if formal_report_preserved else 'no'}`",
+            f"- Code revision: `{diagnostic['code_revision'] or 'unknown'}`",
+            f"- Input config hash: `{diagnostic['input_config_hash'] or 'unknown'}`",
             "",
             "## Query",
             "",
@@ -542,9 +711,13 @@ def _write_failure_diagnostic(
             "",
             f"`{error}`",
             "",
+            "## Preserved artifacts",
+            "",
+            preserved_lines,
+            "",
             "## Recovery",
             "",
-            str(diagnostic["recovery"]["action"]),
+            str(profile["action"]),
             "",
         ]
     )
@@ -715,6 +888,7 @@ class JobManager:
         self._lease_seconds = max(3.0, lease_seconds)
         self._worker_id = f"workbench-query-{uuid.uuid4().hex[:12]}"
         self._last_worker_error = ""
+        self._consecutive_claim_failures = 0
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._secrets: dict[str, dict[str, Any]] = {}
@@ -932,30 +1106,56 @@ class JobManager:
 
     def cancel(self, run_id: str, *, reason: str = "user") -> bool:
         db = self._database()
+        cancelled = False
         try:
             queue = JobQueue(db, lease_seconds=self._lease_seconds)
-            cancelled = queue.cancel(run_id)
-            if cancelled:
-                run_store = RunStore(db)
-                run = run_store.get(run_id) or {}
-                metadata = dict(run.get("metadata") or {})
-                metadata.update(
-                    public_status="cancelled",
-                    cancel_reason="timeout" if reason == "timeout" else "user",
-                    ended_at=time.time(),
-                )
-                run_store.update_metadata(run_id, metadata, status="cancelled")
-                EventStore(db).append(
-                    TraceEvent(
-                        stage="job_cancelled",
-                        status="cancelled",
-                        elapsed_ms=0.0,
-                        summary="Research job cancellation persisted",
-                        run_id=run_id,
-                        thread_id=run_id,
-                        metadata={"reason": metadata["cancel_reason"]},
+            # P1.4：取消终态、诊断引用与取消事件在同一事务内可见。
+            with db.transaction():
+                cancelled = queue.cancel(run_id, commit=False)
+                if cancelled:
+                    run_store = RunStore(db)
+                    event_store = EventStore(db)
+                    run = run_store.get(run_id) or {}
+                    job = _job_from_metadata(run_id, dict(run.get("metadata") or {}))
+                    previous_status = str(job.status)
+                    job.status = "cancelled"
+                    job.cancel_reason = "timeout" if reason == "timeout" else "user"
+                    job.ended_at = time.time()
+                    queued_row = queue.get(run_id) or {}
+                    queued_payload = dict(queued_row.get("payload") or {})
+                    output_dir = _path_value(
+                        (queued_payload.get("payload") or {}).get("output_dir"),
+                        "reports/workbench/query",
                     )
-                )
+                    error = (
+                        f"用户取消：任务在 {previous_status} 状态被取消（reason=user）。"
+                        if job.cancel_reason == "user"
+                        else "系统超时取消任务。"
+                    )
+                    # P1.4：取消终态同样携带结构化诊断（pending 取消不经过
+                    # worker，这里同步补齐；running 取消由 worker 在其终态
+                    # 事务内覆盖为更全的进度）。
+                    _write_failure_diagnostic(
+                        job,
+                        output_dir,
+                        status="cancelled",
+                        error=error,
+                        failure_code="user_cancelled",
+                    )
+                    job.error = error
+                    run_store.update_metadata(
+                        run_id, _job_metadata(job), status="cancelled", commit=False
+                    )
+                    event_store.append(
+                        _terminal_event(
+                            job,
+                            "job_cancelled",
+                            "cancelled",
+                            "Research job cancellation persisted",
+                            {"reason": job.cancel_reason, "failure_code": "user_cancelled"},
+                        ),
+                        commit=False,
+                    )
         finally:
             db.close()
         if cancelled:
@@ -1015,6 +1215,50 @@ class JobManager:
         self._stop.set()
         self._wake.set()
 
+    @property
+    def worker_error(self) -> str:
+        """Last claim/bootstrap error observed by the worker loop ('' when healthy)."""
+        return self._last_worker_error
+
+    @property
+    def worker_consecutive_failures(self) -> int:
+        """Consecutive claim/bootstrap failures (P1.4 worker-init observability)."""
+        return self._consecutive_claim_failures
+
+    def _record_worker_failure(self, error: str) -> None:
+        """Best-effort P1.4 diagnostic event when the worker keeps failing to claim.
+
+        Jobs stay untouched (they keep pending/running until their own terminal
+        rule fires); the event is the observable record for the operator.
+        """
+        try:
+            db = self._database()
+            try:
+                EventStore(db).append(
+                    TraceEvent(
+                        stage="worker_init",
+                        status="failed",
+                        elapsed_ms=0.0,
+                        summary=(
+                            "Worker claim/bootstrap failures exceeded threshold; "
+                            "queued jobs are kept intact and will resume once the worker recovers"
+                        ),
+                        run_id="",
+                        thread_id="",
+                        metadata={
+                            "error": error,
+                            "error_code": "worker_init_failure",
+                            "failure_code": "worker_init_failure",
+                            "consecutive_failures": self._consecutive_claim_failures,
+                        },
+                    )
+                )
+            finally:
+                db.close()
+        except Exception:
+            # 诊断通道本身故障时保持 best-effort，不得拖垮 worker 循环。
+            pass
+
     def _worker_loop(self) -> None:
         while not self._stop.is_set():
             try:
@@ -1028,10 +1272,15 @@ class JobManager:
                         str(payload.get("query") or ""),
                         dict(payload.get("payload") or {}),
                     )
-                    continue
-                self._last_worker_error = ""
             except Exception as exc:
-                self._last_worker_error = f"{type(exc).__name__}: {exc}"
+                error = f"{type(exc).__name__}: {exc}"
+                self._last_worker_error = error
+                self._consecutive_claim_failures += 1
+                if self._consecutive_claim_failures >= WORKER_INIT_FAILURE_THRESHOLD:
+                    self._record_worker_failure(error)
+            else:
+                self._last_worker_error = ""
+                self._consecutive_claim_failures = 0
             self._wake.wait(self._poll_interval)
             self._wake.clear()
 
@@ -1039,23 +1288,63 @@ class JobManager:
         db = self._database()
         try:
             queue = JobQueue(db, lease_seconds=self._lease_seconds)
-            exhausted = queue.expire_exhausted(kind=RESEARCH_JOB_KIND)
-            for item in exhausted:
-                RunStore(db).update_metadata(
-                    item["run_id"],
-                    {
-                        "public_status": "failed",
-                        "error": str(item.get("error") or "lease expired after max attempts"),
-                        "ended_at": time.time(),
-                    },
-                    status="failed",
-                )
+            run_store = RunStore(db)
+            event_store = EventStore(db)
+            # P1.4：lease 超限的 queue 终态转移、RunStore 终态行与失败事件在
+            # 同一事务提交 —— 读者绝不会看到没有诊断引用的终态。
+            with db.transaction():
+                exhausted = queue.expire_exhausted(kind=RESEARCH_JOB_KIND, commit=False)
+                for item in exhausted:
+                    self._persist_lease_overrun(db, queue, run_store, event_store, item)
             claimed = queue.claim(self._worker_id, kind=RESEARCH_JOB_KIND)
             if claimed and self._restore_terminal_checkpoint(db, claimed):
                 return None
             return claimed
         finally:
             db.close()
+
+    def _persist_lease_overrun(
+        self,
+        db: SQLiteDatabase,
+        queue: JobQueue,
+        run_store: RunStore,
+        event_store: EventStore,
+        item: dict[str, Any],
+    ) -> None:
+        """P1.4 lease 超限终态：终态、诊断引用与事件同一事务可见。"""
+        run_id = str(item.get("run_id") or item.get("job_id") or "")
+        run = run_store.get(run_id) or {}
+        job = _job_from_metadata(run_id, dict(run.get("metadata") or {}))
+        error = str(item.get("error") or "lease expired after max attempts")
+        payload = dict(item.get("payload") or {})
+        output_dir = _path_value(
+            (payload.get("payload") or {}).get("output_dir"),
+            "reports/workbench/query",
+        )
+        job.status = "failed"
+        job.current_stage = "lease"
+        _finish_job(job, "failed", error, preserve_report=bool(job.artifacts))
+        _write_failure_diagnostic(
+            job,
+            output_dir,
+            status="failed",
+            error=error,
+            failure_code="lease_overrun",
+        )
+        with db.transaction():
+            run_store.update_metadata(
+                run_id, _job_metadata(job), status="failed", commit=False
+            )
+            event_store.append(
+                _terminal_event(
+                    job,
+                    "lease_overrun",
+                    "failed",
+                    "Lease expired after max attempts; terminal failure persisted with diagnostic",
+                    {"error_code": "lease_overrun", "failure_code": "lease_overrun"},
+                ),
+                commit=False,
+            )
 
     def _restore_terminal_checkpoint(self, db: SQLiteDatabase, claimed: dict[str, Any]) -> bool:
         checkpoint = CheckpointStore(db).load(str(claimed["run_id"]))
@@ -1121,39 +1410,41 @@ class JobManager:
             )
             if verdict:
                 job.current_stage = "credential_recovery"
-                event_store.append(
-                    TraceEvent(
-                        stage="credential_recovery",
-                        status="failed",
-                        elapsed_ms=round((time.time() - job.started_at) * 1000, 2),
-                        summary=verdict,
-                        run_id=run_id,
-                        thread_id=run_id,
-                        metadata={
-                            "error_code": (
-                                "credential_unavailable_after_restart"
-                                if "credential_unavailable_after_restart" in verdict
-                                else "frozen_config_mismatch"
-                            )
-                        },
-                    )
+                error_code = (
+                    "credential_unavailable_after_restart"
+                    if "credential_unavailable_after_restart" in verdict
+                    else "frozen_config_mismatch"
                 )
+                # P1.4：凭证恢复失败终态 —— 终态、诊断引用与事件同一事务可见。
+                _finish_job(job, "failed", verdict, preserve_report=False)
                 _write_failure_diagnostic(
                     job,
                     output_dir,
                     status="failed",
                     error=verdict,
-                    retryable=False,
+                    failure_code="credential_recovery_failure",
                 )
-                _finish_job(job, "failed", verdict, preserve_report=False)
-                queue.fail(
+                _persist_terminal(
+                    db,
+                    queue,
+                    run_store,
+                    event_store,
                     run_id,
-                    self._worker_id,
-                    verdict,
-                    retryable=False,
-                    result=_job_metadata(job),
+                    job,
+                    worker_id=self._worker_id,
+                    terminal="failed",
+                    error=verdict,
+                    event=_terminal_event(
+                        job,
+                        "credential_recovery",
+                        "failed",
+                        verdict,
+                        {
+                            "error_code": error_code,
+                            "failure_code": "credential_recovery_failure",
+                        },
+                    ),
                 )
-                run_store.update_metadata(run_id, _job_metadata(job), status="failed")
                 db.close()
                 return
         last_step = run_store.last_step(run_id)
@@ -1260,7 +1551,7 @@ class JobManager:
                 emit_stage(events, "reanalysis", "running", "重新分析")
             elif pipeline_stage in {"model_analyzed", "generalized_model_analyzed"} and gap_round:
                 emit_stage(events, "reanalysis", "completed", "重新分析完成")
-            elif pipeline_stage == "completed":
+            elif pipeline_stage in {"finalize", "completed"}:
                 emit_stage(events, "final_commit", "running", "最终提交")
 
             for trace_event in events[trace_count:]:
@@ -1313,6 +1604,9 @@ class JobManager:
             )
             from conflux.__main__ import query_command
 
+            # P1.4：query_command 阶段边界 —— 配置/模型构建失败与管道执行失败
+            # 按此阶段标记分类。
+            job.current_stage = "model_build"
             state = query_command(
                 query,
                 mode=mode,
@@ -1329,12 +1623,16 @@ class JobManager:
                 on_graph_state=on_state,
                 should_stop=should_stop,
             )
+            # P1.4：最终产物快照写入失败 → final_commit_failure，绝不发布无
+            # Artifact 的 completed。
+            snapshot_warnings_before = len(job.warnings)
             _capture_report_snapshot(
                 job,
                 state,
                 output_dir,
                 stage="verified" if state.get("_verified_answer") else "draft",
             )
+            final_snapshot_failed = len(job.warnings) > snapshot_warnings_before
             job.source_statuses = {
                 source: value.get("status") if isinstance(value, dict) else str(value)
                 for source, value in (state.get("_source_statuses") or {}).items()
@@ -1350,6 +1648,59 @@ class JobManager:
                     if value
                 }
             )
+            deliverable_present = bool(
+                job.artifacts.get("markdown_path")
+                or job.artifacts.get("verified_markdown_path")
+                or job.artifacts.get("draft_markdown_path")
+            )
+            if final_snapshot_failed and not deliverable_present:
+                error = (
+                    "final_commit_failure: 最终报告产物写入失败；"
+                    "不发布无 Artifact 的 completed。"
+                )
+                _finish_job(job, "failed", error, preserve_report=False)
+                # 无交付产物：交付状态必须与 has_report 一致（绝不出现
+                # 有 final_answer 却被视为正式报告的状态）。
+                job.delivery_status = "diagnostic_only"
+                _write_failure_diagnostic(
+                    job,
+                    output_dir,
+                    status="failed",
+                    error=error,
+                    failure_code="final_commit_failure",
+                )
+                result = _job_metadata(job)
+                checkpoints.save(
+                    run_id,
+                    "final",
+                    {
+                        **_checkpoint_payload(state, job, step_seq + 1),
+                        "complete": True,
+                        "terminal_result": result,
+                    },
+                )
+                _persist_terminal(
+                    db,
+                    queue,
+                    run_store,
+                    event_store,
+                    run_id,
+                    job,
+                    worker_id=self._worker_id,
+                    terminal="failed",
+                    error=error,
+                    event=_terminal_event(
+                        job,
+                        "final_commit",
+                        "failed",
+                        error,
+                        {
+                            "error_code": "final_commit_failure",
+                            "failure_code": "final_commit_failure",
+                        },
+                    ),
+                )
+                return
             final_events: list[Any] = []
             emit_stage(final_events, "final_commit", "completed", "最终提交完成")
             for trace_event in final_events:
@@ -1384,78 +1735,181 @@ class JobManager:
             if queue.complete(run_id, self._worker_id, result=result):
                 persist_job(run_status=job.status)
         except _JobCancelled as exc:
-            _finish_job(job, "cancelled", str(exc), preserve_report=True)
-            queue.cancel(run_id)
-            persist_job(run_status="cancelled")
+            error = str(exc)
+            _finish_job(job, "cancelled", error, preserve_report=True)
+            _write_failure_diagnostic(
+                job,
+                output_dir,
+                status="cancelled",
+                error=error,
+                failure_code="user_cancelled",
+            )
+            _persist_terminal(
+                db,
+                queue,
+                run_store,
+                event_store,
+                run_id,
+                job,
+                worker_id=self._worker_id,
+                terminal="cancelled",
+                event=_terminal_event(
+                    job,
+                    "user_cancel",
+                    "cancelled",
+                    error,
+                    {"error_code": "user_cancelled", "failure_code": "user_cancelled"},
+                ),
+            )
         except _JobTimedOut as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            _finish_job(job, "timed_out", str(exc), preserve_report=True)
             _write_failure_diagnostic(
                 job,
                 output_dir,
                 status="timed_out",
-                error=f"{type(exc).__name__}: {exc}",
-                retryable=True,
+                error=error,
+                failure_code="system_deadline",
             )
-            _finish_job(job, "timed_out", str(exc), preserve_report=True)
-            result = _job_metadata(job)
-            queue.complete(run_id, self._worker_id, result=result)
-            persist_job(run_status=job.status)
+            _persist_terminal(
+                db,
+                queue,
+                run_store,
+                event_store,
+                run_id,
+                job,
+                worker_id=self._worker_id,
+                terminal="completed",
+                event=_terminal_event(
+                    job,
+                    "system_deadline",
+                    "timed_out",
+                    error,
+                    {"error_code": "system_deadline", "failure_code": "system_deadline"},
+                ),
+            )
         except SystemExit as exc:
             error = f"SystemExit code={exc.code}"
+            failure_code = "config_build_failure" if exc.code == 2 else "execution_failure"
+            failure_stage = "config_build" if exc.code == 2 else "execution"
+            _finish_job(job, "failed", error, preserve_report=True)
             _write_failure_diagnostic(
                 job,
                 output_dir,
                 status="failed",
                 error=error,
-                retryable=False,
+                failure_code=failure_code,
             )
-            _finish_job(job, "failed", error, preserve_report=True)
-            queue.fail(
+            _persist_terminal(
+                db,
+                queue,
+                run_store,
+                event_store,
                 run_id,
-                self._worker_id,
-                job.error,
-                retryable=False,
-                result=_job_metadata(job),
+                job,
+                worker_id=self._worker_id,
+                terminal="failed",
+                error=job.error,
+                event=_terminal_event(
+                    job,
+                    failure_stage,
+                    "failed",
+                    error,
+                    {"error_code": failure_code, "failure_code": failure_code},
+                ),
             )
-            persist_job(run_status="failed")
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             fresh = queue.get(run_id)
             if fresh and fresh.get("status") == "cancelled":
                 job.cancel_reason = "user"
-            if job.cancel_reason == "user":
+            failure_code, failure_stage, retryable = _classify_failure(
+                job,
+                exc,
+                cancel_reason=job.cancel_reason,
+                deadline_exceeded=_deadline_exceeded(job),
+            )
+            if failure_code == "user_cancelled":
                 _finish_job(job, "cancelled", error, preserve_report=True)
-                queue.cancel(run_id)
-                persist_job(run_status="cancelled")
-            elif job.cancel_reason == "timeout" or _deadline_exceeded(job):
+                _write_failure_diagnostic(
+                    job,
+                    output_dir,
+                    status="cancelled",
+                    error=error,
+                    failure_code=failure_code,
+                )
+                _persist_terminal(
+                    db,
+                    queue,
+                    run_store,
+                    event_store,
+                    run_id,
+                    job,
+                    worker_id=self._worker_id,
+                    terminal="cancelled",
+                    event=_terminal_event(
+                        job,
+                        failure_stage,
+                        "cancelled",
+                        error,
+                        {"error_code": failure_code, "failure_code": failure_code},
+                    ),
+                )
+            elif failure_code == "system_deadline":
                 job.cancel_reason = "timeout"
+                _finish_job(job, "timed_out", error, preserve_report=True)
                 _write_failure_diagnostic(
                     job,
                     output_dir,
                     status="timed_out",
                     error=error,
-                    retryable=True,
+                    failure_code=failure_code,
                 )
-                _finish_job(job, "timed_out", error, preserve_report=True)
-                result = _job_metadata(job)
-                queue.complete(run_id, self._worker_id, result=result)
-                persist_job(run_status=job.status)
+                _persist_terminal(
+                    db,
+                    queue,
+                    run_store,
+                    event_store,
+                    run_id,
+                    job,
+                    worker_id=self._worker_id,
+                    terminal="completed",
+                    event=_terminal_event(
+                        job,
+                        failure_stage,
+                        "timed_out",
+                        error,
+                        {"error_code": failure_code, "failure_code": failure_code},
+                    ),
+                )
             else:
+                _finish_job(job, "failed", error, preserve_report=True)
                 _write_failure_diagnostic(
                     job,
                     output_dir,
                     status="failed",
                     error=error,
-                    retryable=False,
+                    failure_code=failure_code,
+                    retryable=retryable,
                 )
-                _finish_job(job, "failed", error, preserve_report=True)
-                queue.fail(
+                _persist_terminal(
+                    db,
+                    queue,
+                    run_store,
+                    event_store,
                     run_id,
-                    self._worker_id,
-                    job.error,
-                    retryable=False,
-                    result=_job_metadata(job),
+                    job,
+                    worker_id=self._worker_id,
+                    terminal="failed",
+                    error=job.error,
+                    event=_terminal_event(
+                        job,
+                        failure_stage,
+                        "failed",
+                        error,
+                        {"error_code": failure_code, "failure_code": failure_code},
+                    ),
                 )
-                persist_job(run_status="failed")
         finally:
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=1.0)

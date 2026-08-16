@@ -13,10 +13,11 @@ import hashlib
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from conflux.core.contracts import ApprovalRequest, ArtifactRef, StepResult
 
@@ -446,6 +447,7 @@ class SQLiteDatabase:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._connection: sqlite3.Connection | None = None
+        self._owns_transaction = False
 
     def connect(self) -> "SQLiteDatabase":
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -454,6 +456,7 @@ class SQLiteDatabase:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
         self._connection = connection
+        self._owns_transaction = False
         return self
 
     @property
@@ -473,6 +476,41 @@ class SQLiteDatabase:
 
     def __exit__(self, *exc: Any) -> None:
         self.close()
+
+    @contextmanager
+    def transaction(self, *, immediate: bool = True) -> Iterator["SQLiteDatabase"]:
+        """Run a block inside one explicit transaction; nested calls become no-ops.
+
+        Store methods that accept commit=False leave their statements open so
+        terminal state, diagnostic references and events can be committed together
+        (P1.4: a reader must never see a terminal status without its diagnostic
+        reference).
+
+        Ownership is tracked explicitly: in the sqlite3 legacy isolation mode a
+        bare DML statement opens an *implicit* transaction that in_transaction
+        cannot distinguish from an explicit BEGIN, and closing the connection
+        would silently roll it back.  Any such pending implicit work is committed
+        before our explicit BEGIN so no caller loses a write.
+        """
+        connection = self.connection
+        if not self._owns_transaction:
+            connection.commit()  # close any legacy implicit transaction safely
+            connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            self._owns_transaction = True
+            owns_transaction = True
+        else:
+            owns_transaction = False
+        try:
+            yield self
+        except Exception:
+            if owns_transaction:
+                connection.rollback()
+                self._owns_transaction = False
+            raise
+        else:
+            if owns_transaction:
+                connection.commit()
+                self._owns_transaction = False
 
     def schema_version(self) -> int:
         row = self.connection.execute(
@@ -562,6 +600,7 @@ class RunStore:
         metadata: dict[str, Any],
         *,
         status: str | None = None,
+        commit: bool = True,
     ) -> bool:
         current = self.get(run_id)
         if current is None:
@@ -573,7 +612,8 @@ class RunStore:
             "UPDATE runs SET status = ?, metadata_json = ?, updated_at = ? WHERE run_id = ?",
             (next_status, _json_dumps(merged), time.time(), run_id),
         )
-        self.db.connection.commit()
+        if commit:
+            self.db.connection.commit()
         return cursor.rowcount > 0
 
     def get(self, run_id: str) -> dict[str, Any] | None:
@@ -677,7 +717,7 @@ class EventStore:
     def __init__(self, db: SQLiteDatabase) -> None:
         self.db = db
 
-    def append(self, event: Any) -> int:
+    def append(self, event: Any, *, commit: bool = True) -> int:
         payload = _event_payload(event)
         run_id = str(payload.get("run_id") or "")
         thread_id = str(payload.get("thread_id") or "")
@@ -700,7 +740,8 @@ class EventStore:
                 float(payload.get("timestamp") or time.time()),
             ),
         )
-        self.db.connection.commit()
+        if commit:
+            self.db.connection.commit()
         return int(cursor.lastrowid)
 
     def list(
@@ -1422,11 +1463,21 @@ class JobQueue:
             raise
         return self.get(str(row["job_id"]))
 
-    def expire_exhausted(self, *, kind: str | None = None) -> list[dict[str, Any]]:
-        """Mark expired leases that exhausted their attempt budget as failed."""
+    def expire_exhausted(
+        self, *, kind: str | None = None, commit: bool = True
+    ) -> list[dict[str, Any]]:
+        """Mark expired leases that exhausted their attempt budget as failed.
+
+        With ``commit=False`` the caller owns the transaction: the queue
+        transition is committed together with the RunStore terminal row and
+        the failure event (P1.4 — a reader must never observe a terminal
+        queue status without the matching diagnostic reference).
+        """
         now = time.time()
         connection = self.db.connection
-        connection.execute("BEGIN IMMEDIATE")
+        owns_transaction = commit and not connection.in_transaction
+        if owns_transaction:
+            connection.execute("BEGIN IMMEDIATE")
         try:
             params: list[Any] = [now]
             kind_clause = ""
@@ -1456,9 +1507,11 @@ class JobQueue:
                     """,
                     [now, *job_ids],
                 )
-            connection.commit()
+            if commit:
+                connection.commit()
         except Exception:
-            connection.rollback()
+            if commit:
+                connection.rollback()
             raise
         return [self.get(str(row["job_id"])) or _job_row(row) for row in rows]
 
@@ -1475,7 +1528,14 @@ class JobQueue:
         self.db.connection.commit()
         return cursor.rowcount > 0
 
-    def complete(self, job_id: str, worker_id: str, *, result: dict[str, Any] | None = None) -> bool:
+    def complete(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        result: dict[str, Any] | None = None,
+        commit: bool = True,
+    ) -> bool:
         now = time.time()
         cursor = self.db.connection.execute(
             """
@@ -1486,7 +1546,8 @@ class JobQueue:
             """,
             (_json_dumps(result or {}), now, job_id, worker_id),
         )
-        self.db.connection.commit()
+        if commit:
+            self.db.connection.commit()
         return cursor.rowcount > 0
 
     def fail(
@@ -1498,17 +1559,21 @@ class JobQueue:
         retry_delay: float = 5.0,
         retryable: bool = True,
         result: dict[str, Any] | None = None,
+        commit: bool = True,
     ) -> bool:
         now = time.time()
         connection = self.db.connection
-        connection.execute("BEGIN")
+        owns_transaction = commit and not connection.in_transaction
+        if owns_transaction:
+            connection.execute("BEGIN")
         try:
             row = connection.execute(
                 "SELECT attempts, max_attempts FROM jobs WHERE job_id = ? AND lease_owner = ?",
                 (job_id, worker_id),
             ).fetchone()
             if row is None:
-                connection.rollback()
+                if owns_transaction:
+                    connection.rollback()
                 return False
             attempts = int(row["attempts"])
             max_attempts = int(row["max_attempts"])
@@ -1535,9 +1600,11 @@ class JobQueue:
                     job_id,
                 ),
             )
-            connection.commit()
+            if commit:
+                connection.commit()
         except Exception:
-            connection.rollback()
+            if commit:
+                connection.rollback()
             raise
         return True
 

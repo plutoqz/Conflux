@@ -1092,12 +1092,13 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 
 ### 18.2 当前阶段
 
-- 阶段：P1 任务运行正确性与故障恢复（P1.1 claim/lease → `completed`；P1.2 幂等与背压 → `completed`；P1.3 凭证冻结 → `completed`（离线验收通过）；P1.4 结构化诊断 pending）
+- 阶段：P1 任务运行正确性与故障恢复（P1.1 claim/lease → `completed`；P1.2 幂等与背压 → `completed`；P1.3 凭证冻结 → `completed`；P1.4 结构化诊断 → `completed`（离线验收通过））
 - 状态：`in_progress`
 - 证据：
   - `reports/evaluation/convergence/p1/p11_claim_lease_probe.json`（P1.1：25 次探针 + 20 次复跑）
   - `reports/evaluation/convergence/p1/p12_focused_pytest.{log,xml}`（P1.2 聚焦 103 passed）、`p12_recovery_repeat.json`（20/20）、`p12_full_pytest.{log,xml}`（全量 764 passed）
   - `reports/evaluation/convergence/p1/p13_focused_pytest.{log,xml}`（P1.3 聚焦 107 passed）、`p13_full_pytest.{log,xml}`（全量 768 passed）
+  - `reports/evaluation/convergence/p1/p14_focused_pytest.{log,xml}`（P1.4 聚焦 116 passed）、`p14_full_pytest.log`（全量 777 passed / 0 failed / 588 warnings / 409.02s）、`p14_eval_recovery.log` + `eval_recovery/job_recovery.json`（200 jobs：recovery/lease_reclaim/final_state_consistency/idempotency_dedup 均 1.0，duplicate_execution/event_loss/reconnect_loss 均 0）、`p14_fault_matrix.json`（§6.8 矩阵 8 行 → 测试逐行映射）
 - 关键结论：
   - **P1.3 验收通过（2026-08-16）**：提交时生成 `conflux.run_manifest.v1` 运行冻结（code_revision、semantic_hash、model_role、roles 的 provider/model/base_url、embedding 身份、panel 成员身份、prompt_hash、budget、credential_ref 列表、`model_revision_unverified=true`）；manifest 只存凭证**引用**（`workbench_payload:*`/fail_closed、`env:*`、`config:*`），不存任何密钥值（测试断言元数据序列化无密钥）。
   - 重启恢复语义：claim 时先验证凭证引用——临时请求密钥重启后不可解析 → `credential_unavailable_after_restart` 诊断 + 终态 failed（fail-closed，绝不静默回退到共享环境密钥或其他 Provider）；随后比对 semantic_hash，provider/model/Prompt/预算/panel 漂移 → `frozen_config_mismatch` 终态 failed；两者都写入 `conflux.research_failure.v1` 诊断产物与 EventStore `credential_recovery` 事件。旧 run（无 manifest）跳过验证，向后兼容。
@@ -1106,7 +1107,8 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
   - 测试执行说明（沿用）：经 run_code 的 `node:child_process` 运行 pytest；子进程需显式注入 `USERNAME/TEMP/TMP/HOMEDRIVE/HOMEPATH`；不得用 `--basetemp=.pytest_tmp` 跑全量（两个路径敏感测试会失败）。
   - P1.3 改动已提交并推送 origin/main（见 git log；P1.3 为 C5 提交）。
   - CI 修复（2026-08-16）：GitHub Actions 自 2026-08-13 起持续红——`tests/test_p4_panel.py::TestPanelModelConstruction` 两个用例直接构造 ChatOpenAI，在无 OPENAI_API_KEY 的环境（CI/干净 checkout）构造期抛 OpenAIError；本地通过是因为仓库根 .env（gitignored）注入密钥掩盖了问题。已改为 create_chat_model 占位对象（断言仍覆盖成员数/标签/max_tokens 减半），CI-like 干净树实测 3 passed；全文件 35 passed。
-- 唯一下一验收点：P1.4 所有终态结构化诊断（`conflux.research_failure.v1` 覆盖 lease 超限/Worker 初始化失败/凭证恢复失败/配置与模型构建失败/用户取消/系统 deadline/Artifact final commit 失败；终态与诊断引用同一事务可见）。
+- **P1.4 验收通过（2026-08-16）**：`conflux.research_failure.v1` 扩展 9 个失败分类码（lease_overrun / worker_init_failure / credential_recovery_failure / config_build_failure / model_build_failure / user_cancelled / system_deadline / final_commit_failure / execution_failure），诊断含 run ID、请求摘要、源码版本（code_revision）、失败阶段、已完成进度、输入配置哈希（semantic_hash）、重试安全性、保留产物、恢复动作、原始错误类型。终态与诊断引用同一事务：`SQLiteDatabase.transaction()`（显式所有权，兼容 sqlite3 legacy 隐式事务）+ queue 终态转移/RunStore 终态行/终态事件一次提交；写入失败整体回滚（注入测试证实）。期间发现并修复一个真实读竞态：expire_exhausted 先单独提交 queue=failed、RunStore 更新在第二个事务，两提交之间 get() 可见「queue=failed + run=pending（无诊断引用）」，改为同一事务后消失。final_commit 写入失败绝不发布无 Artifact 的 completed（无交付产物时 delivery_status=diagnostic_only 保证 has_report 一致）。
+- 唯一下一验收点：P1 阶段退出（§6.8 故障注入矩阵全行覆盖 + §6.9 最小验证集 + 全量离线测试；随后进入 P2 standard 预算——P2 付费 live 运行需用户明确授权）。
 
 
 ### 18.3 当前决策
@@ -1123,10 +1125,11 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 | P1.2 离线验收通过，进入 P1.3 | 聚焦 103 passed、恢复 20/20、全量 764 passed；证据入 reports/evaluation/convergence/p1/p12_* | 2026-08-16 |
 | P1.2 验收后按验收点分批提交并推送 origin/main | 用户指令；C1 遗留工作树入库 / C2 P0 脚本 / C3 P1.1 / C4 P1.2 四个提交 | 2026-08-16 |
 | P1.3 运行冻结 manifest（引用式凭证 + 重启 fail-closed + 配置漂移检测） | 满足 §6.6：重启后要么同一冻结配置恢复，要么明确失败；provider/model/Prompt 不得漂移 | 2026-08-16 |
+| P1.4 终态诊断统一为 `conflux.research_failure.v1` + 9 个失败分类码，诊断契约字段齐全（run ID/请求摘要/源码版本/失败阶段/进度/输入配置哈希/重试安全/保留产物/恢复动作/原始错误类型） | 满足 §6.7 诊断字段要求 | 2026-08-16 |
+| 终态与诊断引用同一事务（SQLiteDatabase.transaction() 显式所有权 + queue/RunStore/事件一次提交，失败整体回滚） | 满足 §6.7「同一事务可见」；实测修复 lease 超限时 queue=failed/run=pending 读竞态 | 2026-08-16 |
 
 ### 18.4 当前未验证项
 
-- P1.4 结构化诊断未开始：lease 超限/Worker 初始化失败/配置构建失败/Artifact final commit 失败等终态尚未全部纳入 `conflux.research_failure.v1`。
 - 当前运行服务（PID 50348）与工作树代码不一致，P1 结束前需在真实进程上做一次冻结版本验证。
 - standard token 耗尽的逐阶段占用与上下文重复比例。
 - 当前 Workbench 在真实 320px、200% 缩放和键盘流程下的表现。
@@ -1141,6 +1144,43 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 - 不先做单一 ASGI 大迁移。
 
 ## 19. 阶段检查点
+
+### 2026-08-16 18:10 - P1.4 检查点（completed）
+
+- 当前目标：P1.4 所有终态结构化诊断——`conflux.research_failure.v1` 覆盖 lease 超限 / Worker 初始化失败 / 凭证恢复失败 / 配置与模型构建失败 / 用户取消 / 系统 deadline / Artifact final commit 失败；终态与诊断引用同一事务可见。
+- 当前阶段：P1 `in_progress`（P1.1-P1.4 全部 `completed` → 下一验收点 P1 阶段退出：§6.8 故障注入矩阵 + §6.9 最小验证集 + 全量离线）。
+- 状态：completed
+- 源码版本：`9de97fd`（main；P1.4 改动随本轮提交，见 git log）
+- 允许修改范围：P1 §6.2 列表（jobs.py / sqlite_store.py / server.py / 三个测试文件）+ 本文件状态与检查点部分。
+- 本轮非目标：不修改研究 Prompt/检索/报告；不启动真实模型调用；不开始 P2/ASGI 迁移。
+
+#### 已完成证据
+- 修改文件：`src/conflux/workbench/jobs.py`（FAILURE_CODES 9 码分类 + _classify_failure/_terminal_event/_persist_terminal + _write_failure_diagnostic 扩展 P1.4 契约字段 + _persist_lease_overrun + worker 连续失败观测（阈值 3 → EventStore worker_init 事件，任务不受影响）+ cancel() 同步诊断 + final_commit_failure 分支 + finalize 阶段边界映射）、`src/conflux/adapters/sqlite_store.py`（SQLiteDatabase.transaction() 显式所有权 + update_metadata/append/complete/fail/expire_exhausted 增加 commit=False）、`src/conflux/workbench/server.py`（/api/status 增加 workbench_worker 健康度，不初始化新 worker）、`tests/test_m3_workbench_query_jobs.py`（9 个 P1.4 测试）。
+- 测试命令与实际结果：
+  - 聚焦：`python -m pytest -q tests/test_m3_workbench_query_jobs.py tests/test_m3_jobs_checkpoints.py tests/test_workbench.py` → **116 passed**（39.23s；junitxml `p14_focused_pytest.xml`）。
+  - 全量：`python -m pytest -q` → **777 passed / 0 failed / 588 warnings / 409.02s**（较 P1.3 基线 +9）。
+  - 恢复/幂等压力：`python scripts/eval_job_recovery.py --jobs 200 --output-dir reports/evaluation/convergence/p1/eval_recovery` → recovery_rate 1.0、lease_reclaim_rate 1.0、duplicate_execution_rate 0、sse_event_loss_rate 0、sse_reconnect_loss_rate 0、final_state_consistency_rate 1.0、idempotency_dedup_rate 1.0、primary_claim_failures 0（`p14_eval_recovery.log` + `eval_recovery/job_recovery.json`）。
+- run ID / Artifact / hash：无 live 运行（离线合同验收）；诊断产物由 9 个新测试逐一断言（failure_code/failure_stage/code_revision/input_config_hash/preserved_artifacts/recovery）。
+- 验证层级：单元 + 集成（真实 SQLite/JobQueue/RunStore/EventStore + 真实 worker + 事务回滚注入），离线。
+
+#### 关键结论
+- 7 类终态全覆盖：lease_overrun（expire_exhausted 与 RunStore/事件同事务）、worker_init_failure（连续 claim 失败可观测、任务保持 pending 恢复后继续）、credential_recovery_failure（P1.3 两条 fail-closed 路径统一归类）、config_build_failure（SystemExit 2）、model_build_failure（模型构建阶段异常）、user_cancelled（pending 取消由 cancel() 同步补齐诊断，running 取消由 worker 终态事务覆盖）、system_deadline（retryable=true）、final_commit_failure（绝不发布无 Artifact 的 completed）。
+- 原子性实测：发现并修复真实读竞态——expire_exhausted 单独先提交 queue=failed、RunStore 更新在第二个事务，两提交之间 get() 可见「queue=failed + run=pending（无诊断引用）」；改为同一事务后消失（8 次竞态复现中 3 次命中，修复后 0/12）。事务所有权用显式标志而非 in_transaction（sqlite3 legacy 隐式事务无法区分显式 BEGIN，close 会静默回滚——cancel() 首版因此丢写，测试当场捕获）。
+- 回滚验证：EventStore.append 注入失败 → queue/run/事件全部回滚，无半提交终态。
+
+#### 未完成或阻塞
+- 无阻塞。观察项延续：`model_revision_verified=false`（Provider 无 revision 证据）；PID 50348 真实进程冻结验证留给 P1 阶段退出。
+
+#### 决策、推断与待验证假设
+- 事实：pending 取消不经过 worker，需 cancel() 同步补齐诊断；running 取消由 worker 在终态事务内覆盖为更全进度（文件幂等覆盖，语义一致）。
+- 推断：终态与诊断引用同事务后，get() 的 jobs→runs 两段读不可能再观察到无诊断引用的终态（时间单向性 + 同事务提交）。
+- 假设及验证方法：无新增待验证假设。
+
+#### 唯一下一验收点
+- P1 阶段退出：§6.8 故障注入矩阵 8 行全部覆盖（`p14_fault_matrix.json` 逐行映射到测试）、§6.9 最小验证集（三文件聚焦 + eval_job_recovery + 全量 pytest）全部通过；随后进入 P2 standard 预算（付费 live 运行需用户明确授权）。
+
+#### 不应自动扩展
+- 不开始 P2（预算/质量）或 ASGI 迁移；不修改研究语义；不动 PID 50348 运行服务。
 
 ### 2026-08-16 16:29 - P1.3 检查点（completed）
 
