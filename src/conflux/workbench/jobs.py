@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
 import uuid
@@ -83,6 +84,241 @@ def _wait_estimate(queue: Any, run_id: str, own_timeout_seconds: float) -> dict[
     }
 
 
+# ---------------------------------------------------------------------------
+# P1.3 运行冻结（run manifest）：提交时固定 revision/模型/预算/凭证来源，
+# 重启后按同一冻结恢复，凭证不可解析或配置漂移时 fail-closed。
+# ---------------------------------------------------------------------------
+
+def _git_head_revision() -> str:
+    """Current git HEAD revision (40-hex) or '' when unavailable."""
+    git_dir = Path(config.PROJECT_ROOT) / ".git"
+    try:
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if head.startswith("ref:"):
+        ref = head.split(":", 1)[1].strip()
+        try:
+            return (git_dir / ref).read_text(encoding="utf-8").strip()[:40]
+        except OSError:
+            try:
+                for line in (git_dir / "packed-refs").read_text(encoding="utf-8").splitlines():
+                    if line.endswith(f" {ref}"):
+                        return line.split(" ", 1)[0][:40]
+            except OSError:
+                return ""
+            return ""
+    return head[:40]
+
+
+def _model_roles_for(depth: str, payload: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """Resolved (provider, model) identity per research role for the frozen manifest."""
+    base_url = str(payload.get("base_url") or "").strip()
+    api_key = str(payload.get("api_key") or "").strip()
+    model = str(payload.get("model") or "").strip()
+    if base_url or api_key or model:
+        return {
+            role: {
+                "preset": str(depth),
+                "provider": "openai_compatible",
+                "model": model,
+                "base_url": base_url,
+            }
+            for role in ("planner", "analyst", "reranker", "synthesizer", "verifier")
+        }
+    from conflux.research_modes import research_model_diagnostics
+
+    try:
+        resolved = research_model_diagnostics(depth)
+    except Exception:
+        return {}
+    roles: dict[str, dict[str, str]] = {}
+    for role, cfg in (resolved.get("roles") or {}).items():
+        roles[str(role)] = {
+            "preset": str(cfg.get("preset") or ""),
+            "provider": str(cfg.get("provider") or ""),
+            "model": str(cfg.get("model") or ""),
+            "base_url": str(cfg.get("base_url") or ""),
+        }
+    return roles
+
+
+def _embedding_identity(payload: dict[str, Any]) -> dict[str, str]:
+    base_url = str(payload.get("embedding_base_url") or payload.get("base_url") or "").strip()
+    model = str(payload.get("embedding_model") or "").strip()
+    if not base_url:
+        base_url = str(config.get("embedding", "base_url", default="") or "")
+    if not model:
+        model = str(config.get("embedding", "model", default="") or "")
+    return {
+        "provider": str(config.get("embedding", "provider", default="") or ""),
+        "model": model,
+        "base_url": base_url,
+    }
+
+
+def _panel_model_identities(profile: Any) -> dict[str, dict[str, str]]:
+    identities: dict[str, dict[str, str]] = {}
+    if profile is None or not getattr(profile, "panel_enabled", False):
+        return identities
+    presets: list[str] = []
+    for members in (getattr(profile, "panel_roster", {}) or {}).values():
+        presets.extend(str(member) for member in (members or []))
+    referee = str(getattr(profile, "panel_referee", "") or "")
+    if referee:
+        presets.append(referee)
+    for preset in dict.fromkeys(presets):
+        cfg = config.get("models", preset, default={}) or {}
+        if isinstance(cfg, dict):
+            identities[str(preset)] = {
+                "provider": str(cfg.get("provider") or ""),
+                "model": str(cfg.get("model") or ""),
+            }
+    return identities
+
+
+def _prompt_source_hash() -> str:
+    prompt_file = Path(config.PROJECT_ROOT) / "src" / "conflux" / "research_prompts.py"
+    try:
+        text = prompt_file.read_text(encoding="utf-8")
+    except OSError:
+        return "unavailable"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _freeze_inputs(depth: str, effective_payload: dict[str, Any]) -> dict[str, Any]:
+    """Deterministic snapshot of execution-relevant inputs (never includes key values)."""
+    from conflux.research_modes import resolve_research_profile
+
+    try:
+        profile = resolve_research_profile(depth)
+    except Exception:
+        profile = None
+    roles = _model_roles_for(depth, effective_payload)
+    embedding = _embedding_identity(effective_payload)
+    panel_models = _panel_model_identities(profile)
+    semantic = {
+        "depth": str(depth),
+        "roles": roles,
+        "embedding": embedding,
+        "panel_models": panel_models,
+        "prompt_hash": _prompt_source_hash(),
+        "budget": {
+            "timeout_seconds": int(getattr(profile, "timeout_seconds", 0) or 0),
+            "commit_reserve_seconds": int(getattr(profile, "commit_reserve_seconds", 0) or 0),
+            "token_budget": int(getattr(profile, "token_budget", 0) or 0),
+            "model_timeout_seconds": int(getattr(profile, "model_timeout_seconds", 0) or 0),
+            "max_retries": int(getattr(profile, "max_retries", 0) or 0),
+        },
+        "panel": (
+            {
+                "enabled": bool(getattr(profile, "panel_enabled", False)),
+                "roster": dict(getattr(profile, "panel_roster", {}) or {}),
+                "referee": str(getattr(profile, "panel_referee", "") or ""),
+            }
+            if profile is not None
+            else {}
+        ),
+    }
+    return {
+        **semantic,
+        "semantic_hash": hashlib.sha256(
+            json.dumps(semantic, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _credential_refs(
+    depth: str,
+    effective_payload: dict[str, Any],
+    roles: dict[str, dict[str, str]],
+    panel_presets: list[str],
+) -> list[dict[str, str]]:
+    """Stable credential references for the run — names only, never values."""
+    refs: list[dict[str, str]] = []
+
+    def add(ref: str, policy: str, scope: str) -> None:
+        if not ref or any(item["ref"] == ref for item in refs):
+            return
+        refs.append({"ref": ref, "policy": policy, "scope": scope})
+
+    payload_keys = {
+        key: value
+        for key, value in effective_payload.items()
+        if key.casefold() in _SECRET_FIELDS or key.casefold().endswith("_api_key")
+    }
+    if payload_keys.get("api_key"):
+        add("workbench_payload:api_key", "fail_closed", f"models.{depth}.api_key")
+    else:
+        presets = {str(role.get("preset") or "") for role in roles.values()}
+        presets.update(str(preset) for preset in panel_presets)
+        presets.discard("")
+        for preset in sorted(presets):
+            env_var = f"CONFLUX_MODELS__{preset.upper()}__API_KEY"
+            if os.environ.get(env_var):
+                add(f"env:{env_var}", "resume", f"models.{preset}.api_key")
+            elif config.get("models", preset, "api_key", default=None):
+                add(f"config:models.{preset}.api_key", "resume", f"models.{preset}.api_key")
+    if payload_keys.get("embedding_api_key"):
+        add("workbench_payload:embedding_api_key", "fail_closed", "embedding.api_key")
+    else:
+        env_var = "CONFLUX_EMBEDDING__API_KEY"
+        if os.environ.get(env_var):
+            add(f"env:{env_var}", "resume", "embedding.api_key")
+        elif config.get("embedding", "api_key", default=None):
+            add("config:embedding.api_key", "resume", "embedding.api_key")
+    return refs
+
+
+def _resolve_credential(ref: str, available_secrets: dict[str, Any]) -> Any:
+    if ref.startswith("workbench_payload:"):
+        return (available_secrets or {}).get(ref.split(":", 1)[1])
+    if ref.startswith("env:"):
+        return os.environ.get(ref.split(":", 1)[1])
+    if ref.startswith("config:"):
+        return config.get(*ref.split(":", 1)[1].split("."), default=None)
+    return None
+
+
+def _verify_frozen(
+    manifest: dict[str, Any],
+    depth: str,
+    effective_payload: dict[str, Any],
+    available_secrets: dict[str, Any],
+) -> str | None:
+    """Return an error string when the run cannot be restored on its frozen inputs.
+
+    Credentials are checked before the semantic hash: a missing temporary key must
+    surface as `credential_unavailable_after_restart`, not as a model-identity diff.
+    """
+    for credential in manifest.get("credentials") or []:
+        ref = str((credential or {}).get("ref") or "")
+        policy = str((credential or {}).get("policy") or "resume")
+        if not ref:
+            continue
+        if not _resolve_credential(ref, available_secrets):
+            if policy == "fail_closed":
+                return (
+                    "credential_unavailable_after_restart: "
+                    f"临时请求凭证引用 {ref} 在重启后不可用；按 fail_closed 终止，"
+                    "不静默改用共享环境密钥或其他 Provider。"
+                )
+            return (
+                "credential_unavailable_after_restart: "
+                f"凭证引用 {ref} 当前不可解析；拒绝在凭证配置变化后恢复运行。"
+            )
+    try:
+        current = _freeze_inputs(depth, effective_payload)
+    except Exception as exc:
+        return f"frozen_config_verification_error: {type(exc).__name__}: {exc}"
+    if str(current.get("semantic_hash") or "") != str(manifest.get("semantic_hash") or ""):
+        return (
+            "frozen_config_mismatch: provider/model/Prompt/预算解析与提交时冻结不一致；"
+            "拒绝用漂移配置恢复运行。"
+        )
+    return None
+
+
 class _EventLog:
     """Legacy in-memory event log retained only for narrow helper tests."""
 
@@ -138,6 +374,7 @@ class ResearchJob:
     progress: dict[str, str] = field(default_factory=dict)
     cancel_reason: str = ""
     warnings: list[str] = field(default_factory=list)
+    run_manifest: dict[str, Any] = field(default_factory=dict)
     thread: threading.Thread | None = None
     _cancel_flag: threading.Event = field(default_factory=threading.Event)
     _event_log: _EventLog = field(default_factory=_EventLog)
@@ -389,6 +626,7 @@ def _job_metadata(job: ResearchJob) -> dict[str, Any]:
         "cancel_reason": job.cancel_reason,
         "has_report": job.has_report,
         "warnings": job.warnings,
+        "run_manifest": dict(job.run_manifest),
     }
 
 
@@ -417,6 +655,7 @@ def _job_from_metadata(run_id: str, metadata: dict[str, Any]) -> ResearchJob:
         progress={str(k): str(v) for k, v in (metadata.get("progress") or {}).items()},
         cancel_reason=str(metadata.get("cancel_reason") or ""),
         warnings=[str(item) for item in (metadata.get("warnings") or [])],
+        run_manifest=dict(metadata.get("run_manifest") or {}),
     )
 
 
@@ -532,6 +771,33 @@ class JobManager:
             key: value
             for key, value in payload.items()
             if key.casefold() in _SECRET_FIELDS or key.casefold().endswith("_api_key")
+        }
+        # P1.3 运行冻结：把本 run 的模型/预算/凭证来源固定为 manifest（只存引用，不存密钥值）。
+        effective_payload = dict(payload)
+        effective_payload.update(secrets)
+        freeze = _freeze_inputs(depth, effective_payload)
+        panel_presets = [str(preset) for preset in (freeze.get("panel_models") or {})]
+        job.run_manifest = {
+            "schema": "conflux.run_manifest.v1",
+            "code_revision": _git_head_revision(),
+            "semantic_hash": str(freeze.get("semantic_hash") or ""),
+            "depth": str(depth),
+            "model_role": str(depth).upper(),
+            "roles": dict(freeze.get("roles") or {}),
+            "embedding": dict(freeze.get("embedding") or {}),
+            "panel_models": dict(freeze.get("panel_models") or {}),
+            "prompt_hash": str(freeze.get("prompt_hash") or ""),
+            "budget": dict(freeze.get("budget") or {}),
+            "credentials": _credential_refs(
+                depth,
+                effective_payload,
+                dict(freeze.get("roles") or {}),
+                panel_presets,
+            ),
+            "model_revision": None,
+            "model_revision_verified": False,
+            "model_revision_unverified": True,
+            "captured_at": started_at,
         }
         db = self._database()
         try:
@@ -844,6 +1110,52 @@ class JobManager:
         output_dir = _path_value(payload.get("output_dir"), "reports/workbench/query")
         mode = str(payload.get("mode") or "phase2")
         depth = str(payload.get("depth") or "standard")
+        # P1.3 运行冻结验证：凭证先于配置哈希检查（缺失临时密钥必须先报凭证诊断）。
+        frozen = dict((run.get("metadata") or {}).get("run_manifest") or {})
+        if frozen:
+            verdict = _verify_frozen(
+                frozen,
+                depth,
+                payload,
+                dict(self._secrets.get(run_id) or {}),
+            )
+            if verdict:
+                job.current_stage = "credential_recovery"
+                event_store.append(
+                    TraceEvent(
+                        stage="credential_recovery",
+                        status="failed",
+                        elapsed_ms=round((time.time() - job.started_at) * 1000, 2),
+                        summary=verdict,
+                        run_id=run_id,
+                        thread_id=run_id,
+                        metadata={
+                            "error_code": (
+                                "credential_unavailable_after_restart"
+                                if "credential_unavailable_after_restart" in verdict
+                                else "frozen_config_mismatch"
+                            )
+                        },
+                    )
+                )
+                _write_failure_diagnostic(
+                    job,
+                    output_dir,
+                    status="failed",
+                    error=verdict,
+                    retryable=False,
+                )
+                _finish_job(job, "failed", verdict, preserve_report=False)
+                queue.fail(
+                    run_id,
+                    self._worker_id,
+                    verdict,
+                    retryable=False,
+                    result=_job_metadata(job),
+                )
+                run_store.update_metadata(run_id, _job_metadata(job), status="failed")
+                db.close()
+                return
         last_step = run_store.last_step(run_id)
         step_seq = int((last_step or {}).get("seq") or 0)
         trace_count = 0

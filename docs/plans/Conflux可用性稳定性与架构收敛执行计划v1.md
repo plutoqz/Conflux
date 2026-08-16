@@ -1092,21 +1092,20 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 
 ### 18.2 当前阶段
 
-- 阶段：P1 任务运行正确性与故障恢复（工作包 P1.1 claim/lease 时序 → `completed`；P1.2 幂等与背压 → `completed`（离线验收通过）；P1.3 凭证冻结 pending）
+- 阶段：P1 任务运行正确性与故障恢复（P1.1 claim/lease → `completed`；P1.2 幂等与背压 → `completed`；P1.3 凭证冻结 → `completed`（离线验收通过）；P1.4 结构化诊断 pending）
 - 状态：`in_progress`
 - 证据：
   - `reports/evaluation/convergence/p1/p11_claim_lease_probe.json`（P1.1：25 次探针 + 20 次复跑）
-  - `reports/evaluation/convergence/p1/p12_focused_pytest.{log,xml}`（P1.2 聚焦测试 103 passed）
-  - `reports/evaluation/convergence/p1/p12_recovery_repeat.json`（P1.2 恢复测试 20/20）
-  - `reports/evaluation/convergence/p1/p12_full_pytest.{log,xml}`（全量 764 passed）
+  - `reports/evaluation/convergence/p1/p12_focused_pytest.{log,xml}`（P1.2 聚焦 103 passed）、`p12_recovery_repeat.json`（20/20）、`p12_full_pytest.{log,xml}`（全量 764 passed）
+  - `reports/evaluation/convergence/p1/p13_focused_pytest.{log,xml}`（P1.3 聚焦 107 passed）、`p13_full_pytest.{log,xml}`（全量 768 passed）
 - 关键结论：
-  - P1.1 探针（`scripts/p1_claim_probe.py`）25/25 ready、25/25 claim 成功；claim P50 4.40s、P95 4.76s、max 5.56s；根因=子进程冷启动 import，恢复测试 5s 固定窗口卡在 claim P90 附近 → 改 30s 事件驱动后 **20/20 通过**。
-  - **P1.2 验收通过（2026-08-16）**：聚焦测试（test_m3_workbench_query_jobs + test_m3_jobs_checkpoints + test_workbench）**103 passed**；恢复测试独立复跑 **20/20**（每轮 1 passed，含 P1.1 回归）；全量离线测试 **764 passed / 0 failed / 588 warnings / 435.79s**（较 P0 基线 755 项 +9：P1.2 新增 1 个 20 并发去重测试、3 个 HTTP 层 202/409/429 测试，另有此前未计入基线的 5 个 P1.2 单测）。
-  - P1.2 语义：`POST /api/query/jobs` 读取 `Idempotency-Key`；同键同语义重放原 run（`idempotent_replay`）；同键异语义 409；队列上限 429 + Retry-After + 恢复建议；返回 `queue_position`/`active_count`/`wait_estimate`；job 行与 RunStore 行同一事务创建（`jobs.idempotency_key UNIQUE` 并发兜底）；Workbench 前端按提交正文生成稳定 key 并呈现结构化错误/Retry-After。
-  - 测试执行说明：本轮经 run_code 的 `node:child_process` 直接运行 pytest（bash 工具在 win32 不可用）；子进程需显式注入 `USERNAME/TEMP/TMP/HOMEDRIVE/HOMEPATH`（会话环境为空导致 pytest 临时目录权限错误）；**不得**用 `--basetemp=.pytest_tmp` 跑全量（会使 test_knowledge_stats_reflect_new_papers_even_with_stale_manifest 与 test_session_detail_uses_only_verified_legacy_report 两个路径敏感测试失败）。
-  - 已清理上一轮遗留：伪造探针 JSON、损坏 SQLite 文件 `scripts/_p1_claim_probe.py*`、僵尸进程 PID 25692。P0 记录的服务 PID 50348（8765/9765）保持运行未动。
-  - 本轮改动已按验收点分批提交并推送 origin/main：C1 遗留工作树入库、C2 P0 脚本、C3 P1.1、C4 P1.2（见 git log）；`reports/` 下证据按 .gitignore 约定仅保留本地，不入库。
-- 唯一下一验收点：P1.3 重启凭证与运行冻结（run manifest 保存 revision/配置哈希/模型角色/credential_ref；不持久化明文密钥；重启后凭证不可解析必须 fail-closed，不得漂移 provider/model/Prompt）。
+  - **P1.3 验收通过（2026-08-16）**：提交时生成 `conflux.run_manifest.v1` 运行冻结（code_revision、semantic_hash、model_role、roles 的 provider/model/base_url、embedding 身份、panel 成员身份、prompt_hash、budget、credential_ref 列表、`model_revision_unverified=true`）；manifest 只存凭证**引用**（`workbench_payload:*`/fail_closed、`env:*`、`config:*`），不存任何密钥值（测试断言元数据序列化无密钥）。
+  - 重启恢复语义：claim 时先验证凭证引用——临时请求密钥重启后不可解析 → `credential_unavailable_after_restart` 诊断 + 终态 failed（fail-closed，绝不静默回退到共享环境密钥或其他 Provider）；随后比对 semantic_hash，provider/model/Prompt/预算/panel 漂移 → `frozen_config_mismatch` 终态 failed；两者都写入 `conflux.research_failure.v1` 诊断产物与 EventStore `credential_recovery` 事件。旧 run（无 manifest）跳过验证，向后兼容。
+  - P1.3 测试（4 个新增，全过）：manifest 无密钥断言；payload 密钥重启 fail-closed（query_command 未被调用）；env 引用重启正常恢复执行；配置漂移 fail-closed（诊断码区分正确）。
+  - 聚焦测试 **107 passed**（37.32s）；全量离线测试 **768 passed / 0 failed / 510 warnings / 407.99s**（较 P1.2 基线 +4）。
+  - 测试执行说明（沿用）：经 run_code 的 `node:child_process` 运行 pytest；子进程需显式注入 `USERNAME/TEMP/TMP/HOMEDRIVE/HOMEPATH`；不得用 `--basetemp=.pytest_tmp` 跑全量（两个路径敏感测试会失败）。
+  - P1.3 改动已提交并推送 origin/main（见 git log；P1.3 为 C5 提交）。
+- 唯一下一验收点：P1.4 所有终态结构化诊断（`conflux.research_failure.v1` 覆盖 lease 超限/Worker 初始化失败/凭证恢复失败/配置与模型构建失败/用户取消/系统 deadline/Artifact final commit 失败；终态与诊断引用同一事务可见）。
 
 
 ### 18.3 当前决策
@@ -1122,15 +1121,16 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 | P1.2 幂等键由前端按提交正文生成稳定 key，服务端以 jobs.idempotency_key UNIQUE 约束事务化去重；背压用 429 + Retry-After | 满足 §6.5 语义：响应丢失重投不新增 Job/Run/Artifact，不扩大并发 | 2026-08-16 |
 | P1.2 离线验收通过，进入 P1.3 | 聚焦 103 passed、恢复 20/20、全量 764 passed；证据入 reports/evaluation/convergence/p1/p12_* | 2026-08-16 |
 | P1.2 验收后按验收点分批提交并推送 origin/main | 用户指令；C1 遗留工作树入库 / C2 P0 脚本 / C3 P1.1 / C4 P1.2 四个提交 | 2026-08-16 |
+| P1.3 运行冻结 manifest（引用式凭证 + 重启 fail-closed + 配置漂移检测） | 满足 §6.6：重启后要么同一冻结配置恢复，要么明确失败；provider/model/Prompt 不得漂移 | 2026-08-16 |
 
 ### 18.4 当前未验证项
 
-- P1.3 凭证冻结未开始：run manifest 的 revision/配置哈希/credential_ref 与重启 fail-closed 尚无实现。
+- P1.4 结构化诊断未开始：lease 超限/Worker 初始化失败/配置构建失败/Artifact final commit 失败等终态尚未全部纳入 `conflux.research_failure.v1`。
 - 当前运行服务（PID 50348）与工作树代码不一致，P1 结束前需在真实进程上做一次冻结版本验证。
 - standard token 耗尽的逐阶段占用与上下文重复比例。
 - 当前 Workbench 在真实 320px、200% 缩放和键盘流程下的表现。
 - 第二个真实项目的完整 P3 闭环和 P6 可用性结果。
-- 当前 Provider 对具体模型 revision 的可验证证据。
+- 当前 Provider 对具体模型 revision 的可验证证据（P1.3 已如实标记 `model_revision_unverified`，等待 Provider 提供可验证 revision 证据）。
 
 ### 18.5 不应自动扩展
 
@@ -1140,6 +1140,37 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 - 不先做单一 ASGI 大迁移。
 
 ## 19. 阶段检查点
+
+### 2026-08-16 16:29 - P1.3 检查点（completed）
+
+- 当前目标：P1.3 重启凭证与运行冻结——run manifest 固定 revision/模型/预算/凭证来源，重启后同一冻结配置恢复或明确失败。
+- 当前阶段：P1 `in_progress`（P1.1/P1.2 `completed`；P1.3 `completed` → 下一工作包 P1.4 结构化诊断）。
+- 状态：completed
+- 源码版本：`5e55dec`（main；P1.3 改动随后提交并推送，见 git log）
+- 允许修改范围：P1 §6.2 列表（jobs.py / sqlite_store.py / server.py Job 路由 / api_v2 / 三个测试文件 / eval_job_recovery.py）+ 本文件状态与检查点部分。本轮实际仅改 `src/conflux/workbench/jobs.py` 与 `tests/test_m3_workbench_query_jobs.py`。
+- 本轮非目标：不修改研究 Prompt/检索/报告；不启动真实模型调用；不开始 P1.4/P2/ASGI 迁移。
+
+#### 已完成证据
+- 修改文件：`src/conflux/workbench/jobs.py`（`conflux.run_manifest.v1` 冻结：_git_head_revision/_freeze_inputs/_credential_refs/_verify_frozen；submit 生成 manifest；_execute claim 时验证 + fail-closed 终态）；`tests/test_m3_workbench_query_jobs.py`（4 个 P1.3 测试）。
+- 测试命令与实际结果：
+  - `python -m pytest -q tests/test_m3_workbench_query_jobs.py tests/test_m3_jobs_checkpoints.py tests/test_workbench.py` → **107 passed**（37.32s；junitxml `p13_focused_pytest.xml`）。
+  - `python -m pytest -q --junitxml=reports/evaluation/convergence/p1/p13_full_pytest.xml` → **768 passed / 0 failed / 510 warnings**（407.99s）。
+- run ID / Artifact / hash：无 live 运行（离线合同验收）；诊断产物路径由 P1.3 测试断言（`<run_id>.diagnostic.{json,md}`）。
+- 验证层级：单元 + 集成（真实 SQLite/JobQueue/RunStore/EventStore + 真实 worker 重启 + 真实子进程恢复），离线。
+
+#### 未完成或阻塞
+- 无阻塞。唯一观察项：`model_revision_verified=false`（当前 Provider 不提供可验证 revision 证据，manifest 如实记录 `model_revision_unverified`）。
+
+#### 决策、推断与待验证假设
+- 事实：重启前 `_secrets` 内存密钥在重启后静默丢失，旧代码会无提示回退到环境/配置密钥（§6.6 明确禁止）；现已 fail-closed。
+- 推断：凭证引用先于语义哈希校验，才能对「密钥丢失导致的模型身份变化」报出正确的 `credential_unavailable_after_restart` 而非 `frozen_config_mismatch`（测试证实）。
+- 假设及验证方法：无新增待验证假设。
+
+#### 唯一下一验收点
+- P1.4：所有终态结构化诊断（lease 超限 / Worker 初始化失败 / 凭证恢复失败 / 配置与模型构建失败 / 用户取消 / 系统 deadline / Artifact final commit 失败），终态与诊断引用同一事务可见。
+
+#### 不应自动扩展
+- 不开始 P2（预算/质量）或 ASGI 迁移；不修改研究语义；不提交本轮改动（提交需用户指令）。
 
 ### 2026-08-16 15:56 - P1.2 检查点（completed）
 

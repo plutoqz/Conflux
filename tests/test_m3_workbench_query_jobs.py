@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import subprocess
 import sys
@@ -540,4 +541,154 @@ def test_submit_idempotency_concurrent_duplicates_produce_single_run(tmp_path: P
         assert len(RunStore(db).list()) == 1
     finally:
         db.close()
+
+
+# --- P1.3: frozen run manifest + restart credentials ---
+
+
+def test_submit_records_frozen_run_manifest_without_secrets(tmp_path: Path) -> None:
+    manager = JobManager(db_path=tmp_path / "conflux.db", start_worker=False)
+    result = manager.submit(
+        "frozen query",
+        {
+            "depth": "quick",
+            "model": "test-model-x",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "reasoning-secret-abc",
+            "embedding_api_key": "embedding-secret-xyz",
+        },
+    )
+
+    db = SQLiteDatabase(tmp_path / "conflux.db").connect()
+    try:
+        metadata = dict((RunStore(db).get(result["run_id"]) or {}).get("metadata") or {})
+    finally:
+        db.close()
+
+    manifest = dict(metadata.get("run_manifest") or {})
+    assert manifest.get("schema") == "conflux.run_manifest.v1"
+    revision = str(manifest.get("code_revision") or "")
+    assert len(revision) == 40 and all(c in "0123456789abcdef" for c in revision)
+    assert manifest.get("semantic_hash")
+    assert manifest.get("model_revision") is None
+    assert manifest.get("model_revision_verified") is False
+    assert manifest.get("model_revision_unverified") is True
+    assert manifest.get("roles", {}).get("planner", {}).get("model") == "test-model-x"
+    assert manifest.get("roles", {}).get("planner", {}).get("provider") == "openai_compatible"
+
+    credentials = {str(item.get("ref")): item for item in manifest.get("credentials") or []}
+    assert credentials["workbench_payload:api_key"]["policy"] == "fail_closed"
+    assert credentials["workbench_payload:embedding_api_key"]["policy"] == "fail_closed"
+
+    serialized = json.dumps(metadata, ensure_ascii=False)
+    assert "reasoning-secret-abc" not in serialized
+    assert "embedding-secret-xyz" not in serialized
+
+
+def test_restart_fails_closed_when_payload_credentials_unavailable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from conflux import __main__ as cli
+
+    calls: list[int] = []
+
+    def spy_query(*args, **kwargs):
+        calls.append(1)
+        return _fake_query_command(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "query_command", spy_query)
+    db_path = tmp_path / "conflux.db"
+    submitter = JobManager(db_path=db_path, start_worker=False)
+    run_id = submitter.submit(
+        "temporary key run",
+        {"depth": "quick", "model": "override-model", "api_key": "temporary-key-123"},
+    )["run_id"]
+
+    # 重启模拟：新 manager 内存里没有临时密钥，必须 fail-closed，不得静默回退。
+    worker = JobManager(db_path=db_path, poll_interval=0.02)
+    status = _wait_for_status(worker, run_id, {"failed"})
+    worker.close()
+
+    assert calls == []
+    assert status["has_report"] is False
+    assert "credential_unavailable_after_restart" in status["error"]
+    diagnostic = json.loads(
+        Path(status["artifacts"]["diagnostic_json_path"]).read_text(encoding="utf-8")
+    )
+    assert diagnostic["schema_version"] == "conflux.research_failure.v1"
+    assert "credential_unavailable_after_restart" in diagnostic["error"]
+    assert diagnostic["recovery"]["retryable"] is False
+
+    db = SQLiteDatabase(db_path).connect()
+    try:
+        queued = JobQueue(db).get(run_id)
+        assert queued is not None and queued["status"] == "failed"
+        events = EventStore(db).list(run_id=run_id)
+        assert any(str(item.get("stage")) == "credential_recovery" for item in events)
+    finally:
+        db.close()
+
+
+def test_restart_resolves_env_credential_ref_and_runs(tmp_path: Path, monkeypatch) -> None:
+    from conflux import __main__ as cli
+
+    monkeypatch.setattr(cli, "query_command", _fake_query_command)
+    monkeypatch.setenv("CONFLUX_MODELS__FLASH__API_KEY", "env-key-value")
+    config._config = None
+    try:
+        db_path = tmp_path / "conflux.db"
+        submitter = JobManager(db_path=db_path, start_worker=False)
+        run_id = submitter.submit("env key run", {"depth": "quick"})["run_id"]
+
+        db = SQLiteDatabase(db_path).connect()
+        try:
+            metadata = dict((RunStore(db).get(run_id) or {}).get("metadata") or {})
+        finally:
+            db.close()
+        manifest = dict(metadata.get("run_manifest") or {})
+        refs = [str(item.get("ref")) for item in manifest.get("credentials") or []]
+        assert "env:CONFLUX_MODELS__FLASH__API_KEY" in refs
+        assert "env-key-value" not in json.dumps(manifest, ensure_ascii=False)
+
+        # 重启后 env 引用仍可解析 → 正常恢复执行。
+        worker = JobManager(db_path=db_path, poll_interval=0.02)
+        status = _wait_for_status(worker, run_id, {"completed_diagnostic"})
+        worker.close()
+        assert status["status"] == "completed_diagnostic"
+        assert "credential_unavailable" not in status["error"]
+    finally:
+        config._config = None
+
+
+def test_restart_detects_frozen_config_drift_and_fails_closed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from conflux import __main__ as cli
+
+    calls: list[int] = []
+
+    def spy_query(*args, **kwargs):
+        calls.append(1)
+        return _fake_query_command(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "query_command", spy_query)
+    db_path = tmp_path / "conflux.db"
+    submitter = JobManager(db_path=db_path, start_worker=False)
+    run_id = submitter.submit("config drift", {"depth": "quick"})["run_id"]
+
+    # 漂移：提交后把 quick 档 planner 的 preset 换掉（不触及任何密钥）。
+    drifted = copy.deepcopy(config.load())
+    drifted["research"]["profiles"]["quick"]["planner_model"] = "ds_strong"
+    monkeypatch.setattr(config, "_config", drifted)
+
+    worker = JobManager(db_path=db_path, poll_interval=0.02)
+    status = _wait_for_status(worker, run_id, {"failed"})
+    worker.close()
+
+    assert calls == []
+    assert status["has_report"] is False
+    assert "frozen_config_mismatch" in status["error"]
+    assert "credential_unavailable_after_restart" not in status["error"]
 
