@@ -1101,6 +1101,7 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
   - `reports/evaluation/convergence/p1/p14_focused_pytest.{log,xml}`（P1.4 聚焦 116 passed）、`p14_full_pytest.log`（全量 777 passed / 0 failed / 588 warnings / 409.02s）、`p14_eval_recovery.log` + `eval_recovery/job_recovery.json`（200 jobs：recovery/lease_reclaim/final_state_consistency/idempotency_dedup 均 1.0，duplicate_execution/event_loss/reconnect_loss 均 0）、`p14_fault_matrix.json`（§6.8 矩阵 8 行 → 测试逐行映射）
   - P1 阶段退出：`p15_recovery_repeat.json`（20 次进程终止恢复独立复跑）、`p15_daemon_freeze_probe.json`（PID 50348 冻结版本只读探针）、`p15_focused_pytest.{log,xml}` 与 `p15_full_pytest.log`（阶段退出最终一轮，含 §6.10 终态一致性测试）
   - P2.1：`reports/evaluation/convergence/p2/p21_ledger_evidence.json`（逐调用账本设计 + 语义约定）、`p21_full_pytest.log`（全量 784 passed / 0 failed / 550 warnings / 373.79s）
+  - P2.2：`p22_reserves_evidence.json`（阶段硬保留机制 + 语义约定 + 待实测项）、`p22_full_pytest.log`（全量 789 passed / 0 failed / 588 warnings / 382.67s）
 - 关键结论：
   - **P1.3 验收通过（2026-08-16）**：提交时生成 `conflux.run_manifest.v1` 运行冻结（code_revision、semantic_hash、model_role、roles 的 provider/model/base_url、embedding 身份、panel 成员身份、prompt_hash、budget、credential_ref 列表、`model_revision_unverified=true`）；manifest 只存凭证**引用**（`workbench_payload:*`/fail_closed、`env:*`、`config:*`），不存任何密钥值（测试断言元数据序列化无密钥）。
   - 重启恢复语义：claim 时先验证凭证引用——临时请求密钥重启后不可解析 → `credential_unavailable_after_restart` 诊断 + 终态 failed（fail-closed，绝不静默回退到共享环境密钥或其他 Provider）；随后比对 semantic_hash，provider/model/Prompt/预算/panel 漂移 → `frozen_config_mismatch` 终态 failed；两者都写入 `conflux.research_failure.v1` 诊断产物与 EventStore `credential_recovery` 事件。旧 run（无 manifest）跳过验证，向后兼容。
@@ -1111,8 +1112,9 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
   - CI 修复（2026-08-16）：GitHub Actions 自 2026-08-13 起持续红——`tests/test_p4_panel.py::TestPanelModelConstruction` 两个用例直接构造 ChatOpenAI，在无 OPENAI_API_KEY 的环境（CI/干净 checkout）构造期抛 OpenAIError；本地通过是因为仓库根 .env（gitignored）注入密钥掩盖了问题。已改为 create_chat_model 占位对象（断言仍覆盖成员数/标签/max_tokens 减半），CI-like 干净树实测 3 passed；全文件 35 passed。
 - **P1.4 验收通过（2026-08-16）**：`conflux.research_failure.v1` 扩展 9 个失败分类码（lease_overrun / worker_init_failure / credential_recovery_failure / config_build_failure / model_build_failure / user_cancelled / system_deadline / final_commit_failure / execution_failure），诊断含 run ID、请求摘要、源码版本（code_revision）、失败阶段、已完成进度、输入配置哈希（semantic_hash）、重试安全性、保留产物、恢复动作、原始错误类型。终态与诊断引用同一事务：`SQLiteDatabase.transaction()`（显式所有权，兼容 sqlite3 legacy 隐式事务）+ queue 终态转移/RunStore 终态行/终态事件一次提交；写入失败整体回滚（注入测试证实）。期间发现并修复一个真实读竞态：expire_exhausted 先单独提交 queue=failed、RunStore 更新在第二个事务，两提交之间 get() 可见「queue=failed + run=pending（无诊断引用）」，改为同一事务后消失。final_commit 写入失败绝不发布无 Artifact 的 completed（无交付产物时 delivery_status=diagnostic_only 保证 has_report 一致）。
 - **P1 阶段退出（2026-08-16）**：§6.8 矩阵 8 行覆盖、§6.9 最小验证集（三文件聚焦 + eval_job_recovery + 全量）、§6.10 六条验收全部满足——20 次进程终止恢复 20/20、无重复执行、全部终态具备报告或结构化诊断、list/详情/RunStore/JobQueue/事件五视图一致（新增一致性测试）、全量离线通过。PID 50348 冻结版本验证完成（冻结于 `38eee94`，健康；P1 修复需重启后生效）。
-- **P2.1 验收通过（2026-08-16）**：每次模型调用记录 `conflux.research_failure` 无关的预算调用账本（§7.5 全部字段：run_id/stage/role/provider/model/revision_evidence/prompt_hash/input_tokens/output_tokens/reserved_tokens/context_bytes/evidence_refs_count/latency/finish_reason/estimated_cost）；usage 缺失记录 `unknown` 不用估算冒充；对账快照（reconciliation）解释总预算与各调用之和的差异并写入 `<run_id>.summary.json` 的 `model_trace.token_budget_runtime`；12 个图节点经 contextvar 标注 stage。
-- 唯一下一验收点：P2.2 交付预算硬保留（用离线回放 + 最小 live pilot 测各阶段 token P50/P90，保留值取 P90 + 余量；synthesis/FactCheck/final commit 硬保留）。
+- **P2.1 验收通过（2026-08-16）**：每次模型调用记录 `conflux.research_failure` 无关的预算调用账本（§7.5 全部字段：run_id/stage/role/provider/model/revision_evidence/prompt_hash/input_tokens/output_tokens/reserved_tokens/context_bytes/evidence_refs_count/latency/finish_reason/estimated_cost）；usage 缺失记录 `unknown` 不用估算冒充；对账快照（reconciliation）解释总预算与各调用之和的差异并写入 `<run_id>.summary.json` 的 `model_trace.token_budget_runtime`；12 个图节点经 contextvar 标注 stage。CI run #31949119159 success。
+- **P2.2 离线验收通过（2026-08-16）**：阶段硬保留机制落地——`stage_reserves_from_ledger` 从逐调用账本计算每阶段 P90 × (1+margin)（样本不足记 `unmeasured_no_reserve`，unknown 如实计数，不写死任意百分比）；`BudgetedChatModel` 按当前 stage 对之后所有交付阶段求和保留（retrieval/analysis/panel/gap 只能使用扣除硬保留后的预算，前置调用突破保底被拒绝并计数）；generate_node 增加 token 预检——预计无法覆盖时先按优先级缩减章节并记录 `token_budget_section_shrink:{n}`；final commit 无模型调用 + 时间保留无回归。config `research.stage_token_reserves` 默认空（旧行为不变），pilot 实测后回填。
+- 唯一下一验收点：P2.2 的**真实 P50/P90 实测**（最小 live pilot，2 案）——需要 §7.12 冻结清单 + 单独明确授权；在此之前继续 P2.3 上下文去重与引用化的离线部分。
 - **付费 live 调用（含 2 案 pilot）前必须冻结 §7.12 清单并取得单独明确授权。**
 
 
@@ -1135,6 +1137,7 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 | P1 阶段退出：§6.10 全部满足，进入 P2 | 故障矩阵/20 次恢复/无重复执行/终态三选一/五视图一致/全量离线全部通过；PID 50348 冻结版本验证完成 | 2026-08-16 |
 | P2 需用户明确授权后启动付费 live 运行 | §7.2 前置条件 + 计划 §1.3 非目标「未冻结时不启动付费正式实验」 | 2026-08-16 |
 | P2.1 逐调用账本：contextvar 阶段标注 + 预算包装器记录 §7.5 字段 + reconciliation 对账写入 run summary | usage 缺失记 unknown；revision_evidence 无证据记 unverified；estimated_cost 无价格表记 unknown | 2026-08-16 |
+| P2.2 阶段硬保留：观测 P90+余量驱动（不写死百分比）、按 stage 求和保底、前置突破即拒绝、生成前 token 预检缩减 | 真实 P50/P90 实测待 pilot（付费，需授权）；缺省配置为空 = 旧行为不变 | 2026-08-16 |
 
 ### 18.4 当前未验证项
 
@@ -1152,6 +1155,44 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 - 不先做单一 ASGI 大迁移。
 
 ## 19. 阶段检查点
+
+### 2026-08-16 21:00 - P2.2 检查点（completed，离线机制；真实 P50/P90 实测待 pilot）
+
+- 当前目标：P2.2 交付预算硬保留——synthesis/FactCheck/final commit 保留值取观测 P90+余量；retrieval/analysis/panel/gap 只用扣除硬保留后的预算；预计无法覆盖时先缩减并显式记录；final commit 不依赖模型预算。
+- 当前阶段：P2 `in_progress`（P2.1 `completed`；P2.2 离线机制 `completed`，真实 P50/P90 实测待 pilot 授权 → 并行推进 P2.3 离线部分）。
+- 状态：completed（离线机制与离线验收；live 实测单独受 §7.12 闸门约束）
+- 源码版本：`997eeb9`（main；P2.2 改动随本轮提交，见 git log）
+- 允许修改范围：§7.3 列表（model_factory.py / graph_v2.py / __main__.py / config.yaml / tests/test_v3_model_modes.py）+ 本文件状态与检查点部分。
+- 本轮非目标：不启动任何付费模型调用；不改研究 Prompt；P2.2 live 实测（pilot）单独走授权。
+
+#### 已完成证据
+- 修改文件：`src/conflux/model_factory.py`（STAGE_ORDER + percentile + stage_reserves_from_ledger + resolve_stage_token_reserves + BudgetedChatModel.stage_reserves/_stage_preserve + create_research_models(stage_token_reserves)）、`src/conflux/graph_v2.py`（generate_node token 预检缩减 + token_budget_section_shrink 记录）、`src/conflux/__main__.py`（config 保留接线 + summary.stage_token_reserves）、`config.yaml`（文档化注释，默认空）、`tests/test_v3_model_modes.py`（5 个新测试）。
+- 测试命令与实际结果：
+  - `python -m pytest -q tests/test_v3_model_modes.py` → **23 passed**（含 5 个新 P2.2 测试）。
+  - v3 三文件（model_modes + budget_replay + research_rounds）→ **34 passed**。
+  - 全量：`python -m pytest -q` → **789 passed / 0 failed / 588 warnings / 382.67s**（`p22_full_pytest.log`；较 P2.1 基线 +5）。
+- run ID / Artifact / hash：无 live 运行（离线合同验收）；保留计算与拒绝语义由 5 个离线单测断言（合成 ledger 样本 + 边界拒绝注入）。
+- 验证层级：单元 + 集成（真实包装器调用链 + 真实图节点预检），离线。
+
+#### 关键结论
+- 硬保留是**数据驱动**的：stage_reserves_from_ledger 从 P2.1 账本取每阶段 usage P90 × (1+margin)；样本不足 → reserve 0 且 basis=unmeasured_no_reserve；unknown 样本单独计数。不存在写死的预算百分比。
+- 保底方向：stage S 的 preserve = Σ reserve(S 之后所有交付阶段)；前置阶段突破保底被拒绝（RuntimeError + rejected_calls），被保护阶段从剩余预算正常消费。
+- 生成前预检：token 维度容量不足先按优先级砍章节并记录 token_budget_section_shrink:{n}（与既有 low_priority_sections_dropped/retrieval 丢弃并列）。
+- 缺省行为不变：stage_token_reserves 为空时 preserve 回落 role 级 downstream_reserve（旧语义），全量 789 passed 证无回归。
+
+#### 未完成或阻塞
+- P2.2 真实各阶段 token P50/P90 实测需要最小 live pilot（付费）；按 §7.12 冻结清单 + 用户单独明确授权后才能启动。此项不阻塞 P2.3 离线工作。
+
+#### 决策、推断与待验证假设
+- 事实：现有 replay 资产（evaluation/v2_gold、p34 replay bundle）不含 usage_metadata，无法离线产出真实 usage 分布——因此保留值必须由 pilot 实测回填，机制先落地并保持缺省关闭。
+- 推断：按 stage 求和保底 + 生成前缩减能在「预算不足」时把失败前移为显式计划缩减，而不是 synthesis 阶段 RuntimeError（待 pilot 验证）。
+- 假设及验证方法：无新增待验证假设；pilot 后用 stage_reserves_from_ledger 回填 config。
+
+#### 唯一下一验收点
+- P2.3 上下文去重与引用化（离线部分）：Evidence 按 hash 存一次、下游按 ref 选择；claim/source/section 上限与选择理由；避免历史生成文本反复作为新证据；压缩可回溯可 replay。
+
+#### 不应自动扩展
+- 不启动付费模型调用；不开始 P2.4/P2.5；不改研究 Prompt/检索/报告格式。
 
 ### 2026-08-16 19:40 - P2.1 检查点（completed）
 

@@ -551,3 +551,119 @@ def test_scoped_node_records_stage_for_nested_model_calls():
 
     assert budget.telemetry["calls"][0]["stage"] == "generate"
 
+# --- P2.2：交付预算硬保留（数据驱动 P90+余量，不写死百分比） ---
+
+
+def test_percentile_nearest_rank():
+    from conflux.model_factory import percentile
+
+    assert percentile([], 0.9) == 0
+    assert percentile([10, 20, 30, 40, 50, 60, 70, 80, 90, 100], 0.9) == 90
+    assert percentile([5], 0.9) == 5
+
+
+def test_stage_reserves_from_ledger_p90_plus_margin_and_unknown_accounting():
+    from conflux.model_factory import stage_reserves_from_ledger
+
+    calls = [
+        {"status": "ok", "stage": "synthesize", "total_tokens": 100 + i * 100}
+        for i in range(10)
+    ]
+    calls.append({"status": "ok", "stage": "synthesize", "total_tokens": "unknown"})
+    calls.append({"status": "ok", "stage": "factcheck", "total_tokens": 500})
+    calls.append({"status": "failed", "stage": "factcheck", "total_tokens": "unknown"})
+
+    reserves = stage_reserves_from_ledger(calls, margin_ratio=0.2)
+    synth = reserves["synthesize"]
+    assert synth["samples"] == 10
+    assert synth["unknown_usage_samples"] == 1
+    assert synth["p90"] == 900
+    assert synth["reserve"] == round(900 * 1.2)
+    assert synth["basis"] == "observed_p90_plus_margin"
+    assert reserves["factcheck"]["reserve"] == round(500 * 1.2)
+    assert reserves["finalize"]["reserve"] == 0
+    assert reserves["finalize"]["basis"] == "unmeasured_no_reserve"
+
+
+def test_stage_preserve_protects_delivery_stages():
+    from conflux.model_factory import (
+        BudgetedChatModel,
+        ResearchTokenBudget,
+        research_call_stage,
+    )
+    from types import SimpleNamespace
+
+    budget = ResearchTokenBudget(2000)
+    stage_reserves = {"synthesize": 400, "factcheck": 300, "finalize": 200}
+    model = BudgetedChatModel(
+        _budget_fake_model(usage={"input_tokens": 50, "output_tokens": 50, "total_tokens": 100}),
+        budget,
+        output_reserve=100,
+        role="analyst",
+        preset="standard",
+        stage_reserves=stage_reserves,
+    )
+    # generate 阶段：下游保护 = synthesize + factcheck + finalize = 900（104+900 <= 2000 可执行）
+    with research_call_stage("generate"):
+        model.invoke([SimpleNamespace(content="draft")])
+    call = budget.telemetry["calls"][0]
+    assert call["preserve_tokens"] == 900
+    assert call["charged_tokens"] == 100
+
+    # 保护底线：剩余可用 < 保护量时，前置阶段调用必须被拒绝而不是吃掉保底。
+    budget2 = ResearchTokenBudget(1000)
+    model2 = BudgetedChatModel(
+        _budget_fake_model(usage={"input_tokens": 100, "output_tokens": 100, "total_tokens": 200}),
+        budget2,
+        output_reserve=100,
+        role="reranker",
+        preset="standard",
+        stage_reserves=stage_reserves,
+    )
+    with research_call_stage("retrieve"):
+        # required(100+~7) + preserve(900) > 1000 → 拒绝
+        try:
+            model2.invoke([SimpleNamespace(content="fetch evidence")])
+        except RuntimeError as exc:
+            assert "budget exhausted" in str(exc)
+        else:
+            raise AssertionError("前置阶段调用不应突破交付保底")
+    assert budget2.telemetry["charged_tokens"] == 0
+    assert budget2.telemetry["rejected_calls"] == 1
+
+
+def test_stage_reserves_disabled_keeps_legacy_preserve():
+    from conflux.model_factory import (
+        BudgetedChatModel,
+        ResearchTokenBudget,
+        research_call_stage,
+    )
+    from types import SimpleNamespace
+
+    budget = ResearchTokenBudget(10_000)
+    model = BudgetedChatModel(
+        _budget_fake_model(usage={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}),
+        budget,
+        output_reserve=50,
+        role="planner",
+        preset="standard",
+        downstream_reserve=777,
+    )
+    with research_call_stage("decompose"):
+        model.invoke([SimpleNamespace(content="plan")])
+    assert budget.telemetry["calls"][0]["preserve_tokens"] == 777
+
+
+def test_resolve_stage_token_reserves_from_config(monkeypatch):
+    from conflux import config as config_module
+    from conflux.model_factory import resolve_stage_token_reserves
+
+    def fake_get(section, key, default=None):
+        if section == "research" and key == "stage_token_reserves":
+            return {"synthesize": "12000", "factcheck": "8000", "finalize": 0, "audit": "nope"}
+        return default
+
+    monkeypatch.setattr(config_module, "get", fake_get)
+    assert resolve_stage_token_reserves() == {"synthesize": 12000, "factcheck": 8000}
+
+

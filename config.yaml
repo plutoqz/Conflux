@@ -271,5 +271,13 @@ research:
       model_timeout_seconds: 240
       max_retries: 0
       timeout_seconds: 480
+  # P2.2 交付阶段硬保留：synthesis/FactCheck/final commit 的 token 保底。
+  # 数值必须来自观测 P90 + 安全余量（stage_reserves_from_ledger），禁止拍脑袋
+  # 百分比。缺省为空 = 不启用保留（行为与 P2.1 一致）；P2.2 pilot 实测后回填。
+  # stage_token_reserves:
+  #   synthesize: 0
+  #   audit: 0
+  #   factcheck: 0
+  #   finalize: 0
 slo:
   survey_p95_ms: 45000

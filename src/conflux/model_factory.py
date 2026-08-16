@@ -63,6 +63,95 @@ def research_prompt_hash() -> str:
     return _PROMPT_SOURCE_HASH
 
 
+# P2.2 交付预算硬保留：管线阶段顺序（synthesis/FactCheck/final commit 是
+# 受保护的交付阶段）。保留值必须来自观测 P90 + 安全余量，不写死任意百分比。
+STAGE_ORDER: tuple[str, ...] = (
+    "decompose",
+    "retrieve",
+    "barrier",
+    "arbitration",
+    "correction",
+    "generate",
+    "verification",
+    "attribution_audit",
+    "synthesize",
+    "audit",
+    "finalize",
+    "factcheck",
+)
+
+
+def percentile(values: list[int | float], p: float) -> int:
+    """最近秩百分位（无样本返回 0）。"""
+    samples = [float(value) for value in values if value is not None]
+    if not samples:
+        return 0
+    ordered = sorted(samples)
+    rank = max(1, min(len(ordered), round(len(ordered) * p)))
+    return int(round(ordered[rank - 1]))
+
+
+def stage_reserves_from_ledger(
+    calls: list[dict[str, Any]],
+    *,
+    margin_ratio: float = 0.15,
+    stages: tuple[str, ...] = ("synthesize", "audit", "factcheck", "finalize"),
+) -> dict[str, dict[str, Any]]:
+    """从逐调用账本计算交付阶段硬保留：每阶段 usage P90 × (1+margin)。
+
+    只统计 status=ok 且 usage 真实的调用；unknown 调用单独计数并在 basis 中
+    如实报告（不得用估算值冒充观测）。返回 {stage: {reserve, p90, samples,
+    unknown, basis}}。调用样本不足时该阶段保留为 0 并标注 unmeasured。
+    """
+    per_stage: dict[str, list[int]] = {stage: [] for stage in stages}
+    unknown: dict[str, int] = {stage: 0 for stage in stages}
+    for call in calls or []:
+        if str(call.get("status") or "") != "ok":
+            continue
+        stage = str(call.get("stage") or "unknown")
+        if stage not in per_stage:
+            continue
+        total = call.get("total_tokens")
+        if total == "unknown" or total is None:
+            unknown[stage] += 1
+            continue
+        try:
+            per_stage[stage].append(max(0, int(total)))
+        except (TypeError, ValueError):
+            unknown[stage] += 1
+    result: dict[str, dict[str, Any]] = {}
+    for stage in stages:
+        samples = per_stage[stage]
+        p90 = percentile(samples, 0.9)
+        measured = bool(samples)
+        result[stage] = {
+            "reserve": int(round(p90 * (1 + max(0.0, margin_ratio)))) if measured else 0,
+            "p90": p90,
+            "samples": len(samples),
+            "unknown_usage_samples": unknown[stage],
+            "margin_ratio": margin_ratio,
+            "basis": "observed_p90_plus_margin" if measured else "unmeasured_no_reserve",
+        }
+    return result
+
+
+def resolve_stage_token_reserves() -> dict[str, int]:
+    """配置驱动的阶段硬保留：research.stage_token_reserves（P2.2 实测回填）。"""
+    raw = config.get("research", "stage_token_reserves", default={}) or {}
+    if not isinstance(raw, dict):
+        return {}
+    reserves: dict[str, int] = {}
+    for stage in STAGE_ORDER:
+        value = raw.get(stage)
+        try:
+            parsed = max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+        if parsed:
+            reserves[stage] = parsed
+    return reserves
+
+
 def model_identity(preset: str) -> dict[str, str]:
     """模型的 provider/model 身份与 revision 证据（无证据时如实记录 unverified）。"""
     cfg = config.get("models", str(preset or ""), default={}) or {}
@@ -467,6 +556,7 @@ class BudgetedChatModel:
         role: str = "model",
         downstream_reserve: int = 0,
         preset: str = "",
+        stage_reserves: dict[str, int] | None = None,
     ) -> None:
         self._model = model
         self._budget = budget
@@ -474,6 +564,7 @@ class BudgetedChatModel:
         self._role = role
         self._downstream_reserve = max(0, int(downstream_reserve))
         self._preset = str(preset or "")
+        self._stage_reserves = {str(k): max(0, int(v)) for k, v in (stage_reserves or {}).items()}
         self.last_reservation: dict[str, int | str] = {}
 
     def __getattr__(self, name: str) -> Any:
@@ -487,6 +578,7 @@ class BudgetedChatModel:
             role=self._role,
             downstream_reserve=self._downstream_reserve,
             preset=self._preset,
+            stage_reserves=self._stage_reserves,
         )
 
     def with_downstream_reserve(
@@ -504,6 +596,7 @@ class BudgetedChatModel:
             role=role or self._role,
             downstream_reserve=downstream_reserve,
             preset=self._preset,
+            stage_reserves=self._stage_reserves,
         )
 
     def with_stage_policy(
@@ -537,6 +630,7 @@ class BudgetedChatModel:
                 else downstream_reserve
             ),
             preset=self._preset,
+            stage_reserves=self._stage_reserves,
         )
 
     def _call_context(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -561,8 +655,28 @@ class BudgetedChatModel:
             "estimated_input_tokens": int(estimated_input),
         }
 
+    def _stage_preserve(self) -> int:
+        """P2.2：当前 stage 之后所有交付阶段的硬保留之和（保护 synthesis/FactCheck/commit）。
+
+        未启用 stage 保留时回落到既有的 per-role downstream_reserve。
+        """
+        if not self._stage_reserves:
+            return max(0, int(self._downstream_reserve))
+        stage = str(CURRENT_CALL_STAGE.get() or "unknown")
+        try:
+            index = STAGE_ORDER.index(stage)
+        except ValueError:
+            return max(0, int(self._downstream_reserve))
+        preserve = sum(
+            self._stage_reserves.get(later, 0) for later in STAGE_ORDER[index + 1 :]
+        )
+        # 同时保留 role 级下游保底（取两者较大值，保守不放宽）。
+        return max(preserve, max(0, int(self._downstream_reserve)))
+
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
         call = self._call_context(args, kwargs)
+        preserve = self._stage_preserve()
+        call["preserve_tokens"] = preserve
         estimated_input = int(call["estimated_input_tokens"])
         required = self._output_reserve + estimated_input
         self.last_reservation = {
@@ -570,10 +684,11 @@ class BudgetedChatModel:
             "estimated_input_tokens": estimated_input,
             "output_reserve_tokens": self._output_reserve,
             "required_tokens": required,
+            "preserve_tokens": preserve,
         }
         reservation = self._budget.reserve(
             required,
-            preserve=self._downstream_reserve,
+            preserve=preserve,
             role=self._role,
         )
         started_at = time.perf_counter()
@@ -590,7 +705,7 @@ class BudgetedChatModel:
         self._budget.record(
             response,
             reservation=reservation,
-            preserve=self._downstream_reserve,
+            preserve=preserve,
             role=self._role,
             estimated_input=estimated_input,
             elapsed_ms=(time.perf_counter() - started_at) * 1000,
@@ -781,6 +896,7 @@ def create_research_models(
     commit_reserve_seconds: float | None = None,
     preserve_stage_budgets: bool = False,
     run_id: str = "",
+    stage_token_reserves: dict[str, int] | None = None,
 ) -> tuple[dict[str, BaseChatModel], dict]:
     """Create the role models selected by one P1 research profile."""
 
@@ -795,6 +911,10 @@ def create_research_models(
         "verifier": profile.verifier_model,
     }
     budget = ResearchTokenBudget(profile.token_budget, run_id=run_id)
+    # P2.2：交付阶段硬保留（config/实测回填；缺省为空 → 行为与旧版一致）。
+    stage_reserves = {
+        str(key): max(0, int(value)) for key, value in (stage_token_reserves or {}).items()
+    }
     reserve = (
         profile.commit_reserve_seconds
         if commit_reserve_seconds is None
@@ -845,6 +965,7 @@ def create_research_models(
             role=role,
             downstream_reserve=role_token_reserves[role],
             preset=preset,
+            stage_reserves=stage_reserves,
         )
         for role, preset in presets.items()
     }
@@ -903,6 +1024,7 @@ def create_research_models(
                         output_reserve=member_tokens,
                         role=f"panel_{point}",
                         preset=preset,
+                        stage_reserves=stage_reserves,
                     ),
                 )
                 for preset in member_presets
@@ -926,6 +1048,7 @@ def create_research_models(
                     output_reserve=member_tokens,
                     role="panel_referee",
                     preset=str(profile.panel_referee),
+                    stage_reserves=stage_reserves,
                 )
             panel_models[point] = {"members": members, "referee": referee}
     diagnostics = research_model_diagnostics(profile.depth)
@@ -935,6 +1058,7 @@ def create_research_models(
         max(0.0, planner_reserve_reclaimed), 3
     )
     diagnostics["role_downstream_reserve_tokens"] = role_token_reserves
+    diagnostics["stage_token_reserves"] = stage_reserves
     diagnostics["max_estimated_input_tokens"] = MAX_ESTIMATED_INPUT_TOKENS
     diagnostics["token_budget_runtime"] = budget.telemetry
     return models, diagnostics

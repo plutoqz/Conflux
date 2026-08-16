@@ -23,6 +23,7 @@ from .core.runtime_home import database_path
 from .graph_v2 import create_v2_research_graph
 from .model_factory import (
     create_research_models,
+    resolve_stage_token_reserves,
     validate_embedding_credentials,
     validate_runtime_credentials,
 )
@@ -449,6 +450,7 @@ def query_command(
             deadline_at=deadline_at,
             commit_reserve_seconds=commit_reserve_seconds,
             run_id=run_id,
+            stage_token_reserves=resolve_stage_token_reserves(),
         )
         set_model(role_models["analyst"])
         v2_rewriter = QueryRewriteProvider(role_models["verifier"])
@@ -663,6 +665,7 @@ def query_command(
             "planner_reserve_reclaimed_seconds": model_trace.get(
                 "planner_reserve_reclaimed_seconds"
             ),
+            "stage_token_reserves": model_trace.get("stage_token_reserves"),
         }
     else:
         summary["model_trace"] = {}

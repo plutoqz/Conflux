@@ -2842,6 +2842,25 @@ def generate_node(
             budget_state.add_drop("low_priority_sections_dropped")
             sub_questions = sub_questions[:generation_capacity]
 
+    # P2.2.4：token 维度预检——预计无法覆盖全部章节时，先按优先级缩减并
+    # 在计划中显式记录，不得等到生成阶段才发现预算耗尽（保护 synthesis/
+    # FactCheck/final commit 的下游保底由 model 层 stage 保留强制执行）。
+    token_state = _token_budget_remaining(model)
+    if token_state and profile is not None:
+        used, limit = token_state
+        available = max(0, limit - used)
+        evidence_chars = len(str(rag_results or "")) + len(str(web_results or ""))
+        estimated_evidence_tokens = min(32_000, max(1, ceil(evidence_chars / 1.5)))
+        per_section_cost = profile.synthesizer_max_tokens + min(
+            estimated_evidence_tokens, profile.final_evidence_limit * 2400
+        )
+        downstream_floor = profile.verifier_max_tokens + profile.synthesizer_max_tokens
+        capacity = max(1, (available - downstream_floor) // max(1, per_section_cost))
+        if len(sub_questions) > capacity:
+            dropped = len(sub_questions) - capacity
+            budget_state.add_drop(f"token_budget_section_shrink:{dropped}")
+            sub_questions = sub_questions[:capacity]
+
     max_concurrency = (
         max(1, int(max_parallel_subquestions))
         if max_parallel_subquestions is not None
