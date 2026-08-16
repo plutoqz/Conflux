@@ -789,5 +789,99 @@ def test_barrier_node_carries_context_pruning_log():
     assert len(pruning) == 1
     assert pruning[0]["reason"] == "embed_cap_600"
 
+# --- P2.5：报告可读性与交付语义（去重/边界/limited 补证/skip 原因） ---
+
+
+def test_finalize_drops_sections_duplicating_direct_answer():
+    from conflux.graph_v2 import _new_state, finalize_node
+
+    state = _new_state("重复问题")
+    state["_core_question"] = "重复问题"
+    direct = "这是直接回答正文，给出唯一结论与依据，长度足够触发去重规则。" * 3
+    state["_direct_answer"] = direct
+    state["_section_results"] = [
+        {"sub_question_id": "sq-1", "title": "直接回答", "body": direct, "finish_reason": "completed"},
+        {
+            "sub_question_id": "sq-2",
+            "title": "重复章节",
+            "body": direct + " 补充细节。",
+            "finish_reason": "completed",
+        },
+        {"sub_question_id": "sq-3", "title": "正常章节", "body": "独立内容。", "finish_reason": "completed"},
+    ]
+    state["_citation_map"] = {}
+    result = finalize_node(state)
+
+    report = result["_report_markdown"]
+    assert report.count("## 直接回答") == 1
+    assert "正常章节" in report
+    assert "重复章节" not in report
+    assembly = result["_report_assembly"]
+    assert assembly["sections_rendered"] == 1
+    reasons = [entry["reason"] for entry in assembly["dropped_duplicate_sections"]]
+    assert reasons == ["duplicates_direct_answer", "duplicates_direct_answer"]
+
+
+def test_factcheck_skip_reason_is_structured():
+    from conflux.graph_v2 import _new_state, factcheck_v2_node
+
+    state = _new_state("无声明问题")
+    state["_section_results"] = []
+    state["_claim_records"] = []
+    state["_citation_map"] = {}
+    state["_ledger_snapshot"] = {}
+    state["_audit_metrics"] = {"sections_completed": 0}
+    result = factcheck_v2_node(state, model=None)
+
+    assert result["_factcheck_status"] == "skipped"
+    assert result["_factcheck_findings"]["factcheck_skip_reason"] == "no_verifiable_claims_generated"
+    assert result["_run_summary"]["factcheck_skip_reason"] == "no_verifiable_claims_generated"
+    assert "本次未生成可核验声明" in result["_verified_answer"]
+
+
+def test_audit_zero_sections_is_diagnostic_not_completed():
+    from conflux.graph_v2 import _new_state, audit_node
+
+    state = _new_state("零章节问题")
+    state["_section_results"] = []
+    state["_citation_map"] = {}
+    result = audit_node(state, None)
+
+    assert result["_run_status"] == "failed"
+    assert result["_delivery_status"] == "diagnostic_only"
+    assert result["_report_available"] is False
+
+
+def test_single_source_marker_on_direct_fact_lead():
+    from conflux.graph_v2 import SectionResult, _compile_claim_record_body
+    from conflux.research_protocol import ClaimRecord
+
+    section = SectionResult(sub_question_id="sq-1", title="章节")
+    direct = ClaimRecord(
+        claim_id="c-1", subquestion_id="sq-1", text="单一来源事实。",
+        claim_type="direct_fact", importance="high",
+    )
+    analysis = ClaimRecord(
+        claim_id="c-2", subquestion_id="sq-1", text="模型判断。",
+        claim_type="model_analysis", importance="medium",
+    )
+    body = _compile_claim_record_body(section, [direct, analysis], {})
+    assert "（单一来源）" in body
+    assert "（分析判断）" in body
+    # model_analysis 为 lead 时不应误标单一来源；direct_fact 走事实分组（无该标记）
+    section2 = SectionResult(sub_question_id="sq-1", title="章节二")
+    high_analysis = ClaimRecord(
+        claim_id="c-3", subquestion_id="sq-1", text="模型判断。",
+        claim_type="model_analysis", importance="high",
+    )
+    low_direct = ClaimRecord(
+        claim_id="c-4", subquestion_id="sq-1", text="单一来源事实。",
+        claim_type="direct_fact", importance="medium",
+    )
+    body2 = _compile_claim_record_body(section2, [high_analysis, low_direct], {})
+    assert "（分析判断）" in body2
+    assert body2.count("（单一来源）") == 0  # direct_fact 非 lead 时走分组无此标记
+
+
 
 

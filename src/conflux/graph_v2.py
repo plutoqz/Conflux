@@ -2739,7 +2739,9 @@ def _compile_claim_record_body(
     )
     lead = ranked[0][1]
     remaining = [record for record in records if record.claim_id != lead.claim_id]
-    paragraphs = [_render_claim_group([lead], citation_map)]
+    # P2.5：单一来源事实在正文中显式标注边界（direct_fact = 协议层单一来源证据）。
+    lead_marker = "（单一来源）" if lead.claim_type == "direct_fact" else ""
+    paragraphs = [_render_claim_group([lead], citation_map, marker=lead_marker)]
     groups = (
         (
             [record for record in remaining if record.claim_type in {"direct_fact", "multi_source_fact"}],
@@ -3608,6 +3610,12 @@ def audit_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
     run_status = "completed"
     if metrics["sections_failed"] > 0 or metrics["sections_truncated"] > 0 or confidence in {"low", "unverified"}:
         run_status = "partial"
+    # P2.5：limited 必须说明缺少什么、影响与如何补证（缺口与影响已列，这里给补证路径）。
+    if run_status == "partial":
+        credibility_text += (
+            "\n\n\u8865\u8bc1\u5efa\u8bae\uff1a\u5bf9\u8bc1\u636e\u7f3a\u53e3\u7ae0\u8282\u8865\u4e00\u8f6e\u9488\u5bf9\u6027\u68c0\u7d22\uff08gap research\uff09\uff0c"
+            "\u6216\u5c06\u8be5\u7ae0\u8282\u7ed3\u8bba\u964d\u7ea7\u4e3a\u5206\u6790\u5224\u65ad\u5e76\u6807\u6ce8\uff1b\u7f3a\u53e3\u4e0e\u5f71\u54cd\u89c1\u4e0a\u3002"
+        )
     if metrics["total_sections"] == 0:
         run_status = "failed"
     delivery_status = {
@@ -3818,6 +3826,9 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
     }
 
     # ── Determine factcheck status ──
+    # P2.5：FactCheck skipped 必须给出结构化原因；含 factual claim 的
+    # deliverable 报告不可能走到 skipped（total_claims>0 → passed/partial/failed）。
+    factcheck_skip_reason = ""
     if structured_claim_gate:
         factcheck_status = {
             "deliverable": "passed",
@@ -3826,12 +3837,14 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
         }.get(str(claim_delivery.get("status") or "diagnostic_only"), "failed")
     elif total_claims == 0:
         factcheck_status = "skipped"
+        factcheck_skip_reason = "no_verifiable_claims_generated"
     elif findings["verified_ratio"] >= 0.8:
         factcheck_status = "passed"
     elif findings["verified_ratio"] >= 0.5:
         factcheck_status = "partial"
     else:
         factcheck_status = "failed"
+    findings["factcheck_skip_reason"] = factcheck_skip_reason
 
     # ── Adjust confidence based on factcheck ──
     if factcheck_status == "failed":
@@ -3919,6 +3932,8 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
         "report_markdown": report_with_fc,
         "source_statuses": state.get("_source_statuses") or {},
         "factcheck_status": factcheck_status,
+        "factcheck_skip_reason": factcheck_skip_reason,
+        "report_assembly": state.get("_report_assembly") or {},
         "quality": audit_metrics,
         "delivery_status": str(state.get("_delivery_status") or "diagnostic_only"),
         "delivery_assessment": state.get("_delivery_assessment") or {},
@@ -3990,11 +4005,30 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
         lines.append(direct_answer)
         lines.append("")
 
+    # P2.5：避免「直接回答」与同名/同文章节逐段重复——确定性去重并记录。
+    direct_norm = re.sub(r"\s+", "", direct_answer).casefold()
+    dropped_duplicates: list[dict[str, str]] = []
+    rendered_sections = 0
     for sr in sections:
-        lines.append("## " + _short_section_title(sr.title) + "\n")
+        title = _short_section_title(sr.title)
         body_clean = _strip_think(_compile_claim_record_body(sr, claim_records, citation_map))
+        if not body_clean.strip():
+            continue
+        title_norm = re.sub(r"[\W_]+", "", title).casefold()
+        body_norm = re.sub(r"\s+", "", body_clean).casefold()
+        if direct_norm and len(direct_norm) >= 40 and (
+            title_norm in {"直接回答", "directanswer"}
+            or body_norm.startswith(direct_norm[:120])
+        ):
+            dropped_duplicates.append({
+                "section": str(sr.title),
+                "reason": "duplicates_direct_answer",
+            })
+            continue
+        lines.append("## " + title + "\n")
         lines.append(body_clean)
         lines.append("")
+        rendered_sections += 1
 
     if cross_synthesis:
         lines.append("## \u8de8\u8282\u7efc\u5408\n")
@@ -4027,6 +4061,10 @@ def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
         "_report_markdown": report,
         "final_answer": report[:8000],
         "_elapsed_ms": elapsed,
+        "_report_assembly": {
+            "sections_rendered": rendered_sections,
+            "dropped_duplicate_sections": dropped_duplicates,
+        },
     }
 
 

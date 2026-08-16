@@ -1104,6 +1104,7 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
   - P2.2：`p22_reserves_evidence.json`（阶段硬保留机制 + 语义约定 + 待实测项）、`p22_full_pytest.log`（全量 789 passed / 0 failed / 588 warnings / 382.67s）
   - P2.3：`p23_context_evidence.json`（证据单份嵌入 + 显式上限 + 裁剪审计 + dedup 度量）、`p23_full_pytest.log`（全量 792 passed / **1 failed（test_vector_index_rebuild_preserves_old_collection_until_user_deletes，全量负载下偶发，隔离复跑通过，与 P2.3 改动无关）** / 588 warnings / 395.86s；复跑 `p23_full_pytest_rerun.log` → **793 passed / 0 failed / 436 warnings / 407.20s**，确认偶发）
   - P2.4：`p24_panel_evidence.json`（触发谓词 + trace 语义 + A/B 基线约定）、`p24_full_pytest.log`（全量 **794 passed / 0 failed / 510 warnings / 385.64s**）
+  - P2.5：`p25_report_evidence.json`（去重/边界/补证/skip 原因/0 章节语义）、`p25_full_pytest.log`（全量，见关键结论）
 - 关键结论：
   - **P1.3 验收通过（2026-08-16）**：提交时生成 `conflux.run_manifest.v1` 运行冻结（code_revision、semantic_hash、model_role、roles 的 provider/model/base_url、embedding 身份、panel 成员身份、prompt_hash、budget、credential_ref 列表、`model_revision_unverified=true`）；manifest 只存凭证**引用**（`workbench_payload:*`/fail_closed、`env:*`、`config:*`），不存任何密钥值（测试断言元数据序列化无密钥）。
   - 重启恢复语义：claim 时先验证凭证引用——临时请求密钥重启后不可解析 → `credential_unavailable_after_restart` 诊断 + 终态 failed（fail-closed，绝不静默回退到共享环境密钥或其他 Provider）；随后比对 semantic_hash，provider/model/Prompt/预算/panel 漂移 → `frozen_config_mismatch` 终态 failed；两者都写入 `conflux.research_failure.v1` 诊断产物与 EventStore `credential_recovery` 事件。旧 run（无 manifest）跳过验证，向后兼容。
@@ -1118,7 +1119,9 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 - **P2.2 离线验收通过（2026-08-16）**：阶段硬保留机制落地——`stage_reserves_from_ledger` 从逐调用账本计算每阶段 P90 × (1+margin)（样本不足记 `unmeasured_no_reserve`，unknown 如实计数，不写死任意百分比）；`BudgetedChatModel` 按当前 stage 对之后所有交付阶段求和保留（retrieval/analysis/panel/gap 只能使用扣除硬保留后的预算，前置调用突破保底被拒绝并计数）；generate_node 增加 token 预检——预计无法覆盖时先按优先级缩减章节并记录 `token_budget_section_shrink:{n}`；final commit 无模型调用 + 时间保留无回归。config `research.stage_token_reserves` 默认空（旧行为不变），pilot 实测后回填。CI（`9ea74d3`）见 git。
 - **P2.3 离线部分验收通过（2026-08-16）**：证据单份嵌入（citation_map 每 ref 一份 ≤600 字符，下游按 ref 引用；EvidenceLedger 按 content_hash 单份登记——既有基础已验证）；嵌入上限显式化（`_EMBED_CAP_CHARS`）+ 确定性裁剪日志（source_ref/截断量/原因），barrier/correction 两节点随状态传递，run summary 增加 `context_dedup` 度量（嵌入规模/唯一 hash/裁剪量/原因分布/尾 50 条日志，可 replay）。
 - **P2.4 离线验收通过（2026-08-16）**：panel 触发谓词落地——仅「确定性不可裁决（uncertain）且 importance ∈ {critical, high}」的 claim 送 panel，其余确定性兜底并逐条记录 trigger_trace（deterministic_adjudicated / low_importance 跳过原因）；全部跳过时零成员调用；quick 恒关（profile 强制）；deep 与 standard 同一谓词不扩大；成员失败/弃权进 `PanelReview.failures` trace；触发/失败/分歧/input_snapshot_id 进 run_summary.panel；成本经 P2.1 账本（role 前缀 panel_）逐条可溯；B4.3 确定性优先保持（panel supports 不能推翻 uncertain）。
-- 唯一下一验收点：P2.5 报告可读性与交付语义（直接回答不重复、single-source/模型分析边界、limited 说明、completed_with_warnings 不冒充完成、FactCheck skipped 必须给原因）。P2.2 真实 P50/P90 实测、P2.3 引用瘦身、P2.4 的 A/B 实测留待 pilot。
+- **P2.5 离线验收通过（2026-08-16）**：直接回答去重（同名/逐段重复章节确定性丢弃并记录 report_assembly）；direct_fact 单一来源显式标注（multi-source/推导/分析判断边界既有）；limited 增加补证建议（缺口+影响+补证路径齐全）；0 章节 → diagnostic_only（绝不 completed_with_warnings 冒充）；FactCheck skipped 结构化原因（no_verifiable_claims_generated），含 factual claim 的 deliverable 不可能静默 skipped。
+- **P2 离线工作包全部完成（P2.1-P2.5）**。剩余 P2 事项全部依赖付费 live 运行，按 §7.12 冻结清单 + 用户单独明确授权后才能启动：P2.2 真实 P50/P90 实测、P2.3 引用瘦身数据评估、P2.4 panel A/B、§7.10 的 2 案受控 pilot 与 12 案正式 live + 人工盲评（§7.11 验收）。
+- 唯一下一验收点：**§7.12 冻结清单 + 用户明确授权**（在此之前不启动任何付费 live 调用）。
 - **付费 live 调用（含 2 案 pilot）前必须冻结 §7.12 清单并取得单独明确授权。**
 
 
@@ -1144,6 +1147,7 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 | P2.2 阶段硬保留：观测 P90+余量驱动（不写死百分比）、按 stage 求和保底、前置突破即拒绝、生成前 token 预检缩减 | 真实 P50/P90 实测待 pilot（付费，需授权）；缺省配置为空 = 旧行为不变 | 2026-08-16 |
 | P2.3 上下文去重（离线部分）：证据按 ref 单份嵌入 + 600 字符显式上限 + 确定性裁剪审计 + context_dedup 度量进 run summary | 压缩只截断不改写；每 claim 选择理由文案化与引用瘦身待 pilot 数据 | 2026-08-16 |
 | P2.4 panel 风险触发：仅「确定性不可裁决 + 高重要性」触发；跳过原因逐条 trace；失败/弃权/分歧/成本可溯；quick 恒关、deep 不扩大 | B4.3 确定性优先保持；A/B 实测留待 pilot（同一冻结快照 + 首成员基线） | 2026-08-16 |
+| P2.5 报告可读性与交付语义：直接回答去重 + 单一来源标注 + limited 补证建议 + 0 章节 diagnostic + FactCheck skipped 结构化原因 | 全部离线确定性规则；live 质量验收在 §7.10 正式 12 案 | 2026-08-16 |
 
 ### 18.4 当前未验证项
 
@@ -1161,6 +1165,42 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 - 不先做单一 ASGI 大迁移。
 
 ## 19. 阶段检查点
+
+### 2026-08-17 00:40 - P2.5 检查点（completed，离线部分；P2 离线工作包全部完成）
+
+- 当前目标：P2.5 报告可读性与交付语义——直接回答不重复、单一来源/模型分析边界明确、limited 说明缺少与补证、0 章节不冒充完成、FactCheck skipped 给原因。
+- 当前阶段：P2 `in_progress`（P2.1-P2.5 离线工作包全部 `completed`；剩余事项全部依赖付费 live 运行，按 §7.12 冻结清单 + 用户单独明确授权后启动）。
+- 状态：completed（离线部分）
+- 源码版本：`84e4c32`（main；P2.5 改动随本轮提交，见 git log）
+- 允许修改范围：§7.3 列表（graph_v2.py / tests/test_v3_model_modes.py）+ 本文件状态与检查点部分。
+- 本轮非目标：不启动付费模型调用；不改研究 Prompt。
+
+#### 已完成证据
+- 修改文件：`src/conflux/graph_v2.py`（finalize_node 直接回答去重 + _report_assembly；_compile_claim_record_body direct_fact lead 标（单一来源）；audit_node limited 补证建议；factcheck_v2_node factcheck_skip_reason 结构化 + run_summary 透出 report_assembly/skip reason）、`tests/test_v3_model_modes.py`（4 个新测试）。
+- 测试命令与实际结果：
+  - 相关回归（model_modes + research_rounds + budget_replay + research_presentation + p4_panel）→ **85 passed**。
+  - 全量：`python -m pytest -q` → **798 passed, 588 warnings in 382.82s (0:06:22)**（`p25_full_pytest.log`）。
+- run ID / Artifact / hash：无 live 运行；全部为确定性文本规则，离线单测断言。
+- 验证层级：单元 + 集成（真实 finalize/audit/factcheck 节点），离线。
+
+#### 关键结论
+- 去重规则确定性：同名「直接回答」章节或正文以直接回答开头（规范化后前缀匹配）→ 丢弃并记录 report_assembly（sections_rendered/dropped_duplicate_sections）。
+- 边界：direct_fact lead 标（单一来源）；derived_analysis 标（推导分析）；model_analysis 标（分析判断）——三者正文边界齐全。
+- limited 三要素：缺少什么（各节证据缺口清单）+ 影响（可信度结论）+ 如何补证（补证建议段落）。
+- 交付诚实：total_sections==0 → failed/diagnostic_only（测试固化）；FactCheck skipped 仅当无声明且带结构化原因，deliverable 含 factual claim 时不可能静默 skipped。
+
+#### 未完成或阻塞
+- 剩余 P2 事项全部依赖付费 live 运行（§7.12 冻结 + 用户明确授权）：P2.2 真实 P50/P90 实测、P2.3 引用瘦身数据评估、P2.4 panel A/B、2 案受控 pilot、12 案正式 live + 人工盲评（§7.11 验收）。
+
+#### 决策、推断与待验证假设
+- 事实：离线阶段无法产出真实 usage 分布与真人盲评，P2 阶段验收（§7.11）必须走 live 闸门。
+- 假设及验证方法：live 授权后按 §7.10 顺序执行并回填本文件。
+
+#### 唯一下一验收点
+- §7.12 冻结清单（12 案 manifest hash/Provider revision 证据/Prompt hash/代码 revision/配置 hash/温度/输出上限/总预算/是否允许 retry/最大调用数与费用）+ 用户单独明确授权；在此之前不启动任何付费 live 调用。
+
+#### 不应自动扩展
+- 不启动付费模型调用；不开始 P3；不改研究 Prompt。
 
 ### 2026-08-16 23:20 - P2.4 检查点（completed，离线部分）
 
