@@ -1102,6 +1102,7 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
   - P1 阶段退出：`p15_recovery_repeat.json`（20 次进程终止恢复独立复跑）、`p15_daemon_freeze_probe.json`（PID 50348 冻结版本只读探针）、`p15_focused_pytest.{log,xml}` 与 `p15_full_pytest.log`（阶段退出最终一轮，含 §6.10 终态一致性测试）
   - P2.1：`reports/evaluation/convergence/p2/p21_ledger_evidence.json`（逐调用账本设计 + 语义约定）、`p21_full_pytest.log`（全量 784 passed / 0 failed / 550 warnings / 373.79s）
   - P2.2：`p22_reserves_evidence.json`（阶段硬保留机制 + 语义约定 + 待实测项）、`p22_full_pytest.log`（全量 789 passed / 0 failed / 588 warnings / 382.67s）
+  - P2.3：`p23_context_evidence.json`（证据单份嵌入 + 显式上限 + 裁剪审计 + dedup 度量）、`p23_full_pytest.log`（全量 792 passed / **1 failed（test_vector_index_rebuild_preserves_old_collection_until_user_deletes，全量负载下偶发，隔离复跑通过，与 P2.3 改动无关）** / 588 warnings / 395.86s）
 - 关键结论：
   - **P1.3 验收通过（2026-08-16）**：提交时生成 `conflux.run_manifest.v1` 运行冻结（code_revision、semantic_hash、model_role、roles 的 provider/model/base_url、embedding 身份、panel 成员身份、prompt_hash、budget、credential_ref 列表、`model_revision_unverified=true`）；manifest 只存凭证**引用**（`workbench_payload:*`/fail_closed、`env:*`、`config:*`），不存任何密钥值（测试断言元数据序列化无密钥）。
   - 重启恢复语义：claim 时先验证凭证引用——临时请求密钥重启后不可解析 → `credential_unavailable_after_restart` 诊断 + 终态 failed（fail-closed，绝不静默回退到共享环境密钥或其他 Provider）；随后比对 semantic_hash，provider/model/Prompt/预算/panel 漂移 → `frozen_config_mismatch` 终态 failed；两者都写入 `conflux.research_failure.v1` 诊断产物与 EventStore `credential_recovery` 事件。旧 run（无 manifest）跳过验证，向后兼容。
@@ -1113,8 +1114,9 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 - **P1.4 验收通过（2026-08-16）**：`conflux.research_failure.v1` 扩展 9 个失败分类码（lease_overrun / worker_init_failure / credential_recovery_failure / config_build_failure / model_build_failure / user_cancelled / system_deadline / final_commit_failure / execution_failure），诊断含 run ID、请求摘要、源码版本（code_revision）、失败阶段、已完成进度、输入配置哈希（semantic_hash）、重试安全性、保留产物、恢复动作、原始错误类型。终态与诊断引用同一事务：`SQLiteDatabase.transaction()`（显式所有权，兼容 sqlite3 legacy 隐式事务）+ queue 终态转移/RunStore 终态行/终态事件一次提交；写入失败整体回滚（注入测试证实）。期间发现并修复一个真实读竞态：expire_exhausted 先单独提交 queue=failed、RunStore 更新在第二个事务，两提交之间 get() 可见「queue=failed + run=pending（无诊断引用）」，改为同一事务后消失。final_commit 写入失败绝不发布无 Artifact 的 completed（无交付产物时 delivery_status=diagnostic_only 保证 has_report 一致）。
 - **P1 阶段退出（2026-08-16）**：§6.8 矩阵 8 行覆盖、§6.9 最小验证集（三文件聚焦 + eval_job_recovery + 全量）、§6.10 六条验收全部满足——20 次进程终止恢复 20/20、无重复执行、全部终态具备报告或结构化诊断、list/详情/RunStore/JobQueue/事件五视图一致（新增一致性测试）、全量离线通过。PID 50348 冻结版本验证完成（冻结于 `38eee94`，健康；P1 修复需重启后生效）。
 - **P2.1 验收通过（2026-08-16）**：每次模型调用记录 `conflux.research_failure` 无关的预算调用账本（§7.5 全部字段：run_id/stage/role/provider/model/revision_evidence/prompt_hash/input_tokens/output_tokens/reserved_tokens/context_bytes/evidence_refs_count/latency/finish_reason/estimated_cost）；usage 缺失记录 `unknown` 不用估算冒充；对账快照（reconciliation）解释总预算与各调用之和的差异并写入 `<run_id>.summary.json` 的 `model_trace.token_budget_runtime`；12 个图节点经 contextvar 标注 stage。CI run #31949119159 success。
-- **P2.2 离线验收通过（2026-08-16）**：阶段硬保留机制落地——`stage_reserves_from_ledger` 从逐调用账本计算每阶段 P90 × (1+margin)（样本不足记 `unmeasured_no_reserve`，unknown 如实计数，不写死任意百分比）；`BudgetedChatModel` 按当前 stage 对之后所有交付阶段求和保留（retrieval/analysis/panel/gap 只能使用扣除硬保留后的预算，前置调用突破保底被拒绝并计数）；generate_node 增加 token 预检——预计无法覆盖时先按优先级缩减章节并记录 `token_budget_section_shrink:{n}`；final commit 无模型调用 + 时间保留无回归。config `research.stage_token_reserves` 默认空（旧行为不变），pilot 实测后回填。
-- 唯一下一验收点：P2.2 的**真实 P50/P90 实测**（最小 live pilot，2 案）——需要 §7.12 冻结清单 + 单独明确授权；在此之前继续 P2.3 上下文去重与引用化的离线部分。
+- **P2.2 离线验收通过（2026-08-16）**：阶段硬保留机制落地——`stage_reserves_from_ledger` 从逐调用账本计算每阶段 P90 × (1+margin)（样本不足记 `unmeasured_no_reserve`，unknown 如实计数，不写死任意百分比）；`BudgetedChatModel` 按当前 stage 对之后所有交付阶段求和保留（retrieval/analysis/panel/gap 只能使用扣除硬保留后的预算，前置调用突破保底被拒绝并计数）；generate_node 增加 token 预检——预计无法覆盖时先按优先级缩减章节并记录 `token_budget_section_shrink:{n}`；final commit 无模型调用 + 时间保留无回归。config `research.stage_token_reserves` 默认空（旧行为不变），pilot 实测后回填。CI（`9ea74d3`）见 git。
+- **P2.3 离线部分验收通过（2026-08-16）**：证据单份嵌入（citation_map 每 ref 一份 ≤600 字符，下游按 ref 引用；EvidenceLedger 按 content_hash 单份登记——既有基础已验证）；嵌入上限显式化（`_EMBED_CAP_CHARS`）+ 确定性裁剪日志（source_ref/截断量/原因），barrier/correction 两节点随状态传递，run summary 增加 `context_dedup` 度量（嵌入规模/唯一 hash/裁剪量/原因分布/尾 50 条日志，可 replay）。
+- 唯一下一验收点：P2.4 panel 风险触发（quick 恒关；standard 仅高重要性且确定性检查无法裁决的 claim 触发；触发条件/成员失败/分歧/成本进 trace；A/B 同快照同基线）。P2.2 真实 P50/P90 实测与 P2.3 更激进的引用瘦身留待 pilot。
 - **付费 live 调用（含 2 案 pilot）前必须冻结 §7.12 清单并取得单独明确授权。**
 
 
@@ -1138,6 +1140,7 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 | P2 需用户明确授权后启动付费 live 运行 | §7.2 前置条件 + 计划 §1.3 非目标「未冻结时不启动付费正式实验」 | 2026-08-16 |
 | P2.1 逐调用账本：contextvar 阶段标注 + 预算包装器记录 §7.5 字段 + reconciliation 对账写入 run summary | usage 缺失记 unknown；revision_evidence 无证据记 unverified；estimated_cost 无价格表记 unknown | 2026-08-16 |
 | P2.2 阶段硬保留：观测 P90+余量驱动（不写死百分比）、按 stage 求和保底、前置突破即拒绝、生成前 token 预检缩减 | 真实 P50/P90 实测待 pilot（付费，需授权）；缺省配置为空 = 旧行为不变 | 2026-08-16 |
+| P2.3 上下文去重（离线部分）：证据按 ref 单份嵌入 + 600 字符显式上限 + 确定性裁剪审计 + context_dedup 度量进 run summary | 压缩只截断不改写；每 claim 选择理由文案化与引用瘦身待 pilot 数据 | 2026-08-16 |
 
 ### 18.4 当前未验证项
 
@@ -1155,6 +1158,41 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 - 不先做单一 ASGI 大迁移。
 
 ## 19. 阶段检查点
+
+### 2026-08-16 22:10 - P2.3 检查点（completed，离线部分）
+
+- 当前目标：P2.3 上下文去重与引用化（离线部分）——Evidence 按 ref 单份嵌入、上限显式化、压缩只截断不改写、裁剪可审计可 replay、去重度量进 run summary。
+- 当前阶段：P2 `in_progress`（P2.1/P2.2 `completed`；P2.3 离线部分 `completed` → 下一工作包 P2.4 panel 风险触发）。
+- 状态：completed（离线部分；跨阶段引用瘦身的更激进裁剪待 pilot 实测上下文占比后按数据决定）
+- 源码版本：`9ea74d3`（main；P2.3 改动随本轮提交，见 git log）
+- 允许修改范围：§7.3 列表（graph_v2.py / tests/test_v3_model_modes.py）+ 本文件状态与检查点部分。
+- 本轮非目标：不启动付费模型调用；不改研究 Prompt；不碰 panel 触发逻辑（P2.4）。
+
+#### 已完成证据
+- 修改文件：`src/conflux/graph_v2.py`（_EMBED_CAP_CHARS=600 + _prune_evidence_text + _context_dedup_metrics；_build_citation_map_from_snapshot 接 pruning_log 并去掉硬编码 [:600]；barrier/correction 两节点（含早退路径）携带 _context_pruning；_new_state 初始化日志；run_summary 增加 context_dedup）、`tests/test_v3_model_modes.py`（4 个新测试）。
+- 测试命令与实际结果：
+  - v3 三文件（model_modes + budget_replay + research_rounds）→ **38 passed**。
+  - 全量：`python -m pytest -q` → **792 passed / 1 failed / 588 warnings / 395.86s**（`p23_full_pytest.log`）。唯一失败为 `test_vector_index_rebuild_preserves_old_collection_until_user_deletes`（vector store 测试，全量负载下偶发；隔离复跑 1 passed；与 P2.3 改动无关，属既有 flaky，观察记录）。
+- run ID / Artifact / hash：无 live 运行；裁剪日志与 dedup 度量由 4 个离线单测断言。
+- 验证层级：单元 + 集成（真实 ledger 快照 → citation_map → 节点状态传递），离线。
+
+#### 关键结论
+- 事实基线：EvidenceLedger 已按 (source_identity, content_hash, visibility) 单份登记；citation_map 每 ref 一份 ≤600 字符文本，下游按 ref 引用；旧 SECTION_PROMPT 全文拼接模板无调用者。
+- 压缩规则：只截断超限文本并记录（source_ref/original/kept/cap/reason），不把事实改写为不可回溯摘要；同输入同日志（确定性，支持 replay）。
+- 度量：context_dedup（嵌入规模/唯一 hash/裁剪量/原因分布/尾 50 条日志）进 run_summary → summary.json。
+
+#### 未完成或阻塞
+- 无阻塞。P2.3 剩余项（每 claim 选择理由文案化、仅传 ref 的瘦身模式）依赖 pilot 上下文占比实测，不阻塞 P2.4。
+
+#### 决策、推断与待验证假设
+- 事实：quote 文本是核验必需输入，不能在离线阶段改成仅传 ref（模型无法自行取数）；因此本阶段只做显式上限 + 审计，不做激进瘦身。
+- 假设及验证方法：pilot 后按 context_dedup 数据评估瘦身收益再决定。
+
+#### 唯一下一验收点
+- P2.4 panel 风险触发：quick 恒关（已由 profile 强制 False 保证）；standard 仅「高重要性 + 确定性检查无法裁决」的 claim 触发；触发条件/成员失败/弃权/分歧/成本进 trace；A/B 同快照同基线。
+
+#### 不应自动扩展
+- 不启动付费模型调用；不开始 P2.5；不改研究 Prompt/检索/报告格式。
 
 ### 2026-08-16 21:00 - P2.2 检查点（completed，离线机制；真实 P50/P90 实测待 pilot）
 

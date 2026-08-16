@@ -666,4 +666,128 @@ def test_resolve_stage_token_reserves_from_config(monkeypatch):
     monkeypatch.setattr(config_module, "get", fake_get)
     assert resolve_stage_token_reserves() == {"synthesize": 12000, "factcheck": 8000}
 
+# --- P2.3：上下文去重与引用化（证据单份嵌入 + 显式上限 + 裁剪审计） ---
+
+
+def _long_quote_source_result(quote_len: int = 900):
+    from conflux.source_status import EvidenceItem, SourceResult
+
+    return SourceResult(
+        source="Web",
+        status="success",
+        content="evidence",
+        claims=[
+            EvidenceItem(
+                claim="replay 机制使用固定 provider 响应。",
+                source="Web",
+                verbatim_quote="x" * quote_len,
+                evidence_class="authoritative_document",
+                source_identity="src-1",
+                relevance=0.9,
+            )
+        ],
+    )
+
+
+def test_prune_evidence_text_records_deterministic_cuts():
+    from conflux.graph_v2 import _prune_evidence_text
+
+    log: list[dict] = []
+    kept = _prune_evidence_text(
+        "y" * 1000, cap=600, reason="embed_cap_600", source_ref="ref-1", pruning_log=log
+    )
+    assert len(kept) == 600
+    assert log == [{
+        "source_ref": "ref-1",
+        "original_chars": 1000,
+        "kept_chars": 600,
+        "cap": 600,
+        "reason": "embed_cap_600",
+    }]
+    # 确定性：同样输入产出同样日志
+    log2: list[dict] = []
+    _prune_evidence_text("y" * 1000, cap=600, reason="embed_cap_600", source_ref="ref-1", pruning_log=log2)
+    assert log2 == log
+    # 未超上限不记录
+    log3: list[dict] = []
+    _prune_evidence_text("short", cap=600, reason="embed_cap_600", source_ref="r", pruning_log=log3)
+    assert log3 == []
+
+
+def test_citation_map_from_snapshot_prunes_and_logs_long_quotes():
+    from conflux.graph_v2 import _build_citation_map_from_snapshot
+    from conflux.research_protocol import EvidenceLedger
+
+    ledger = EvidenceLedger(run_id="p23-test")
+    ledger.append_source_result(
+        _long_quote_source_result(quote_len=900),
+        subquestion_id="sq-1",
+        query_id="q-1",
+    )
+    snapshot = ledger.freeze("round_0")
+    log: list[dict] = []
+    citation_map = _build_citation_map_from_snapshot(snapshot, pruning_log=log)
+
+    assert len(citation_map) == 1
+    embedded = next(iter(citation_map.values()))
+    assert embedded.startswith("x" * 600)
+    assert len(log) == 1
+    entry = log[0]
+    assert entry["reason"] == "embed_cap_600"
+    assert entry["original_chars"] == 900
+    assert entry["kept_chars"] == 600
+
+
+def test_context_dedup_metrics_reconcile_embedding_and_pruning():
+    from conflux.graph_v2 import (
+        _build_citation_map_from_snapshot,
+        _context_dedup_metrics,
+    )
+    from conflux.research_protocol import EvidenceLedger
+
+    ledger = EvidenceLedger(run_id="p23-metrics")
+    ledger.append_source_result(
+        _long_quote_source_result(quote_len=900),
+        subquestion_id="sq-1",
+        query_id="q-1",
+    )
+    snapshot = ledger.freeze("round_0")
+    log: list[dict] = []
+    citation_map = _build_citation_map_from_snapshot(snapshot, pruning_log=log)
+    state = {
+        "_citation_map": citation_map,
+        "_context_pruning": log,
+        "_ledger_snapshot": snapshot.to_dict(),
+    }
+    metrics = _context_dedup_metrics(state)
+    assert metrics["citation_ref_count"] == 1
+    assert metrics["embedded_evidence_chars"] >= 600
+    assert metrics["ledger_unique_content_hashes"] == 1
+    assert metrics["pruned_items"] == 1
+    assert metrics["pruned_chars"] == 300
+    assert metrics["pruning_reasons"] == {"embed_cap_600": 1}
+    assert len(metrics["pruning_log"]) == 1
+
+
+def test_barrier_node_carries_context_pruning_log():
+    from conflux.graph_v2 import _new_state, barrier_node
+    from conflux.research_protocol import EvidenceLedger
+
+    state = _new_state("question", depth="standard")
+    ledger = EvidenceLedger.from_dict(state["_evidence_ledger"])
+    ledger.append_source_result(
+        _long_quote_source_result(quote_len=900),
+        subquestion_id="sq-1",
+        query_id="q-1",
+    )
+    state["_evidence_ledger"] = ledger.to_dict()
+    state["_sub_questions"] = [{"id": "sq-1", "question": "q", "search_queries": ["q"]}]
+
+    result = barrier_node(state)
+
+    pruning = result["_context_pruning"]
+    assert len(pruning) == 1
+    assert pruning[0]["reason"] == "embed_cap_600"
+
+
 

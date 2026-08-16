@@ -484,6 +484,8 @@ def _new_state(
         "_claim_records": [],
         "_attribution_audit": {},
         "_generation_trace_invalid": False,
+        # P2.3：证据嵌入裁剪日志（确定性，可 replay）。
+        "_context_pruning": [],
     }
 
 
@@ -1698,7 +1700,67 @@ def _source_status_payloads(results: dict[str, dict[str, SourceResult]]) -> dict
     return payloads
 
 
-def _build_citation_map_from_snapshot(snapshot: LedgerSnapshot) -> dict[str, str]:
+# P2.3 上下文去重与引用化：证据按 ref 单份嵌入，嵌入上限显式化并可审计。
+_EMBED_CAP_CHARS = 600
+
+
+def _prune_evidence_text(
+    text: str,
+    *,
+    cap: int = _EMBED_CAP_CHARS,
+    reason: str,
+    source_ref: str,
+    pruning_log: list[dict[str, Any]] | None = None,
+) -> str:
+    """确定性裁剪证据文本：超上限时截断并记录裁剪项（原因可审计、可 replay）。"""
+    text = str(text or "")
+    if len(text) <= cap:
+        return text
+    kept = text[:cap]
+    if pruning_log is not None:
+        pruning_log.append({
+            "source_ref": source_ref,
+            "original_chars": len(text),
+            "kept_chars": len(kept),
+            "cap": cap,
+            "reason": reason,
+        })
+    return kept
+
+
+def _context_dedup_metrics(state: dict[str, Any]) -> dict[str, Any]:
+    """P2.3 度量：证据单份嵌入的规模、去重与裁剪（写入 run summary，可 replay）。"""
+    citation_map = state.get("_citation_map") or {}
+    pruning = state.get("_context_pruning") or []
+    reasons: dict[str, int] = {}
+    for entry in pruning:
+        reason = str(entry.get("reason") or "unknown")
+        reasons[reason] = reasons.get(reason, 0) + 1
+    snapshot = state.get("_ledger_snapshot") or {}
+    records = snapshot.get("records") or []
+    unique_hashes = len({
+        str(record.get("content_hash") or "")
+        for record in records
+        if record.get("content_hash")
+    })
+    return {
+        "citation_ref_count": len(citation_map),
+        "embedded_evidence_chars": sum(len(str(value or "")) for value in citation_map.values()),
+        "ledger_unique_content_hashes": unique_hashes,
+        "ledger_record_count": len(records),
+        "pruned_items": len(pruning),
+        "pruned_chars": sum(
+            max(0, int(entry.get("original_chars") or 0) - int(entry.get("kept_chars") or 0))
+            for entry in pruning
+        ),
+        "pruning_reasons": reasons,
+        "pruning_log": list(pruning[-50:]),
+    }
+
+
+def _build_citation_map_from_snapshot(
+    snapshot: LedgerSnapshot, *, pruning_log: list[dict[str, Any]] | None = None
+) -> dict[str, str]:
     citation_map: dict[str, str] = {}
     source_counts: dict[str, int] = {}
     ref_by_source: dict[str, str] = {}
@@ -1720,19 +1782,25 @@ def _build_citation_map_from_snapshot(snapshot: LedgerSnapshot) -> dict[str, str
         source_key = record.source_identity or record.url or record.document_title or record.source_type
         if source_counts.get(source_key, 0) >= 2:
             continue
+        ref = ref_by_source.get(source_key) or ("[" + str(index) + "]")
+        source_ref = str(record.evidence_id or source_key or ref)
+        kept = _prune_evidence_text(
+            evidence_text,
+            reason="embed_cap_600",
+            source_ref=source_ref,
+            pruning_log=pruning_log,
+        )
         if source_key in ref_by_source:
-            ref = ref_by_source[source_key]
             source_note = citation_map[ref].rsplit("（来源：", 1)[-1]
             citation_map[ref] = (
                 citation_map[ref].rsplit("（来源：", 1)[0]
-                + " 补充证据：" + evidence_text[:600]
+                + " 补充证据：" + kept
                 + "（来源：" + source_note
             )
             seen_claims.add(normalized_claim)
             source_counts[source_key] += 1
             continue
-        ref = "[" + str(index) + "]"
-        citation_map[ref] = evidence_text[:600] + "（来源：" + record.source_type
+        citation_map[ref] = kept + "（来源：" + record.source_type
         if record.document_title:
             citation_map[ref] += " " + record.document_title
         elif record.source_identity:
@@ -2071,7 +2139,9 @@ def barrier_node(state: dict[str, Any]) -> dict[str, Any]:
     proposals = _correction_proposals(state, snapshot)
     for proposal in proposals:
         ledger.add_action_proposal(proposal)
-    citation_map = _build_citation_map_from_snapshot(snapshot)
+    citation_map = _build_citation_map_from_snapshot(
+        snapshot, pruning_log=state.setdefault("_context_pruning", [])
+    )
     return {
         "_pipeline_stage": "barrier",
         "_ledger_snapshot": snapshot.to_dict(),
@@ -2080,6 +2150,7 @@ def barrier_node(state: dict[str, Any]) -> dict[str, Any]:
         "_correction_actions": [proposal.to_dict() for proposal in proposals],
         "_citation_map": citation_map,
         "_citation_bindings": _citation_bindings_from_snapshot(snapshot, citation_map),
+        "_context_pruning": state.get("_context_pruning") or [],
         "_round": "barrier",
     }
 
@@ -2109,6 +2180,7 @@ def correction_node(state: dict[str, Any], rag_tool: Any, web_tool: Any) -> dict
             "_round": "round_1_skipped",
             "_retrieval_round": 1,
             "_correction_round": 0,
+            "_context_pruning": state.get("_context_pruning") or [],
             **_budget_update(budget_state),
         }
 
@@ -2176,7 +2248,9 @@ def correction_node(state: dict[str, Any], rag_tool: Any, web_tool: Any) -> dict
             correction_results[action_id] = result
 
     snapshot = ledger.freeze("round_1")
-    citation_map = _build_citation_map_from_snapshot(snapshot)
+    citation_map = _build_citation_map_from_snapshot(
+        snapshot, pruning_log=state.setdefault("_context_pruning", [])
+    )
     return {
         "_pipeline_stage": "correction",
         "_round": "round_1",
@@ -2194,6 +2268,7 @@ def correction_node(state: dict[str, Any], rag_tool: Any, web_tool: Any) -> dict
         ],
         "_citation_map": citation_map,
         "_citation_bindings": _citation_bindings_from_snapshot(snapshot, citation_map),
+        "_context_pruning": state.get("_context_pruning") or [],
         **_budget_update(budget_state),
     }
 
@@ -3774,6 +3849,7 @@ def factcheck_v2_node(state: dict[str, Any], model: Any) -> dict[str, Any]:
         "dropped_reason": list(budget_consumed.get("dropped_reasons") or []),
         "prompt_version": "research-prompts-v3",
         "model_config_version": "research-model-profile-v1",
+        "context_dedup": _context_dedup_metrics(state),
     }
 
     return {
