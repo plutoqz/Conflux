@@ -203,7 +203,10 @@ def test_query_job_recovers_after_worker_process_termination(tmp_path: Path) -> 
         cwd=Path.cwd(),
     )
     try:
-        deadline = time.time() + 5.0
+        # P1.1: window is event-driven (poll until running), not a fixed 5s
+        # assertion. Cold-start import of conflux in a fresh subprocess measured
+        # at claim P95 ~4.8s / max 5.6s, so a hard 5s window races the worker.
+        deadline = time.time() + 30.0
         lease_expires_at = 0.0
         while time.time() < deadline:
             db = SQLiteDatabase(db_path).connect()
@@ -247,7 +250,7 @@ def test_query_job_recovers_after_worker_process_termination(tmp_path: Path) -> 
 
         cli.query_command = fake_query
         manager = JobManager(db_path=sys.argv[1], poll_interval=0.02, lease_seconds=3.0)
-        deadline = time.time() + 8
+        deadline = time.time() + 30
         while time.time() < deadline:
             status = manager.get(sys.argv[2])
             if status and status['status'] == 'completed_diagnostic':
@@ -261,7 +264,7 @@ def test_query_job_recovers_after_worker_process_termination(tmp_path: Path) -> 
     recovered = subprocess.run(
         [sys.executable, "-c", recovery_script, str(db_path), run_id],
         cwd=Path.cwd(),
-        timeout=12,
+        timeout=35,
         check=False,
     )
 
