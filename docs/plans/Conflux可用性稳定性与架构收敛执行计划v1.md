@@ -1092,13 +1092,14 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 
 ### 18.2 当前阶段
 
-- 阶段：P1 任务运行正确性与故障恢复（P1.1 claim/lease → `completed`；P1.2 幂等与背压 → `completed`；P1.3 凭证冻结 → `completed`；P1.4 结构化诊断 → `completed`（离线验收通过））
-- 状态：`in_progress`
+- 阶段：P1 任务运行正确性与故障恢复 → `completed`（P1.1 claim/lease、P1.2 幂等与背压、P1.3 凭证冻结、P1.4 结构化诊断全部 `completed`，§6.10 六条验收标准全部满足，阶段退出）。
+- 状态：`completed`（下一阶段 P2 standard 预算 `pending`，付费 live 运行需用户明确授权）
 - 证据：
   - `reports/evaluation/convergence/p1/p11_claim_lease_probe.json`（P1.1：25 次探针 + 20 次复跑）
   - `reports/evaluation/convergence/p1/p12_focused_pytest.{log,xml}`（P1.2 聚焦 103 passed）、`p12_recovery_repeat.json`（20/20）、`p12_full_pytest.{log,xml}`（全量 764 passed）
   - `reports/evaluation/convergence/p1/p13_focused_pytest.{log,xml}`（P1.3 聚焦 107 passed）、`p13_full_pytest.{log,xml}`（全量 768 passed）
   - `reports/evaluation/convergence/p1/p14_focused_pytest.{log,xml}`（P1.4 聚焦 116 passed）、`p14_full_pytest.log`（全量 777 passed / 0 failed / 588 warnings / 409.02s）、`p14_eval_recovery.log` + `eval_recovery/job_recovery.json`（200 jobs：recovery/lease_reclaim/final_state_consistency/idempotency_dedup 均 1.0，duplicate_execution/event_loss/reconnect_loss 均 0）、`p14_fault_matrix.json`（§6.8 矩阵 8 行 → 测试逐行映射）
+  - P1 阶段退出：`p15_recovery_repeat.json`（20 次进程终止恢复独立复跑）、`p15_daemon_freeze_probe.json`（PID 50348 冻结版本只读探针）、`p15_focused_pytest.{log,xml}` 与 `p15_full_pytest.log`（阶段退出最终一轮，含 §6.10 终态一致性测试）
 - 关键结论：
   - **P1.3 验收通过（2026-08-16）**：提交时生成 `conflux.run_manifest.v1` 运行冻结（code_revision、semantic_hash、model_role、roles 的 provider/model/base_url、embedding 身份、panel 成员身份、prompt_hash、budget、credential_ref 列表、`model_revision_unverified=true`）；manifest 只存凭证**引用**（`workbench_payload:*`/fail_closed、`env:*`、`config:*`），不存任何密钥值（测试断言元数据序列化无密钥）。
   - 重启恢复语义：claim 时先验证凭证引用——临时请求密钥重启后不可解析 → `credential_unavailable_after_restart` 诊断 + 终态 failed（fail-closed，绝不静默回退到共享环境密钥或其他 Provider）；随后比对 semantic_hash，provider/model/Prompt/预算/panel 漂移 → `frozen_config_mismatch` 终态 failed；两者都写入 `conflux.research_failure.v1` 诊断产物与 EventStore `credential_recovery` 事件。旧 run（无 manifest）跳过验证，向后兼容。
@@ -1108,7 +1109,8 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
   - P1.3 改动已提交并推送 origin/main（见 git log；P1.3 为 C5 提交）。
   - CI 修复（2026-08-16）：GitHub Actions 自 2026-08-13 起持续红——`tests/test_p4_panel.py::TestPanelModelConstruction` 两个用例直接构造 ChatOpenAI，在无 OPENAI_API_KEY 的环境（CI/干净 checkout）构造期抛 OpenAIError；本地通过是因为仓库根 .env（gitignored）注入密钥掩盖了问题。已改为 create_chat_model 占位对象（断言仍覆盖成员数/标签/max_tokens 减半），CI-like 干净树实测 3 passed；全文件 35 passed。
 - **P1.4 验收通过（2026-08-16）**：`conflux.research_failure.v1` 扩展 9 个失败分类码（lease_overrun / worker_init_failure / credential_recovery_failure / config_build_failure / model_build_failure / user_cancelled / system_deadline / final_commit_failure / execution_failure），诊断含 run ID、请求摘要、源码版本（code_revision）、失败阶段、已完成进度、输入配置哈希（semantic_hash）、重试安全性、保留产物、恢复动作、原始错误类型。终态与诊断引用同一事务：`SQLiteDatabase.transaction()`（显式所有权，兼容 sqlite3 legacy 隐式事务）+ queue 终态转移/RunStore 终态行/终态事件一次提交；写入失败整体回滚（注入测试证实）。期间发现并修复一个真实读竞态：expire_exhausted 先单独提交 queue=failed、RunStore 更新在第二个事务，两提交之间 get() 可见「queue=failed + run=pending（无诊断引用）」，改为同一事务后消失。final_commit 写入失败绝不发布无 Artifact 的 completed（无交付产物时 delivery_status=diagnostic_only 保证 has_report 一致）。
-- 唯一下一验收点：P1 阶段退出（§6.8 故障注入矩阵全行覆盖 + §6.9 最小验证集 + 全量离线测试；随后进入 P2 standard 预算——P2 付费 live 运行需用户明确授权）。
+- **P1 阶段退出（2026-08-16）**：§6.8 矩阵 8 行覆盖、§6.9 最小验证集（三文件聚焦 + eval_job_recovery + 全量）、§6.10 六条验收全部满足——20 次进程终止恢复 20/20、无重复执行、全部终态具备报告或结构化诊断、list/详情/RunStore/JobQueue/事件五视图一致（新增一致性测试）、全量离线通过。PID 50348 冻结版本验证完成（冻结于 `38eee94`，健康；P1 修复需重启后生效）。
+- 唯一下一验收点：P2.1 standard 预算与上下文收敛——**付费 live 运行需用户明确授权后启动**。
 
 
 ### 18.3 当前决策
@@ -1127,11 +1129,13 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 | P1.3 运行冻结 manifest（引用式凭证 + 重启 fail-closed + 配置漂移检测） | 满足 §6.6：重启后要么同一冻结配置恢复，要么明确失败；provider/model/Prompt 不得漂移 | 2026-08-16 |
 | P1.4 终态诊断统一为 `conflux.research_failure.v1` + 9 个失败分类码，诊断契约字段齐全（run ID/请求摘要/源码版本/失败阶段/进度/输入配置哈希/重试安全/保留产物/恢复动作/原始错误类型） | 满足 §6.7 诊断字段要求 | 2026-08-16 |
 | 终态与诊断引用同一事务（SQLiteDatabase.transaction() 显式所有权 + queue/RunStore/事件一次提交，失败整体回滚） | 满足 §6.7「同一事务可见」；实测修复 lease 超限时 queue=failed/run=pending 读竞态 | 2026-08-16 |
+| P1 阶段退出：§6.10 全部满足，进入 P2 pending | 故障矩阵/20 次恢复/无重复执行/终态三选一/五视图一致/全量离线全部通过；PID 50348 冻结版本验证完成 | 2026-08-16 |
+| P2 需用户明确授权后启动付费 live 运行 | §7.2 前置条件 + 计划 §1.3 非目标「未冻结时不启动付费正式实验」 | 2026-08-16 |
 
 ### 18.4 当前未验证项
 
-- 当前运行服务（PID 50348）与工作树代码不一致，P1 结束前需在真实进程上做一次冻结版本验证。
-- standard token 耗尽的逐阶段占用与上下文重复比例。
+- standard token 耗尽的逐阶段占用与上下文重复比例（P2 目标）。
+- P1 修复在 PID 50348 上的生效验证（服务重启时点由用户决定；当前冻结版本 `38eee94` 健康，见 `p15_daemon_freeze_probe.json`）。
 - 当前 Workbench 在真实 320px、200% 缩放和键盘流程下的表现。
 - 第二个真实项目的完整 P3 闭环和 P6 可用性结果。
 - 当前 Provider 对具体模型 revision 的可验证证据（P1.3 已如实标记 `model_revision_unverified`，等待 Provider 提供可验证 revision 证据）。
@@ -1144,6 +1148,38 @@ Backlog 项只有在 P6 后出现独立真实需求、收益和验收方法时�
 - 不先做单一 ASGI 大迁移。
 
 ## 19. 阶段检查点
+
+### 2026-08-16 18:40 - P1 阶段退出检查点（completed）
+
+- 当前目标：P1 阶段验收（§6.8 故障注入矩阵 + §6.9 最小验证集 + §6.10 六条验收标准）——确认任务提交/排队/执行/超时/取消/进程终止/重启后的结果一致且可解释。
+- 当前阶段：P1 `completed`；下一阶段 P2 standard 预算 `pending`（付费 live 运行需用户明确授权）。
+- 状态：completed
+- 源码版本：`9ade69d`（main；阶段退出证据与一致性测试随本轮提交，见 git log）
+- 允许修改范围：三个测试文件 + 本文件状态与检查点部分（阶段退出不新增产品代码路径）。
+- 本轮非目标：不修改研究 Prompt/检索/报告；不启动真实模型调用；不启动 P2；不动 PID 50348。
+
+#### 已完成证据
+- §6.10-1 故障矩阵：`p14_fault_matrix.json` 8 行逐行映射到测试，全部通过并保留数据库/事件/Artifact 证据。
+- §6.10-2 进程终止恢复 20 次独立复跑：`p15_recovery_repeat.json` → **20/20 passed**（每轮 19.8–23.6s，无偶发失败；P1.1/P1.2 各另有 20/20 记录）。
+- §6.10-3 无重复执行：eval_job_recovery `duplicate_execution_rate=0` + P1.2 20 并发同键只产生一个 run。
+- §6.10-4 终态三选一：completed_diagnostic（有限报告）/其余终态全部携带 `conflux.research_failure.v1` 诊断（`test_completed_diagnostic_run_still_has_no_failure_diagnostic` 证伪多余诊断）。
+- §6.10-5 终态一致性：新增 `test_terminal_states_consistent_across_list_detail_queue_runstore`——failed/timed_out/completed_diagnostic/cancelled 4 终态 × list/详情/RunStore/JobQueue/事件 5 视图一致。
+- §6.10-6 全量离线：最终一轮 **778 passed / 0 failed / 550 warnings / 421.34s**（`p15_full_pytest.log`；聚焦三件套 **117 passed** / 39.20s，`p15_focused_pytest.{log,xml}`；较 P1.4 基线 +1 一致性测试）。
+- PID 50348 冻结版本验证（§18.4 遗留项）：`p15_daemon_freeze_probe.json`——服务冻结于 `38eee94`（P4-E1，2026-08-14 13:48，早于全部 P1 提交）；8765 工作台 /api/status、/api/sessions 与 9765 chat-v2 /api/chat/health 均正常；只读探针，未停止/未修改服务；P1 修复在重启后生效（重启时机由用户决定）。
+
+#### 未完成或阻塞
+- 无阻塞。P2 前置条件：用户明确授权付费 live 运行（§7.2）。
+
+#### 决策、推断与待验证假设
+- 事实：P1 全部工作包离线验收通过；运行服务仍冻结在 P4-era 修订（`38eee94`），与工作树不一致属预期，已如实记录。
+- 推断：P1 修复对运行服务的生效依赖一次重启；重启前旧服务仍按旧语义运行。
+- 假设及验证方法：无新增待验证假设。
+
+#### 唯一下一验收点
+- P2.1 standard 预算与上下文收敛（需用户明确授权后启动付费 live 运行）。
+
+#### 不应自动扩展
+- 不启动 P2 付费 live 运行；不重启/不停止 PID 50348；不做 ASGI 迁移。
 
 ### 2026-08-16 18:10 - P1.4 检查点（completed）
 

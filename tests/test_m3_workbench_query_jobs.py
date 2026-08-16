@@ -1075,4 +1075,63 @@ def test_completed_diagnostic_run_still_has_no_failure_diagnostic(
         db.close()
     assert any(e["stage"] == "final_commit" and e["status"] == "completed" for e in events)
 
+def test_terminal_states_consistent_across_list_detail_queue_runstore(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """§6.10：列表、详情、RunStore 与 JobQueue 对每个终态一致，且诊断引用齐全。"""
+    from conflux import __main__ as cli
+    from conflux.workbench.jobs import _JobTimedOut
+
+    def mixed_query(query, **kwargs):
+        if "fail me" in query:
+            raise ValueError("terminal consistency probe")
+        if "timeout me" in query:
+            raise _JobTimedOut("terminal consistency probe")
+        return _fake_query_command(query, **kwargs)
+
+    monkeypatch.setattr(cli, "query_command", mixed_query)
+    db_path = tmp_path / "conflux.db"
+
+    # pending → cancelled（不经过 worker，cancel() 同步补齐诊断）
+    idle = JobManager(db_path=db_path, start_worker=False)
+    run_cancel = idle.submit("cancel me", {"depth": "quick"})["run_id"]
+    assert idle.cancel(run_cancel) is True
+
+    # failed / timed_out / completed_diagnostic（worker 驱动）
+    worker = JobManager(db_path=db_path, poll_interval=0.02)
+    run_failed = worker.submit("fail me", {"depth": "quick"})["run_id"]
+    run_timeout = worker.submit("timeout me", {"depth": "quick"})["run_id"]
+    run_complete = worker.submit("complete me", {"depth": "quick"})["run_id"]
+    _wait_for_status(worker, run_failed, {"failed"})
+    _wait_for_status(worker, run_timeout, {"timed_out"})
+    _wait_for_status(worker, run_complete, {"completed_diagnostic"})
+    worker.close()
+
+    expected = {
+        run_failed: {"public": "failed", "queue": "failed"},
+        run_timeout: {"public": "timed_out", "queue": "completed"},
+        run_complete: {"public": "completed_diagnostic", "queue": "completed"},
+        run_cancel: {"public": "cancelled", "queue": "cancelled"},
+    }
+    listing = {item["run_id"]: item["status"] for item in worker.list(limit=50)}
+    for run_id, exp in expected.items():
+        detail = worker.get(run_id)
+        assert detail is not None and detail["status"] == exp["public"]
+        assert listing[run_id] == exp["public"]
+        db = SQLiteDatabase(db_path).connect()
+        try:
+            queued = JobQueue(db).get(run_id)
+            run = RunStore(db).get(run_id)
+            events = EventStore(db).list(run_id=run_id)
+        finally:
+            db.close()
+        assert queued["status"] == exp["queue"]
+        assert run["status"] == exp["public"]
+        assert dict(run.get("metadata") or {}).get("public_status") == exp["public"]
+        assert events, f"{run_id} 终态缺少事件"
+        if exp["public"] in {"failed", "cancelled", "timed_out"}:
+            assert detail["artifacts"].get("diagnostic_json_path"), (
+                f"{run_id} 终态缺少结构化诊断引用"
+            )
+
 
